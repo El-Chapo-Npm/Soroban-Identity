@@ -1,8 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, contracterror, symbol_short,
-    Address, Bytes, BytesN, Env, Map, String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN, Env,
+    Map, String, Symbol, Vec,
 };
 
 // ── Storage keys ──────────────────────────────────────────────────────────────
@@ -12,6 +12,8 @@ const ISSUER: Symbol = symbol_short!("ISSUER");
 const CRED: Symbol = symbol_short!("CRED");
 const IDSEQ: Symbol = symbol_short!("IDSEQ");
 const REVOKED_CNT: Symbol = symbol_short!("REVCNT");
+const CRED_CNT: Symbol = symbol_short!("CREDCNT");
+const TOTAL_CNT: Symbol = symbol_short!("TOTCNT");
 
 const MAX_CREDENTIALS_PER_TYPE_PER_ISSUER: u32 = 5;
 
@@ -22,17 +24,17 @@ const MAX_ISSUERS: u32 = 100;
 #[contracterror]
 #[derive(Clone, Debug, PartialEq, Copy)]
 pub enum ContractError {
-    AlreadyInitialized       = 1,
-    UnauthorizedIssuer       = 2,
-    CredentialNotFound       = 3,
-    CredentialRevoked        = 4,
+    AlreadyInitialized = 1,
+    UnauthorizedIssuer = 2,
+    CredentialNotFound = 3,
+    CredentialRevoked = 4,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
 
 /// Storage usage statistics for the credential manager.
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CredentialStorageStats {
     pub total_credentials: u32,
     pub revoked_credentials: u32,
@@ -51,7 +53,7 @@ pub enum CredentialType {
 
 /// A verifiable credential issued to a subject.
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Credential {
     /// Unique credential ID (hash)
     pub id: BytesN<32>,
@@ -95,7 +97,11 @@ impl CredentialManager {
     /// Transfer admin rights to a new address. Only the current admin can call this.
     pub fn transfer_admin(env: Env, current_admin: Address, new_admin: Address) {
         current_admin.require_auth();
-        let stored: Address = env.storage().instance().get(&ADMIN).expect("not initialized");
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .expect("not initialized");
         if stored != current_admin {
             panic!("not the admin");
         }
@@ -107,9 +113,13 @@ impl CredentialManager {
     }
 
     /// Upgrade the contract WASM. Only the admin can call this.
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: Bytes) {
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
         admin.require_auth();
-        let stored: Address = env.storage().instance().get(&ADMIN).expect("not initialized");
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .expect("not initialized");
         if stored != admin {
             panic!("not the admin");
         }
@@ -126,7 +136,8 @@ impl CredentialManager {
             }
             issuers.push_back(issuer.clone());
             env.storage().instance().set(&ISSUER, &issuers);
-            env.events().publish((ISSUER, symbol_short!("added")), issuer);
+            env.events()
+                .publish((ISSUER, symbol_short!("added")), issuer);
         }
     }
 
@@ -169,12 +180,19 @@ impl CredentialManager {
 
         // Count only active (non-revoked, non-expired) credentials
         let now = env.ledger().timestamp();
-        let active_count = existing.iter().filter(|id| {
-            match env.storage().persistent().get::<(Symbol, BytesN<32>), Credential>(&Self::cred_key(id)) {
-                None => false,
-                Some(c) => !c.revoked && (c.expires_at == 0 || c.expires_at > now),
-            }
-        }).count() as u32;
+        let active_count = existing
+            .iter()
+            .filter(|id| {
+                match env
+                    .storage()
+                    .persistent()
+                    .get::<(Symbol, BytesN<32>), Credential>(&Self::cred_key(id))
+                {
+                    None => false,
+                    Some(c) => !c.revoked && (c.expires_at == 0 || c.expires_at > now),
+                }
+            })
+            .count() as u32;
 
         if active_count >= MAX_CREDENTIALS_PER_TYPE_PER_ISSUER {
             panic!("CredentialLimitExceeded");
@@ -201,6 +219,8 @@ impl CredentialManager {
 
         let key = Self::cred_key(&id);
         env.storage().persistent().set(&key, &credential);
+        let total: u32 = env.storage().instance().get(&TOTAL_CNT).unwrap_or(0);
+        env.storage().instance().set(&TOTAL_CNT, &(total + 1));
 
         // Index credential under subject
         let mut subject_creds = Self::fetch_subject_creds(&env, &subject);
@@ -227,7 +247,11 @@ impl CredentialManager {
     }
 
     /// Revoke a credential. Only the original issuer can revoke.
-    pub fn revoke_credential(env: Env, issuer: Address, credential_id: BytesN<32>) -> Result<(), ContractError> {
+    pub fn revoke_credential(
+        env: Env,
+        issuer: Address,
+        credential_id: BytesN<32>,
+    ) -> Result<(), ContractError> {
         issuer.require_auth();
 
         let key = Self::cred_key(&credential_id);
@@ -241,22 +265,27 @@ impl CredentialManager {
             return Err(ContractError::UnauthorizedIssuer);
         }
 
-        cred.revoked = true;
-        env.storage().persistent().set(&key, &cred);
-        env.events().publish(
-            (CRED, symbol_short!("revoked")),
-            (credential_id, issuer),
-        );
-        let revoked: u32 = env.storage().instance().get(&REVOKED_CNT).unwrap_or(0);
-        env.storage().instance().set(&REVOKED_CNT, &(revoked + 1));
-        env.events().publish((CRED, symbol_short!("revoked")), credential_id);
+        if !cred.revoked {
+            cred.revoked = true;
+            env.storage().persistent().set(&key, &cred);
+
+            let revoked: u32 = env.storage().instance().get(&REVOKED_CNT).unwrap_or(0);
+            env.storage().instance().set(&REVOKED_CNT, &(revoked + 1));
+        }
+
+        env.events()
+            .publish((CRED, symbol_short!("revoked")), (credential_id, issuer));
         Ok(())
     }
 
     /// Verify a credential is valid (not revoked, not expired).
     pub fn verify_credential(env: Env, credential_id: BytesN<32>) -> bool {
         let key = Self::cred_key(&credential_id);
-        match env.storage().persistent().get::<(Symbol, BytesN<32>), Credential>(&key) {
+        match env
+            .storage()
+            .persistent()
+            .get::<(Symbol, BytesN<32>), Credential>(&key)
+        {
             None => false,
             Some(cred) => {
                 if cred.revoked {
@@ -274,19 +303,32 @@ impl CredentialManager {
     /// Returns true only when the credential exists, is valid, and the hash matches.
     pub fn verify_claims_hash(env: Env, credential_id: BytesN<32>, hash: BytesN<32>) -> bool {
         let key = Self::cred_key(&credential_id);
-        match env.storage().persistent().get::<(Symbol, BytesN<32>), Credential>(&key) {
+        match env
+            .storage()
+            .persistent()
+            .get::<(Symbol, BytesN<32>), Credential>(&key)
+        {
             None => false,
-            Some(cred) => cred.claims_hash == hash,
+            Some(cred) => {
+                !cred.revoked
+                    && (cred.expires_at == 0 || env.ledger().timestamp() <= cred.expires_at)
+                    && cred.claims_hash == hash
+            }
         }
     }
 
-    /// Get a credential by ID.
-    pub fn get_credential(env: Env, credential_id: BytesN<32>) -> Credential {
     /// Get a credential by ID. Returns CredentialNotFound if it never existed,
     /// or CredentialRevoked if it was issued but later revoked.
-    pub fn get_credential(env: Env, credential_id: BytesN<32>) -> Result<Credential, ContractError> {
+    pub fn get_credential(
+        env: Env,
+        credential_id: BytesN<32>,
+    ) -> Result<Credential, ContractError> {
         let key = Self::cred_key(&credential_id);
-        match env.storage().persistent().get::<(Symbol, BytesN<32>), Credential>(&key) {
+        match env
+            .storage()
+            .persistent()
+            .get::<(Symbol, BytesN<32>), Credential>(&key)
+        {
             None => Err(ContractError::CredentialNotFound),
             Some(cred) if cred.revoked => Err(ContractError::CredentialRevoked),
             Some(cred) => Ok(cred),
@@ -311,7 +353,7 @@ impl CredentialManager {
 
     /// Get storage usage statistics.
     pub fn get_storage_stats(env: Env) -> CredentialStorageStats {
-        let total: u32 = env.storage().instance().get(&IDSEQ).unwrap_or(0);
+        let total: u32 = env.storage().instance().get(&TOTAL_CNT).unwrap_or(0);
         let revoked: u32 = env.storage().instance().get(&REVOKED_CNT).unwrap_or(0);
         CredentialStorageStats {
             total_credentials: total,
@@ -323,7 +365,11 @@ impl CredentialManager {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     fn require_admin(env: &Env) {
-        let admin: Address = env.storage().instance().get(&ADMIN).expect("not initialized");
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .expect("not initialized");
         admin.require_auth();
     }
 
@@ -369,8 +415,17 @@ impl CredentialManager {
         (symbol_short!("sub"), subject.clone())
     }
 
-    fn issuer_type_key(issuer: &Address, subject: &Address, credential_type: &CredentialType) -> (Symbol, Address, Address, CredentialType) {
-        (symbol_short!("it"), issuer.clone(), subject.clone(), credential_type.clone())
+    fn issuer_type_key(
+        issuer: &Address,
+        subject: &Address,
+        credential_type: &CredentialType,
+    ) -> (Symbol, Address, Address, CredentialType) {
+        (
+            symbol_short!("it"),
+            issuer.clone(),
+            subject.clone(),
+            credential_type.clone(),
+        )
     }
 }
 
@@ -379,7 +434,10 @@ impl CredentialManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::{Address as _, Ledger as _}, Bytes, Env, Map};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger as _},
+        Bytes, Env, Map,
+    };
 
     fn setup() -> (Env, Address, CredentialManagerClient<'static>) {
         let env = Env::default();
@@ -431,7 +489,13 @@ mod tests {
         let claims_hash = BytesN::from_array(&env, &[0u8; 32]);
         let sig = Bytes::from_array(&env, &[0u8; 64]);
         let cred_id = client.issue_credential(
-            &issuer, &subject, &CredentialType::Kyc, &claims, &claims_hash, &sig, &0u64,
+            &issuer,
+            &subject,
+            &CredentialType::Kyc,
+            &claims,
+            &claims_hash,
+            &sig,
+            &0u64,
         );
 
         client.revoke_credential(&issuer, &cred_id);
@@ -451,11 +515,19 @@ mod tests {
         let claims: Map<String, String> = Map::new(&env);
         let claims_hash = BytesN::from_array(&env, &[0u8; 32]);
         let sig = Bytes::from_array(&env, &[0u8; 64]);
-        // expires_at is in the past (timestamp 1 is before the default ledger time)
-        let past_expiry = env.ledger().timestamp().saturating_sub(1);
+        env.ledger().with_mut(|li| {
+            li.timestamp = 10;
+        });
+        let past_expiry = 1u64;
 
         client.issue_credential(
-            &issuer, &subject, &CredentialType::Kyc, &claims, &claims_hash, &sig, &past_expiry,
+            &issuer,
+            &subject,
+            &CredentialType::Kyc,
+            &claims,
+            &claims_hash,
+            &sig,
+            &past_expiry,
         );
     }
 
@@ -473,7 +545,13 @@ mod tests {
         let sig = Bytes::from_array(&env, &[0u8; 64]);
 
         client.issue_credential(
-            &unauthorized, &subject, &CredentialType::Kyc, &claims, &claims_hash, &sig, &0u64,
+            &unauthorized,
+            &subject,
+            &CredentialType::Kyc,
+            &claims,
+            &claims_hash,
+            &sig,
+            &0u64,
         );
     }
 
@@ -492,7 +570,13 @@ mod tests {
         let expires_at = env.ledger().timestamp() + 100;
 
         let cred_id = client.issue_credential(
-            &issuer, &subject, &CredentialType::Kyc, &claims, &claims_hash, &sig, &expires_at,
+            &issuer,
+            &subject,
+            &CredentialType::Kyc,
+            &claims,
+            &claims_hash,
+            &sig,
+            &expires_at,
         );
 
         // Valid before expiry
@@ -523,7 +607,13 @@ mod tests {
         let claims_hash = BytesN::from_array(&env, &[0u8; 32]);
         let sig = Bytes::from_array(&env, &[0u8; 64]);
         let cred_id = client.issue_credential(
-            &issuer1, &subject, &CredentialType::Kyc, &claims, &claims_hash, &sig, &0u64,
+            &issuer1,
+            &subject,
+            &CredentialType::Kyc,
+            &claims,
+            &claims_hash,
+            &sig,
+            &0u64,
         );
 
         // issuer2 attempts to revoke a credential they did not issue
@@ -534,7 +624,7 @@ mod tests {
     /// initialize must return AlreadyInitialized on a second call.
     #[test]
     fn test_double_initialize_returns_error() {
-        let (env, admin, client) = setup();
+        let (_env, admin, client) = setup();
         let result = client.try_initialize(&admin);
         assert_eq!(result, Err(Ok(ContractError::AlreadyInitialized)));
     }
@@ -558,10 +648,16 @@ mod tests {
         let expires_at = 9999u64;
 
         let cred_id = client.issue_credential(
-            &issuer, &subject, &CredentialType::Achievement, &claims, &claims_hash, &sig, &expires_at,
+            &issuer,
+            &subject,
+            &CredentialType::Achievement,
+            &claims,
+            &claims_hash,
+            &sig,
+            &expires_at,
         );
 
-        let cred = client.get_credential(&cred_id).unwrap();
+        let cred = client.get_credential(&cred_id);
         assert_eq!(cred.issuer, issuer);
         assert_eq!(cred.subject, subject);
         assert_eq!(cred.credential_type, CredentialType::Achievement);
@@ -586,7 +682,7 @@ mod tests {
     #[should_panic]
     fn test_transfer_admin_unauthorized() {
         let (env, _admin, client) = setup();
-        let attacker  = Address::generate(&env);
+        let attacker = Address::generate(&env);
         let new_admin = Address::generate(&env);
 
         client.transfer_admin(&attacker, &new_admin);
@@ -652,6 +748,31 @@ mod tests {
     /// verify_claims_hash returns true for the correct hash and false for a wrong one.
     #[test]
     fn test_verify_claims_hash() {
+        let (env, _admin, client) = setup();
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_issuer(&issuer);
+
+        let claims: Map<String, String> = Map::new(&env);
+        let correct_hash = BytesN::from_array(&env, &[7u8; 32]);
+        let wrong_hash = BytesN::from_array(&env, &[8u8; 32]);
+        let sig = Bytes::from_array(&env, &[0u8; 64]);
+
+        let cred_id = client.issue_credential(
+            &issuer,
+            &subject,
+            &CredentialType::Kyc,
+            &claims,
+            &correct_hash,
+            &sig,
+            &0u64,
+        );
+
+        assert!(client.verify_claims_hash(&cred_id, &correct_hash));
+        assert!(!client.verify_claims_hash(&cred_id, &wrong_hash));
+    }
+
     /// get_storage_stats returns correct credential counts.
     #[test]
     fn test_get_storage_stats() {
@@ -661,26 +782,32 @@ mod tests {
         let subject = Address::generate(&env);
         client.add_issuer(&issuer);
 
-        let claims: Map<String, String> = Map::new(&env);
-        let correct_hash = BytesN::from_array(&env, &[7u8; 32]);
-        let wrong_hash   = BytesN::from_array(&env, &[8u8; 32]);
-        let sig = Bytes::from_array(&env, &[0u8; 64]);
-
-        let cred_id = client.issue_credential(
-            &issuer, &subject, &CredentialType::Kyc, &claims, &correct_hash, &sig, &0u64,
-        );
-
-        assert!(client.verify_claims_hash(&cred_id, &correct_hash));
-        assert!(!client.verify_claims_hash(&cred_id, &wrong_hash));
-    }
         let stats = client.get_storage_stats();
         assert_eq!(stats.total_credentials, 0);
         assert_eq!(stats.revoked_credentials, 0);
         assert_eq!(stats.active_credentials, 0);
 
         let sig = Bytes::from_array(&env, &[0u8; 64]);
-        let id1 = client.issue_credential(&issuer, &subject, &CredentialType::Kyc, &Map::new(&env), &sig, &0u64);
-        let _id2 = client.issue_credential(&issuer, &subject, &CredentialType::Achievement, &Map::new(&env), &sig, &0u64);
+        let hash1 = BytesN::from_array(&env, &[1u8; 32]);
+        let hash2 = BytesN::from_array(&env, &[2u8; 32]);
+        let id1 = client.issue_credential(
+            &issuer,
+            &subject,
+            &CredentialType::Kyc,
+            &Map::new(&env),
+            &hash1,
+            &sig,
+            &0u64,
+        );
+        let _id2 = client.issue_credential(
+            &issuer,
+            &subject,
+            &CredentialType::Achievement,
+            &Map::new(&env),
+            &hash2,
+            &sig,
+            &0u64,
+        );
 
         let stats = client.get_storage_stats();
         assert_eq!(stats.total_credentials, 2);

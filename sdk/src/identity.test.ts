@@ -18,7 +18,7 @@ vi.mock('@stellar/stellar-sdk', () => ({
         .mockResolvedValue({ status: 'PENDING', hash: 'abc123' }),
       getTransaction: vi.fn().mockResolvedValue({
         status: 'SUCCESS',
-        returnValue: { id: 'did:stellar:GABC' },
+        returnValue: 'did:stellar:GABC',
       }),
     })),
     Api: {
@@ -115,11 +115,6 @@ describe('IdentityClient', () => {
   });
 
   it('createDid — happy path returns the new DID string', async () => {
-    // Bypass the real 2s polling delay
-    (client as any).waitForConfirmation = vi.fn().mockResolvedValue({
-      returnValue: 'did:stellar:GABC',
-    });
-
     const keypair = { publicKey: () => 'GABC', sign: vi.fn() } as any;
 
     const result = await client.createDid(keypair, { service: 'https://example.com' });
@@ -128,9 +123,11 @@ describe('IdentityClient', () => {
   });
 
   it('createDid — throws descriptive error when DID already exists', async () => {
-    (client as any).waitForConfirmation = vi.fn().mockRejectedValue(
-      new Error('DID already exists for this address')
-    );
+    const server = (client as any).server;
+    server.getTransaction.mockResolvedValueOnce({
+      status: 'FAILED',
+      resultXdr: 'DID already exists for this address',
+    });
 
     const keypair = { publicKey: () => 'GABC', sign: vi.fn() } as any;
 

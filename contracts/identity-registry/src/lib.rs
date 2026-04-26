@@ -1,20 +1,20 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, contracterror, symbol_short,
-    Address, Bytes, Env, Map, String, Symbol,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Map,
+    String, Symbol,
 };
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 #[contracterror]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ContractError {
-    DidNotFound        = 1,
-    DidDeactivated     = 2,
-    MetadataTooLong    = 3,
+    DidNotFound = 1,
+    DidDeactivated = 2,
+    MetadataTooLong = 3,
     AlreadyInitialized = 4,
-    EmptyMetadata      = 5,
+    EmptyMetadata = 5,
 }
 
 // ── Storage keys ──────────────────────────────────────────────────────────────
@@ -32,7 +32,7 @@ const TTL_LEDGERS: u32 = 6_312_000;
 
 /// Storage usage statistics for the identity registry.
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct IdentityStorageStats {
     pub total_dids: u32,
     pub active_dids: u32,
@@ -40,7 +40,7 @@ pub struct IdentityStorageStats {
 
 /// W3C-aligned DID document stored on-chain.
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DidDocument {
     /// did:stellar:<address>
     pub id: String,
@@ -77,7 +77,11 @@ impl IdentityRegistry {
     /// Transfer admin rights to a new address. Only the current admin can call this.
     pub fn transfer_admin(env: Env, current_admin: Address, new_admin: Address) {
         current_admin.require_auth();
-        let stored: Address = env.storage().instance().get(&ADMIN).expect("not initialized");
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .expect("not initialized");
         if stored != current_admin {
             panic!("not the admin");
         }
@@ -89,9 +93,13 @@ impl IdentityRegistry {
     }
 
     /// Upgrade the contract WASM. Only the admin can call this.
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: Bytes) {
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
         admin.require_auth();
-        let stored: Address = env.storage().instance().get(&ADMIN).expect("not initialized");
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .expect("not initialized");
         if stored != admin {
             panic!("not the admin");
         }
@@ -101,7 +109,11 @@ impl IdentityRegistry {
     // ── DID management ────────────────────────────────────────────────────────
 
     /// Create a new DID for the caller.
-    pub fn create_did(env: Env, controller: Address, metadata: Map<String, String>) -> Result<String, ContractError> {
+    pub fn create_did(
+        env: Env,
+        controller: Address,
+        metadata: Map<String, String>,
+    ) -> Result<String, ContractError> {
         controller.require_auth();
 
         let storage = env.storage().persistent();
@@ -127,20 +139,25 @@ impl IdentityRegistry {
 
         storage.set(&key, &doc);
         storage.extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
-        
+
         // Increment active DID count and total DID count
         let count: u32 = env.storage().instance().get(&DID_COUNT).unwrap_or(0);
         env.storage().instance().set(&DID_COUNT, &(count + 1));
         let total: u32 = env.storage().instance().get(&TOTAL_DIDS).unwrap_or(0);
         env.storage().instance().set(&TOTAL_DIDS, &(total + 1));
-        
-        env.events().publish((IDENTITY, symbol_short!("created")), (controller, now));
+
+        env.events()
+            .publish((IDENTITY, symbol_short!("created")), (controller, now));
 
         Ok(did_id)
     }
 
     /// Update metadata on an existing DID.
-    pub fn update_did(env: Env, controller: Address, metadata: Map<String, String>) -> Result<(), ContractError> {
+    pub fn update_did(
+        env: Env,
+        controller: Address,
+        metadata: Map<String, String>,
+    ) -> Result<(), ContractError> {
         controller.require_auth();
 
         if metadata.is_empty() {
@@ -160,11 +177,10 @@ impl IdentityRegistry {
         storage.extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
 
         // Hash the DID id + updated_at as a deterministic metadata fingerprint
-        let mut hash_input = Bytes::new(&env);
-        hash_input.extend_from_slice(&doc.id.clone().into_bytes());
-        hash_input.extend_from_array(&doc.updated_at.to_be_bytes());
-        let meta_hash = env.crypto().sha256(&hash_input);
-        env.events().publish((IDENTITY, symbol_short!("updated")), (controller, meta_hash));
+        env.events().publish(
+            (IDENTITY, symbol_short!("updated")),
+            (controller, doc.updated_at),
+        );
         Ok(())
     }
 
@@ -181,20 +197,24 @@ impl IdentityRegistry {
 
         storage.set(&key, &doc);
         storage.extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
-        
+
         // Decrement DID count
         let count: u32 = env.storage().instance().get(&DID_COUNT).unwrap_or(0);
         if count > 0 {
             env.storage().instance().set(&DID_COUNT, &(count - 1));
         }
-        
-        env.events().publish((IDENTITY, symbol_short!("deactivated")), (controller, doc.updated_at));
+
+        env.events().publish(
+            (IDENTITY, symbol_short!("deact")),
+            (controller, doc.updated_at),
+        );
     }
 
     /// Resolve a DID document by controller address.
     pub fn resolve_did(env: Env, controller: Address) -> Result<DidDocument, ContractError> {
         let key = Self::did_key(&env, &controller);
-        let doc: DidDocument = env.storage()
+        let doc: DidDocument = env
+            .storage()
             .persistent()
             .get(&key)
             .ok_or(ContractError::DidNotFound)?;
@@ -237,24 +257,20 @@ impl IdentityRegistry {
         Ok(())
     }
 
-    fn did_key(env: &Env, controller: &Address) -> Bytes {
-        // Use the raw address bytes as the storage key
-        let mut key = Bytes::new(env);
-        key.extend_from_array(&[b'd', b'i', b'd', b':']);
-        // append address bytes — Address implements IntoVal<Env, Bytes> indirectly
-        // so we serialize via the env
-        let addr_bytes = controller.to_string().into_bytes();
-        key.extend_from_slice(&addr_bytes);
-        key
+    fn did_key(_env: &Env, controller: &Address) -> (Symbol, Address) {
+        (IDENTITY, controller.clone())
     }
 
     fn build_did_id(env: &Env, controller: &Address) -> String {
         // did:stellar:<bech32-address>
-        let prefix = String::from_str(env, "did:stellar:");
         let addr_str = controller.to_string();
-        let mut result = prefix.into_bytes();
-        result.extend_from_slice(&addr_str.into_bytes());
-        String::from_bytes(env, &result)
+        let mut addr_bytes = [0u8; 56];
+        addr_str.copy_into_slice(&mut addr_bytes);
+
+        let mut did_bytes = [0u8; 68];
+        did_bytes[..12].copy_from_slice(b"did:stellar:");
+        did_bytes[12..].copy_from_slice(&addr_bytes);
+        String::from_bytes(env, &did_bytes)
     }
 }
 
@@ -295,7 +311,9 @@ mod tests {
         let metadata: Map<String, String> = Map::new(&env);
 
         let did_id = client.create_did(&user, &metadata);
-        assert!(did_id.to_string().contains("did:stellar:"));
+        let mut did_bytes = [0u8; 68];
+        did_id.copy_into_slice(&mut did_bytes);
+        assert_eq!(&did_bytes[..12], b"did:stellar:");
 
         let doc = client.resolve_did(&user);
         assert!(doc.active);
@@ -401,7 +419,10 @@ mod tests {
         let mut metadata: Map<String, String> = Map::new(&env);
         // 65-character key
         metadata.set(
-            String::from_str(&env, "aaaaaaaaaabbbbbbbbbbccccccccccddddddddddeeeeeeeeeefffff1234567890"),
+            String::from_str(
+                &env,
+                "aaaaaaaaaabbbbbbbbbbccccccccccddddddddddeeeeeeeeeefffff1234567890",
+            ),
             String::from_str(&env, "value"),
         );
 
@@ -423,7 +444,10 @@ mod tests {
 
         let user = Address::generate(&env);
         let mut metadata: Map<String, String> = Map::new(&env);
-        metadata.set(String::from_str(&env, "key"), String::from_str(&env, "value"));
+        metadata.set(
+            String::from_str(&env, "key"),
+            String::from_str(&env, "value"),
+        );
         client.create_did(&user, &metadata);
 
         let result = client.try_update_did(&user, &Map::new(&env));
