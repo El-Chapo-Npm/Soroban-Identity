@@ -336,7 +336,11 @@ export default function IdentityPanel({ wallet, networkConfig }: Props) {
 
         {resolvedAddress && (
           <div style={{ marginTop: '0.75rem' }}>
-            <button onClick={() => setShowQr((v) => !v)}>
+            <button
+              onClick={() => setShowQr((v) => !v)}
+              onKeyDown={(e) => { if (e.key === 'Escape') setShowQr(false); }}
+              aria-expanded={showQr}
+            >
               {showQr ? 'Hide QR Code' : 'Show QR Code'}
             </button>
             <button
