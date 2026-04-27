@@ -3,6 +3,8 @@ import { QRCodeSVG } from 'qrcode.react';
 import type { WalletState } from '../hooks/useWallet';
 import type { ReputationRecord } from '../../../sdk/src/reputation';
 import type { ScoreHistoryEntry } from '../../../sdk/src/reputation';
+import type { FrontendNetworkConfig } from '../network';
+import { useAddressHistory } from '../hooks/useAddressHistory';
 import SkeletonCard from './SkeletonCard';
 import ReputationChart from './ReputationChart';
 
@@ -11,6 +13,7 @@ interface Props {
     connect: () => void;
     signTransaction: (xdr: string) => Promise<string>;
   };
+  networkConfig: FrontendNetworkConfig;
 }
 
 type NetworkError = {
@@ -25,7 +28,7 @@ type ContractError = {
 
 type ErrorState = NetworkError | ContractError | null;
 
-export default function IdentityPanel({ wallet }: Props) {
+export default function IdentityPanel({ wallet, networkConfig }: Props) {
   const [resolveAddress, setResolveAddress] = useState('');
   const [showHistory, setShowHistory] = useState(false);
   const { history, addAddress, clearHistory } = useAddressHistory();
@@ -73,6 +76,7 @@ export default function IdentityPanel({ wallet }: Props) {
     setNetworkError(null);
     try {
       // TODO: wire IdentityClient.resolveDid() from SDK
+      // const identity = new IdentityClient(networkConfig);
       await new Promise((r) => setTimeout(r, 800));
       const mock = {
         id: `did:stellar:${resolveAddress}`,

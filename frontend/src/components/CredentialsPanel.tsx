@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import type { CredentialType } from "../../../sdk/src/types";
 import type { WalletState } from "../hooks/useWallet";
+import type { FrontendNetworkConfig } from "../network";
 import { validateStellarAddress } from "../../../sdk/src/utils";
 import SkeletonCard from "./SkeletonCard";
 
@@ -9,6 +10,7 @@ interface Props {
     connect: () => void;
     signTransaction: (xdr: string) => Promise<string>;
   };
+  networkConfig: FrontendNetworkConfig;
 }
 
 type VerifyState =
@@ -20,6 +22,15 @@ type VerifyState =
   | "invalid";
 
 type FilterType = "All" | CredentialType;
+type CredentialStatus = "active" | "expired" | "revoked";
+type DemoCredential = {
+  id: string;
+  credentialType: CredentialType;
+  subject: string;
+  expiresAt: number;
+  claims: Record<string, string>;
+  revoked: boolean;
+};
 
 function formatExpiry(expiresAt: number): string {
   if (expiresAt === 0) return "No expiry";
@@ -59,13 +70,42 @@ function getExpiryStyle(expiresAt: number): React.CSSProperties {
   return { color: "var(--text-muted)" };
 }
 
+function isExpired(expiresAt: number): boolean {
+  return expiresAt > 0 && Date.now() / 1000 > expiresAt;
+}
+
+function getCredentialStatus(credential: DemoCredential): CredentialStatus {
+  if (credential.revoked) return "revoked";
+  if (isExpired(credential.expiresAt)) return "expired";
+  return "active";
+}
+
+function getStatusBadgeClass(status: CredentialStatus): string {
+  if (status === "revoked") return "badge badge-red";
+  if (status === "expired") return "badge badge-gray";
+  return "badge badge-green";
+}
+
+function getStatusLabel(status: CredentialStatus): string {
+  if (status === "revoked") return "Revoked";
+  if (status === "expired") return "Expired";
+  return "Active";
+}
+
+function getStatusSortRank(credential: DemoCredential): number {
+  const status = getCredentialStatus(credential);
+  if (status === "active") return 0;
+  if (status === "expired") return 1;
+  return 2;
+}
+
 // Mock credentials for demonstration — replace with SDK data when wired
-const MOCK_CREDENTIALS = [
-  { id: "abc001", credentialType: "Kyc" as CredentialType, subject: "GABC…", expiresAt: 0, claims: { name: "John Doe", country: "US" } },
-  { id: "abc002", credentialType: "Kyc" as CredentialType, subject: "GABC…", expiresAt: Math.floor((Date.now() + 12 * 24 * 60 * 60 * 1000) / 1000), claims: { verified: "true" } },
-  { id: "abc003", credentialType: "Reputation" as CredentialType, subject: "GABC…", expiresAt: Math.floor((Date.now() + 3 * 24 * 60 * 60 * 1000) / 1000), claims: { score: "850", level: "gold" } },
-  { id: "abc004", credentialType: "Achievement" as CredentialType, subject: "GABC…", expiresAt: Math.floor((Date.now() - 5 * 24 * 60 * 60 * 1000) / 1000), claims: {} },
-  { id: "abc005", credentialType: "Custom" as CredentialType, subject: "GABC…", expiresAt: Math.floor((Date.now() + 30 * 24 * 60 * 60 * 1000) / 1000), claims: { custom_field: "custom_value" } },
+const MOCK_CREDENTIALS: DemoCredential[] = [
+  { id: "abc001", credentialType: "Kyc", subject: "GABC…", expiresAt: 0, claims: { name: "John Doe", country: "US" }, revoked: false },
+  { id: "abc002", credentialType: "Kyc", subject: "GABC…", expiresAt: Math.floor((Date.now() + 12 * 24 * 60 * 60 * 1000) / 1000), claims: { verified: "true" }, revoked: false },
+  { id: "abc003", credentialType: "Reputation", subject: "GABC…", expiresAt: Math.floor((Date.now() + 3 * 24 * 60 * 60 * 1000) / 1000), claims: { score: "850", level: "gold" }, revoked: false },
+  { id: "abc004", credentialType: "Achievement", subject: "GABC…", expiresAt: Math.floor((Date.now() - 5 * 24 * 60 * 60 * 1000) / 1000), claims: {}, revoked: false },
+  { id: "abc005", credentialType: "Custom", subject: "GABC…", expiresAt: Math.floor((Date.now() + 30 * 24 * 60 * 60 * 1000) / 1000), claims: { custom_field: "custom_value" }, revoked: true },
 ];
 
 const FILTER_OPTIONS: FilterType[] = ["All", "Kyc", "Reputation", "Achievement", "Custom"];
@@ -77,12 +117,12 @@ const CREDENTIAL_TYPE_ICONS: Record<CredentialType, string> = {
   Custom: "📋",
 };
 
-function countByType(creds: typeof MOCK_CREDENTIALS, type: FilterType): number {
+function countByType(creds: DemoCredential[], type: FilterType): number {
   if (type === "All") return creds.length;
   return creds.filter((c) => c.credentialType === type).length;
 }
 
-export default function CredentialsPanel({ wallet }: Props) {
+export default function CredentialsPanel({ wallet, networkConfig }: Props) {
   const [credId, setCredId] = useState("");
   const [verifyState, setVerifyState] = useState<VerifyState>("idle");
   const [verifying, setVerifying] = useState(false);
@@ -101,7 +141,7 @@ export default function CredentialsPanel({ wallet }: Props) {
 
   const [searchAddress, setSearchAddress] = useState("");
   const [searchedAddress, setSearchedAddress] = useState<string | null>(null);
-  const [fetchedCredentials, setFetchedCredentials] = useState<typeof MOCK_CREDENTIALS | null>(null);
+  const [fetchedCredentials, setFetchedCredentials] = useState<DemoCredential[] | null>(null);
   const [fetching, setFetching] = useState(false);
 
   // Check if connected wallet is a registered issuer
@@ -137,6 +177,7 @@ export default function CredentialsPanel({ wallet }: Props) {
     setSearchedAddress(addr);
     try {
       // TODO: wire CredentialClient.getCredentialsBySubject() from SDK
+      // const credentials = new CredentialClient(networkConfig);
       await new Promise((r) => setTimeout(r, 600));
       // Mock: return credentials only for addresses that match existing mock subjects
       const results = MOCK_CREDENTIALS.filter((c) => c.subject === addr);
@@ -203,6 +244,10 @@ export default function CredentialsPanel({ wallet }: Props) {
     activeFilter === "All"
       ? displayCredentials
       : displayCredentials.filter((c) => c.credentialType === activeFilter);
+
+  const sortedCredentials = [...filteredCredentials].sort(
+    (a, b) => getStatusSortRank(a) - getStatusSortRank(b)
+  );
 
   const handleVerify = async () => {
     if (!credId.trim()) return;
@@ -323,7 +368,9 @@ export default function CredentialsPanel({ wallet }: Props) {
           </p>
         ) : (
           <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-            {filteredCredentials.map((cred) => (
+            {sortedCredentials.map((cred) => {
+              const status = getCredentialStatus(cred);
+              return (
               <li
                 key={cred.id}
                 style={{
@@ -332,40 +379,39 @@ export default function CredentialsPanel({ wallet }: Props) {
                   overflow: "hidden",
                 }}
               >
-                <div
-                  role="button"
-                  tabIndex={0}
+                <button
+                  type="button"
                   aria-expanded={expandedCredId === cred.id}
                   style={{
                     padding: "0.6rem 1rem",
                     display: "flex",
                     justifyContent: "space-between",
                     alignItems: "center",
+                    width: "100%",
                     fontSize: "0.85rem",
                     color: "var(--text)",
                     gap: "1rem",
                     cursor: "pointer",
+                    background: "var(--cred-item-bg)",
+                    border: 0,
+                    borderRadius: 0,
+                    textAlign: "left",
                   }}
                   onClick={() => setExpandedCredId(expandedCredId === cred.id ? null : cred.id)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      setExpandedCredId(expandedCredId === cred.id ? null : cred.id);
-                    } else if (e.key === "Escape") {
-                      setExpandedCredId(null);
-                    }
-                  }}
                 >
                   <span style={{ fontSize: "1.2rem", minWidth: "1.5rem" }}>
                     {CREDENTIAL_TYPE_ICONS[cred.credentialType] || "📋"}
                   </span>
                   <span style={{ fontFamily: "monospace", color: "var(--text-muted)" }}>{cred.id}</span>
                   <span className="badge badge-green">{cred.credentialType}</span>
+                  <span className={getStatusBadgeClass(status)}>
+                    {getStatusLabel(status)}
+                  </span>
                   <span style={getExpiryStyle(cred.expiresAt)}>{formatExpiry(cred.expiresAt)}</span>
                   <span style={{ marginLeft: "auto", fontSize: "1rem" }}>
                     {expandedCredId === cred.id ? "▼" : "▶"}
                   </span>
-                </div>
+                </button>
                 {expandedCredId === cred.id && (
                   <div style={{ padding: "0.75rem 1rem", borderTop: "1px solid var(--border-input)", background: "var(--card-bg-accent)" }}>
                     {Object.keys(cred.claims).length > 0 ? (
@@ -383,7 +429,8 @@ export default function CredentialsPanel({ wallet }: Props) {
                   </div>
                 )}
               </li>
-            ))}
+              );
+            })}
           </ul>
         )}
       </div>
