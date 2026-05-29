@@ -7,6 +7,7 @@ export {
   retryWithBackoff,
   checkConnection,
   validateStellarAddress,
+  computeCredentialId,
 } from './utils';
 export { ContractError } from './errors';
 export {
@@ -14,6 +15,7 @@ export {
   CREDENTIAL_MANAGER_ERRORS,
   REPUTATION_ERRORS,
 } from './error-codes';
+export { clearServerCache } from './base-client';
 export type {
   DidDocument,
   Credential,

@@ -11,6 +11,10 @@ import type { CallOptions, DidDocument, IdentityStorageStats, SorobanIdentityCon
 import { retryWithBackoff, validateStellarAddress, pollTransactionStatus } from "./utils";
 import { ContractError } from "./errors";
 import { IDENTITY_REGISTRY_ERRORS } from "./error-codes";
+import { getOrCreateServer } from "./base-client";
+
+// Dummy address used for lightweight initialization probes
+const PROBE_ADDRESS = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
 
 export class IdentityClient {
   private server: SorobanRpc.Server;
@@ -19,8 +23,40 @@ export class IdentityClient {
 
   constructor(config: SorobanIdentityConfig) {
     this.config = config;
-    this.server = new SorobanRpc.Server(config.rpcUrl);
+    this.server = getOrCreateServer(config.rpcUrl);
     this.contract = new Contract(config.identityRegistryId);
+  }
+
+  /**
+   * Returns true if the identity-registry contract has been initialized.
+   * Uses a lightweight read call; returns false on any contract-level error.
+   */
+  async isInitialized(): Promise<boolean> {
+    try {
+      const account = await this.server.getAccount(PROBE_ADDRESS);
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.networkPassphrase,
+      })
+        .addOperation(
+          this.contract.call(
+            "has_active_did",
+            nativeToScVal(PROBE_ADDRESS, { type: "address" })
+          )
+        )
+        .setTimeout(10)
+        .build();
+      const result = await this.server.simulateTransaction(tx);
+      if (SorobanRpc.Api.isSimulationError(result)) {
+        const err: string = (result as { error: string }).error ?? "";
+        if (err.includes("not initialized") || err.includes("NotInitialized") || err.includes("#0")) {
+          return false;
+        }
+      }
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**

@@ -21,6 +21,9 @@ import {
 import { SorobanTransactionBuilder } from './transaction-builder';
 import { ContractError } from './errors';
 import { REPUTATION_ERRORS } from './error-codes';
+import { getOrCreateServer } from './base-client';
+
+const PROBE_ADDRESS = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
 
 export interface ReputationRecord {
   subject: string;
@@ -43,8 +46,37 @@ export class ReputationClient {
 
   constructor(config: SorobanIdentityConfig) {
     this.config = config;
-    this.server = new SorobanRpc.Server(config.rpcUrl);
+    this.server = getOrCreateServer(config.rpcUrl);
     this.contract = new Contract(config.reputationId);
+  }
+
+  /** Returns true if the reputation contract has been initialized. */
+  async isInitialized(): Promise<boolean> {
+    try {
+      const account = await this.server.getAccount(PROBE_ADDRESS);
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.config.networkPassphrase,
+      })
+        .addOperation(
+          this.contract.call(
+            'passes_sybil_check_default',
+            nativeToScVal(PROBE_ADDRESS, { type: 'address' })
+          )
+        )
+        .setTimeout(10)
+        .build();
+      const result = await this.server.simulateTransaction(tx);
+      if (SorobanRpc.Api.isSimulationError(result)) {
+        const err: string = (result as { error: string }).error ?? '';
+        if (err.includes('not initialized') || err.includes('NotInitialized') || err.includes('#0')) {
+          return false;
+        }
+      }
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** Get the list of all registered reporters. */
