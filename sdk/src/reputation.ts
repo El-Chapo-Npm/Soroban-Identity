@@ -19,7 +19,7 @@ import {
   pollTransactionStatus,
 } from './utils';
 import { SorobanTransactionBuilder } from './transaction-builder';
-import { ContractError } from './errors';
+import { ContractError, SorobanIdentityError } from "./errors";
 import { REPUTATION_ERRORS } from './error-codes';
 import { BaseClient } from './base-client';
 
@@ -42,7 +42,7 @@ export interface ScoreHistoryEntry {
 export class ReputationClient extends BaseClient {
   constructor(config: SorobanIdentityConfig) {
     if (!config.reputationId) {
-      throw new Error('reputationId is required for ReputationClient');
+      throw new SorobanIdentityError('reputationId is required for ReputationClient', 'VALIDATION_ERROR');
     }
     super(config, config.reputationId);
   }
@@ -101,7 +101,7 @@ export class ReputationClient extends BaseClient {
       const errMsg = result.error ?? '';
       const contractErr = ContractError.extract(errMsg, REPUTATION_ERRORS);
       if (contractErr) throw contractErr;
-      throw new Error(`Simulation failed: ${errMsg}`);
+      throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, 'CONTRACT_ERROR');
     }
 
     return scValToNative(
@@ -153,7 +153,7 @@ export class ReputationClient extends BaseClient {
       ) {
         return { subject: subjectAddress, score: 0, reporterCount: 0, updatedAt: 0 };
       }
-      throw new Error(`Simulation failed: ${errMsg}`);
+      throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, 'CONTRACT_ERROR');
     }
 
     return scValToNative(
@@ -208,7 +208,7 @@ export class ReputationClient extends BaseClient {
       const errMsg = result.error ?? '';
       const contractErr = ContractError.extract(errMsg, REPUTATION_ERRORS);
       if (contractErr) throw contractErr;
-      throw new Error(`Simulation failed: ${errMsg}`);
+      throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, 'CONTRACT_ERROR');
     }
 
     return scValToNative(
@@ -325,7 +325,7 @@ export class ReputationClient extends BaseClient {
       this.server.sendTransaction(prepared)
     );
     if (result.status !== 'PENDING') {
-      throw new Error(`Transaction failed: ${result.status}`);
+      throw new SorobanIdentityError(`Transaction failed: ${result.status}`, 'CONTRACT_ERROR');
     }
 
     await pollTransactionStatus(this.server, result.hash);
@@ -356,7 +356,7 @@ export class ReputationClient extends BaseClient {
       const errMsg = result.error ?? '';
       const contractErr = ContractError.extract(errMsg, REPUTATION_ERRORS);
       if (contractErr) throw contractErr;
-      throw new Error(`Simulation failed: ${errMsg}`);
+      throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, 'CONTRACT_ERROR');
     }
 
     return scValToNative(

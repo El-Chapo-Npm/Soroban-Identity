@@ -9,7 +9,7 @@ import {
 } from "@stellar/stellar-sdk";
 import type { CallOptions, Credential, CredentialStorageStats, CredentialType, SorobanIdentityConfig, VerifyResult, WriteResult } from "./types";
 import { retryWithBackoff, validateStellarAddress, pollTransactionStatus } from "./utils";
-import { ContractError } from "./errors";
+import { ContractError, SorobanIdentityError } from "./errors";
 import { CREDENTIAL_MANAGER_ERRORS } from "./error-codes";
 import { BaseClient } from "./base-client";
 
@@ -68,15 +68,17 @@ export class CredentialClient extends BaseClient {
     signatureHex?: string
   ): Promise<{ credentialId: string } & WriteResult> {
     if (!/^[0-9a-fA-F]{64}$/.test(claimsHashHex)) {
-      throw new Error(
-        "InvalidClaimsHashFormat: claimsHash must be a 64-character hex string (32 bytes)"
+      throw new SorobanIdentityError(
+        "InvalidClaimsHashFormat: claimsHash must be a 64-character hex string (32 bytes)",
+        "VALIDATION_ERROR"
       );
     }
 
     if (signatureHex !== undefined) {
       if (!/^[0-9a-fA-F]{128}$/.test(signatureHex)) {
-        throw new Error(
-          "InvalidSignatureFormat: signature must be a 128-character hex string (64 bytes)"
+        throw new SorobanIdentityError(
+          "InvalidSignatureFormat: signature must be a 128-character hex string (64 bytes)",
+          "VALIDATION_ERROR"
         );
       }
     }
@@ -117,7 +119,7 @@ export class CredentialClient extends BaseClient {
 
     const result = await retryWithBackoff(() => this.server.sendTransaction(prepared));
     if (result.status !== "PENDING") {
-      throw new Error(`Transaction failed: ${result.status}`);
+      throw new SorobanIdentityError(`Transaction failed: ${result.status}`, "CONTRACT_ERROR");
     }
 
     await pollTransactionStatus(this.server, result.hash);
@@ -222,7 +224,7 @@ export class CredentialClient extends BaseClient {
       const errMsg = idsResult.error ?? "";
       const contractErr = ContractError.extract(errMsg, CREDENTIAL_MANAGER_ERRORS);
       if (contractErr) throw contractErr;
-      throw new Error(`Simulation failed: ${errMsg}`);
+      throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, "CONTRACT_ERROR");
     }
 
     const ids = scValToNative(
@@ -273,12 +275,12 @@ export class CredentialClient extends BaseClient {
       const contractErr = ContractError.extract(error, CREDENTIAL_MANAGER_ERRORS);
       if (contractErr) throw contractErr;
       if (error.includes("CredentialNotFound")) {
-        throw new Error("CredentialNotFound: credential does not exist");
+        throw new SorobanIdentityError("CredentialNotFound: credential does not exist", "NOT_FOUND");
       }
       if (error.includes("CredentialRevoked")) {
-        throw new Error("CredentialRevoked: credential has been revoked");
+        throw new SorobanIdentityError("CredentialRevoked: credential has been revoked", "VALIDATION_ERROR");
       }
-      throw new Error(`Simulation failed: ${error}`);
+      throw new SorobanIdentityError(`Simulation failed: ${error}`, "CONTRACT_ERROR");
     }
 
     return scValToNative(
@@ -318,7 +320,7 @@ export class CredentialClient extends BaseClient {
       const errMsg = result.error ?? "";
       const contractErr = ContractError.extract(errMsg, CREDENTIAL_MANAGER_ERRORS);
       if (contractErr) throw contractErr;
-      throw new Error(`Simulation failed: ${errMsg}`);
+      throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, "CONTRACT_ERROR");
     }
 
     return scValToNative(
@@ -373,7 +375,7 @@ export class CredentialClient extends BaseClient {
       const errMsg = result.error ?? "";
       const contractErr = ContractError.extract(errMsg, CREDENTIAL_MANAGER_ERRORS);
       if (contractErr) throw contractErr;
-      throw new Error(`Simulation failed: ${errMsg}`);
+      throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, "CONTRACT_ERROR");
     }
 
     return scValToNative(
@@ -403,7 +405,7 @@ export class CredentialClient extends BaseClient {
       const errMsg = result.error ?? "";
       const contractErr = ContractError.extract(errMsg, CREDENTIAL_MANAGER_ERRORS);
       if (contractErr) throw contractErr;
-      throw new Error(`Simulation failed: ${errMsg}`);
+      throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, "CONTRACT_ERROR");
     }
 
     const issuers = scValToNative(
@@ -433,7 +435,7 @@ export class CredentialClient extends BaseClient {
       const errMsg = result.error ?? "";
       const contractErr = ContractError.extract(errMsg, CREDENTIAL_MANAGER_ERRORS);
       if (contractErr) throw contractErr;
-      throw new Error(`Simulation failed: ${errMsg}`);
+      throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, "CONTRACT_ERROR");
     }
 
     return scValToNative(

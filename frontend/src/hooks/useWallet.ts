@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import SignClient from "@walletconnect/sign-client";
+import { getNetworkConfig, getActiveNetwork } from "../network";
 
 // ── Freighter types ───────────────────────────────────────────────────────────
 
@@ -80,6 +81,18 @@ export function useWallet() {
         window.freighter.getPublicKey(),
         window.freighter.getNetwork(),
       ]);
+
+      const activeNetworkConfig = getNetworkConfig();
+      if (networkPassphrase !== activeNetworkConfig.networkPassphrase) {
+        setState((s) => ({
+          ...s,
+          connecting: false,
+          error: `Freighter is on the wrong network. Expected ${getActiveNetwork()}.`,
+        }));
+        return;
+      }
+
+      localStorage.setItem("soroban-wallet-connected", "freighter");
 
       setState({
         publicKey,
@@ -180,6 +193,8 @@ export function useWallet() {
       const accounts = session.namespaces.stellar?.accounts ?? [];
       const publicKey = accounts[0]?.split(":")[2] ?? null;
 
+      localStorage.setItem("soroban-wallet-connected", "walletconnect");
+
       setState({
         publicKey,
         networkPassphrase: TESTNET_PASSPHRASE,
@@ -193,6 +208,7 @@ export function useWallet() {
       // Handle remote disconnect
       client.on("session_delete", () => {
         wcTopicRef.current = null;
+        localStorage.removeItem("soroban-wallet-connected");
         setState({
           publicKey: null,
           networkPassphrase: null,
@@ -211,6 +227,17 @@ export function useWallet() {
       }));
     }
   }, []);
+
+  // ── Auto-reconnect on mount ─────────────────────────────────────────────────
+  
+  useEffect(() => {
+    const saved = localStorage.getItem("soroban-wallet-connected");
+    if (saved === "freighter") {
+      connectFreighter();
+    } else if (saved === "walletconnect") {
+      connectWalletConnect();
+    }
+  }, [connectFreighter, connectWalletConnect]);
 
   // ── Public API ──────────────────────────────────────────────────────────────
 
@@ -239,6 +266,8 @@ export function useWallet() {
       wcClientRef.current = null;
       wcTopicRef.current = null;
     }
+
+    localStorage.removeItem("soroban-wallet-connected");
 
     setState({
       publicKey: null,

@@ -1,5 +1,6 @@
 import { StrKey, SorobanRpc, hash } from "@stellar/stellar-sdk";
 import type { CredentialType } from "./types";
+import { SorobanIdentityError } from "./errors";
 
 /**
  * Retries an async function with exponential backoff on transient network errors.
@@ -50,10 +51,10 @@ export async function pollTransactionStatus(
       return;
     }
     if (status.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
-      throw new Error(`Transaction failed on-chain: ${(status as any).resultXdr || 'unknown error'}`);
+      throw new SorobanIdentityError(`Transaction failed on-chain: ${(status as any).resultXdr || 'unknown error'}`, "CONTRACT_ERROR");
     }
   }
-  throw new Error("Transaction confirmation timeout");
+  throw new SorobanIdentityError("Transaction confirmation timeout", "NETWORK_ERROR");
 }
 
 function isTransientError(err: unknown): boolean {
@@ -79,7 +80,7 @@ function delay(ms: number): Promise<void> {
  */
 export function validateStellarAddress(address: string): void {
   if (!StrKey.isValidEd25519PublicKey(address)) {
-    throw new Error(`InvalidAddress: "${address}" is not a valid Stellar address`);
+    throw new SorobanIdentityError(`InvalidAddress: "${address}" is not a valid Stellar address`, "VALIDATION_ERROR");
   }
 }
 

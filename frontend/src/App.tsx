@@ -4,6 +4,7 @@ import { SorobanRpc } from "@stellar/stellar-sdk";
 import IdentityPanel from "./components/IdentityPanel";
 import CredentialsPanel from "./components/CredentialsPanel";
 import WalletButton from "./components/WalletButton";
+import ErrorBoundary from "./components/ErrorBoundary";
 import { useWallet } from "./hooks/useWallet";
 import { useCredentialExpiryCheck } from "./hooks/useCredentialExpiryCheck";
 import { checkConnection, TESTNET_CONFIG, IdentityClient, CredentialClient, ReputationClient } from "../../sdk/src/index";
@@ -279,10 +280,12 @@ export default function App() {
         </button>
       </div>
 
-       {tab === "identity" && <IdentityPanel />}
-       {tab === "credentials" && (
-         <CredentialsPanel verifyId={verifyId} />
-       )}
+      <ErrorBoundary>
+        {tab === "identity" && <IdentityPanel />}
+        {tab === "credentials" && (
+          <CredentialsPanel verifyId={verifyId} />
+        )}
+      </ErrorBoundary>
     </div>
   );
 }

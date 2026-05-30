@@ -9,7 +9,7 @@ import {
 } from "@stellar/stellar-sdk";
 import type { CallOptions, DidDocument, IdentityStorageStats, SorobanIdentityConfig, WriteResult } from "./types";
 import { retryWithBackoff, validateStellarAddress, pollTransactionStatus } from "./utils";
-import { ContractError } from "./errors";
+import { ContractError, SorobanIdentityError } from "./errors";
 import { IDENTITY_REGISTRY_ERRORS } from "./error-codes";
 import { BaseClient } from "./base-client";
 
@@ -90,7 +90,7 @@ export class IdentityClient extends BaseClient {
 
     const result = await retryWithBackoff(() => this.server.sendTransaction(prepared));
     if (result.status !== "PENDING") {
-      throw new Error(`Transaction failed: ${result.status}`);
+      throw new SorobanIdentityError(`Transaction failed: ${result.status}`, "CONTRACT_ERROR");
     }
 
     try {
@@ -101,8 +101,9 @@ export class IdentityClient extends BaseClient {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       if (msg.includes("DID already exists")) {
-        throw new Error(
-          `A DID already exists for address ${keypair.publicKey()}. Each address can only have one DID.`
+        throw new SorobanIdentityError(
+          `A DID already exists for address ${keypair.publicKey()}. Each address can only have one DID.`,
+          "VALIDATION_ERROR"
         );
       }
       throw e;
@@ -139,7 +140,7 @@ export class IdentityClient extends BaseClient {
 
     const result = await retryWithBackoff(() => this.server.sendTransaction(prepared));
     if (result.status !== "PENDING") {
-      throw new Error(`Transaction failed: ${result.status}`);
+      throw new SorobanIdentityError(`Transaction failed: ${result.status}`, "CONTRACT_ERROR");
     }
 
     try {
@@ -147,13 +148,15 @@ export class IdentityClient extends BaseClient {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       if (msg.includes("DID not found")) {
-        throw new Error(
-          `No DID found for address ${keypair.publicKey()}. Create one first with createDid.`
+        throw new SorobanIdentityError(
+          `No DID found for address ${keypair.publicKey()}. Create one first with createDid.`,
+          "NOT_FOUND"
         );
       }
       if (msg.includes("require_auth") || msg.includes("not authorized")) {
-        throw new Error(
-          `Address ${keypair.publicKey()} is not the controller of this DID.`
+        throw new SorobanIdentityError(
+          `Address ${keypair.publicKey()} is not the controller of this DID.`,
+          "UNAUTHORIZED"
         );
       }
       throw e;
@@ -187,12 +190,12 @@ export class IdentityClient extends BaseClient {
       const contractErr = ContractError.extract(errMsg, IDENTITY_REGISTRY_ERRORS);
       if (contractErr) throw contractErr;
       if (errMsg.includes("DidDeactivated")) {
-        throw new Error(`DID for address ${controllerAddress} has been deactivated.`);
+        throw new SorobanIdentityError(`DID for address ${controllerAddress} has been deactivated.`, "VALIDATION_ERROR");
       }
       if (errMsg.includes("DidNotFound")) {
-        throw new Error(`No DID found for address ${controllerAddress}.`);
+        throw new SorobanIdentityError(`No DID found for address ${controllerAddress}.`, "NOT_FOUND");
       }
-      throw new Error(`Simulation failed: ${errMsg}`);
+      throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, "CONTRACT_ERROR");
     }
 
     return scValToNative(
@@ -253,7 +256,7 @@ export class IdentityClient extends BaseClient {
       const errMsg = result.error ?? "";
       const contractErr = ContractError.extract(errMsg, IDENTITY_REGISTRY_ERRORS);
       if (contractErr) throw contractErr;
-      throw new Error("Failed to get DID count");
+      throw new SorobanIdentityError("Failed to get DID count", "UNKNOWN");
     }
 
     return scValToNative(
@@ -269,8 +272,9 @@ export class IdentityClient extends BaseClient {
   async deactivateDid(keypair: Keypair): Promise<void> {
     const isActive = await this.hasActiveDid(keypair.publicKey());
     if (!isActive) {
-      throw new Error(
-        `DID for ${keypair.publicKey()} is already inactive or does not exist`
+      throw new SorobanIdentityError(
+        `DID for ${keypair.publicKey()} is already inactive or does not exist`,
+        "VALIDATION_ERROR"
       );
     }
 
@@ -294,7 +298,7 @@ export class IdentityClient extends BaseClient {
 
     const result = await this.server.sendTransaction(prepared);
     if (result.status !== "PENDING") {
-      throw new Error(`Transaction failed: ${result.status}`);
+      throw new SorobanIdentityError(`Transaction failed: ${result.status}`, "CONTRACT_ERROR");
     }
 
     await pollTransactionStatus(this.server, result.hash);
@@ -319,7 +323,7 @@ export class IdentityClient extends BaseClient {
       const errMsg = result.error ?? "";
       const contractErr = ContractError.extract(errMsg, IDENTITY_REGISTRY_ERRORS);
       if (contractErr) throw contractErr;
-      throw new Error(`Simulation failed: ${errMsg}`);
+      throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, "CONTRACT_ERROR");
     }
 
     return scValToNative(

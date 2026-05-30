@@ -1,3 +1,17 @@
+export type SorobanErrorCode = 'NOT_FOUND' | 'UNAUTHORIZED' | 'NETWORK_ERROR' | 'VALIDATION_ERROR' | 'CONTRACT_ERROR' | 'UNKNOWN';
+
+export class SorobanIdentityError extends Error {
+  readonly code: SorobanErrorCode;
+  readonly originalError?: unknown;
+
+  constructor(message: string, code: SorobanErrorCode = 'UNKNOWN', originalError?: unknown) {
+    super(message);
+    this.name = 'SorobanIdentityError';
+    this.code = code;
+    this.originalError = originalError;
+  }
+}
+
 export class ContractError extends Error {
   readonly code: number;
 
