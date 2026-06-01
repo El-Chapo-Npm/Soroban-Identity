@@ -67,7 +67,8 @@ export interface SorobanIdentityConfig {
   networkPassphrase: string;
   identityRegistryId: string;
   credentialManagerId: string;
-  reputationId?: string;
+  /** Contract ID for the reputation contract. Required when using {@link ReputationClient}. */
+  reputationId: string;
   /** Transaction timeout in seconds. Defaults to 30. */
   txTimeout?: number;
   /** Maximum concurrent RPC requests. Defaults to 5. */

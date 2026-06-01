@@ -18,6 +18,28 @@ export {
 } from './error-codes';
 export { clearServerCache } from './base-client';
 export { toW3CDidDocument, exportDidDocumentAsJsonLd } from './serializers';
+export {
+  buildCreateDidArgs,
+  buildUpdateDidArgs,
+  buildResolveDidArgs,
+  buildHasActiveDidArgs,
+  buildDeactivateDidArgs,
+  buildIssueCredentialArgs,
+  buildVerifyCredentialArgs,
+  buildGetCredentialArgs,
+  buildGetSubjectCredentialsArgs,
+  buildIsIssuerArgs,
+  buildGetCredentialCountArgs,
+  buildListSubjectCredentialsArgs,
+  buildListIssuersArgs,
+  buildGetReputationArgs,
+  buildGetHistoryArgs,
+  buildPassesSybilCheckDefaultArgs,
+  buildPassesSybilCheckArgs,
+  buildSubmitScoreArgs,
+  buildListReportersArgs,
+  buildListHistoryArgs,
+} from './contract-args';
 export type {
   DidDocument,
   Credential,

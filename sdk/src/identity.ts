@@ -4,7 +4,6 @@ import {
   TransactionBuilder,
   BASE_FEE,
   Keypair,
-  nativeToScVal,
   scValToNative,
   Account,
 } from "@stellar/stellar-sdk";
@@ -13,6 +12,13 @@ import { retryWithBackoff, validateStellarAddress, pollTransactionStatus } from 
 import { ContractError, SorobanIdentityError } from "./errors";
 import { IDENTITY_REGISTRY_ERRORS } from "./error-codes";
 import { BaseClient } from "./base-client";
+import {
+  buildCreateDidArgs,
+  buildUpdateDidArgs,
+  buildResolveDidArgs,
+  buildHasActiveDidArgs,
+  buildDeactivateDidArgs,
+} from "./contract-args";
 
 // Dummy address used for lightweight initialization probes
 const PROBE_ADDRESS = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
@@ -54,7 +60,7 @@ export class IdentityClient extends BaseClient {
         .addOperation(
           this.contract.call(
             "has_active_did",
-            nativeToScVal(PROBE_ADDRESS, { type: "address" })
+            ...buildHasActiveDidArgs({ controller: PROBE_ADDRESS })
           )
         )
         .setTimeout(10)
@@ -102,7 +108,6 @@ export class IdentityClient extends BaseClient {
   ): Promise<{ did: string } & WriteResult> {
     const account = await this.server.getAccount(keypair.publicKey());
 
-    const metaScVal = nativeToScVal(metadata, { type: "map" });
     const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
 
     const tx = new TransactionBuilder(account, {
@@ -112,8 +117,7 @@ export class IdentityClient extends BaseClient {
       .addOperation(
         this.contract.call(
           "create_did",
-          nativeToScVal(keypair.publicKey(), { type: "address" }),
-          metaScVal
+          ...buildCreateDidArgs({ controller: keypair.publicKey(), metadata })
         )
       )
       .setTimeout(timeout)
@@ -180,8 +184,7 @@ export class IdentityClient extends BaseClient {
       .addOperation(
         this.contract.call(
           "update_did",
-          nativeToScVal(keypair.publicKey(), { type: "address" }),
-          nativeToScVal(metadata, { type: "map" })
+          ...buildUpdateDidArgs({ controller: keypair.publicKey(), metadata })
         )
       )
       .setTimeout(timeout)
@@ -243,7 +246,7 @@ export class IdentityClient extends BaseClient {
       .addOperation(
         this.contract.call(
           "resolve_did",
-          nativeToScVal(controllerAddress, { type: "address" })
+          ...buildResolveDidArgs({ controller: controllerAddress })
         )
       )
       .setTimeout(timeout)
@@ -291,7 +294,7 @@ export class IdentityClient extends BaseClient {
       .addOperation(
         this.contract.call(
           "has_active_did",
-          nativeToScVal(controllerAddress, { type: "address" })
+          ...buildHasActiveDidArgs({ controller: controllerAddress })
         )
       )
       .setTimeout(timeout)
@@ -379,7 +382,7 @@ export class IdentityClient extends BaseClient {
       .addOperation(
         this.contract.call(
           "deactivate_did",
-          nativeToScVal(keypair.publicKey(), { type: "address" })
+          ...buildDeactivateDidArgs({ controller: keypair.publicKey() })
         )
       )
       .setTimeout(this.config.txTimeout ?? 30)
