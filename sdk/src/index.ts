@@ -1,7 +1,7 @@
 export { IdentityClient } from './identity';
 export { CredentialClient } from './credentials';
 export { ReputationClient } from './reputation';
-export { SorobanEventListener, getEvents } from './events';
+export { SorobanEventListener, EventsClient, getEvents } from './events';
 export { SorobanTransactionBuilder } from './transaction-builder';
 export { RequestQueue } from './request-queue';
 export {
@@ -33,7 +33,7 @@ export type {
   PaginationOptions,
 } from './types';
 export type { ReputationRecord, ScoreHistoryEntry } from './reputation';
-export type { EventFilter, ContractEvent, GetEventsOptions } from './events';
+export type { EventFilter, ContractEvent, GetEventsOptions, TypedEventFilter, EventsClientOptions } from './events';
 import type { SorobanIdentityConfig } from './types';
 export type { SorobanIdentityConfig, SorobanIdentityLogger };
 

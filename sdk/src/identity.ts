@@ -409,6 +409,57 @@ export class IdentityClient extends BaseClient {
    * @returns The current {@link IdentityStorageStats}.
    * @throws {SorobanIdentityError} on simulation failure.
    */
+  /**
+   * List DID documents with offset-based pagination.
+   *
+   * @param callerAddress Stellar address used to build the read simulation.
+   * @param page          1-based page number. Defaults to `1`.
+   * @param pageSize      Number of records per page. Defaults to `20`, capped
+   *                      to `100` server-side.
+   * @param options       Per-call overrides (currently `timeoutSeconds`).
+   * @returns Array of {@link DidDocument} for the requested page.
+   * @throws {SorobanIdentityError} on simulation failure.
+   */
+  async listDIDs(
+    callerAddress: string,
+    page = 1,
+    pageSize = 20,
+    options?: CallOptions
+  ): Promise<DidDocument[]> {
+    validateStellarAddress(callerAddress);
+    const account = new Account(callerAddress, "0");
+    const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
+    const offset = (Math.max(1, page) - 1) * pageSize;
+
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        this.contract.call(
+          "list_dids",
+          nativeToScVal(offset, { type: "u32" }),
+          nativeToScVal(pageSize, { type: "u32" })
+        )
+      )
+      .setTimeout(timeout)
+      .build();
+
+    const result = await retryWithBackoff(() => this.server.simulateTransaction(tx));
+    const isSimulationError = SorobanRpc.Api.isSimulationError(result);
+    this.debug('sdk.simulation_result', { operation: 'identity.listDIDs', success: !isSimulationError });
+    if (isSimulationError) {
+      const errMsg = result.error ?? "";
+      const contractErr = ContractError.extract(errMsg, IDENTITY_REGISTRY_ERRORS);
+      if (contractErr) throw contractErr;
+      throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, "CONTRACT_ERROR");
+    }
+
+    return scValToNative(
+      (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
+    ) as DidDocument[];
+  }
+
   async getStorageStats(callerAddress: string, options?: CallOptions): Promise<IdentityStorageStats> {
     validateStellarAddress(callerAddress);
     const account = new Account(callerAddress, "0");
