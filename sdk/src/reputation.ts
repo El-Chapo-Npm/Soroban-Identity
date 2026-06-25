@@ -597,6 +597,29 @@ export class ReputationClient extends BaseClient {
    * @throws {SorobanIdentityError} on simulation failure (network or contract error,
    *         including `ReporterNotFound` when the reporter is not registered).
    */
+  /**
+   * Get the current numeric score for a subject.
+   *
+   * Convenience wrapper around {@link ReputationClient.getReputation} that
+   * returns only the score field. Use this when you only need the number and
+   * don't want to carry the full record.
+   *
+   * @param callerAddress  Stellar address used to build the read simulation.
+   * @param subjectAddress The subject whose score to retrieve.
+   * @param options        Per-call overrides (currently `timeoutSeconds`).
+   * @returns The subject's current accumulated score (0 when no record exists).
+   * @throws {SorobanIdentityError} on simulation failure unrelated to a
+   *   missing record.
+   */
+  async getScore(
+    callerAddress: string,
+    subjectAddress: string,
+    options?: CallOptions
+  ): Promise<number> {
+    const record = await this.getReputation(callerAddress, subjectAddress, options);
+    return record.score;
+  }
+
   async listScoreHistory(
     callerAddress: string,
     subjectAddress: string,
