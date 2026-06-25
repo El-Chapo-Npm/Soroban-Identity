@@ -82,6 +82,7 @@ export type {
   PaginationOptions,
   SorobanIdentityContractIdField,
   ValidateConfigOptions,
+  SorobanResponse,
 } from './types';
 export { validateConfig } from './types';
 export type { ReputationRecord, ScoreHistoryEntry } from './reputation';
