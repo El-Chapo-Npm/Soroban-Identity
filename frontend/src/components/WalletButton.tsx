@@ -3,15 +3,18 @@ import type { WalletType } from "../hooks/useWallet";
 import { useWalletContext } from "../context/WalletContext";
 
 export default function WalletButton() {
-  const { connected, publicKey, connecting, txLoading, error, walletType, connect, disconnect } = useWalletContext();
+  const { connected, publicKey, connecting, reconnecting, txLoading, error, walletType, connect, disconnect } = useWalletContext();
   const [showPicker, setShowPicker] = useState(false);
 
   const short = (key: string) => `${key.slice(0, 4)}…${key.slice(-4)}`;
 
   const handleSelect = (type: WalletType) => {
+    if (connecting || reconnecting) return;
     setShowPicker(false);
     connect(type);
   };
+
+  const walletActionDisabled = connecting || reconnecting;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: "0.25rem", position: "relative" }}>
@@ -39,12 +42,12 @@ export default function WalletButton() {
         <>
           <button
             onClick={() => setShowPicker((v) => !v)}
-            disabled={connecting}
+            disabled={walletActionDisabled}
           >
-            {connecting ? "Connecting…" : "Connect Wallet"}
+            {reconnecting ? "Reconnecting…" : connecting ? "Connecting…" : "Connect Wallet"}
           </button>
 
-          {showPicker && (
+          {showPicker && !walletActionDisabled && (
             <div style={{
               position: "absolute",
               top: "calc(100% + 0.5rem)",
@@ -79,7 +82,7 @@ export default function WalletButton() {
       {error && (
         <span style={{ fontSize: "0.75rem", color: "var(--error-text)" }}>
           {(() => {
-            const msg = error instanceof Error ? error.message : typeof error === "string" && error ? error : "Wallet connection failed. Please try again.";
+            const msg = error || "Wallet connection failed. Please try again.";
             return msg.toLowerCase().includes("freighter not found") ? (
               <>Freighter not installed.{" "}
                 <a href="https://freighter.app" target="_blank" rel="noopener noreferrer"

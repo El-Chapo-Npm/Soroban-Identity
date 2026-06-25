@@ -1,12 +1,13 @@
 import { createContext, useContext, type ReactNode } from "react";
 import { useWallet } from "../hooks/useWallet";
+import type { WalletType } from "../hooks/useWallet";
 import type { WalletState } from "../hooks/useWalletState";
 import type { FrontendNetworkConfig } from "../network";
 import { getNetworkConfig } from "../network";
 
 interface WalletContextValue extends WalletState {
-  connect: (walletType?: string) => void;
-  disconnect: () => void;
+  connect: (walletType?: WalletType) => Promise<void>;
+  disconnect: () => Promise<void>;
   signTransaction: (xdr: string) => Promise<string>;
 }
 

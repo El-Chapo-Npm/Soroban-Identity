@@ -36,6 +36,7 @@ export function useWalletConnection({
       setState((s) => ({
         ...s,
         connecting: false,
+        reconnecting: false,
         error: "Freighter not found. Install it from freighter.app",
       }));
       return;
@@ -47,6 +48,7 @@ export function useWalletConnection({
         setState((s) => ({
           ...s,
           connecting: false,
+          reconnecting: false,
           error: "Please unlock Freighter and try again.",
         }));
         return;
@@ -62,6 +64,7 @@ export function useWalletConnection({
         setState((s) => ({
           ...s,
           connecting: false,
+          reconnecting: false,
           error: `Freighter is on the wrong network. Expected ${getActiveNetwork()}.`,
         }));
         return;
@@ -74,6 +77,7 @@ export function useWalletConnection({
         networkPassphrase,
         connected: true,
         connecting: false,
+        reconnecting: false,
         txLoading: false,
         walletType: "freighter",
         error: null,
@@ -82,6 +86,7 @@ export function useWalletConnection({
       setState((s) => ({
         ...s,
         connecting: false,
+        reconnecting: false,
         error: e instanceof Error ? e.message : "Freighter connection failed",
       }));
     }
@@ -133,6 +138,7 @@ export function useWalletConnection({
         networkPassphrase: networkConfig.networkPassphrase,
         connected: true,
         connecting: false,
+        reconnecting: false,
         txLoading: false,
         walletType: "walletconnect",
         error: null,
@@ -147,6 +153,7 @@ export function useWalletConnection({
       setState((s) => ({
         ...s,
         connecting: false,
+        reconnecting: false,
         error:
           e instanceof Error ? e.message : "WalletConnect connection failed",
       }));
@@ -158,17 +165,24 @@ export function useWalletConnection({
   useEffect(() => {
     const saved = localStorage.getItem("soroban-wallet-connected");
     if (saved === "freighter") {
+      setState((s) => ({ ...s, reconnecting: true, error: null }));
       connectFreighter();
     } else if (saved === "walletconnect") {
+      setState((s) => ({ ...s, reconnecting: true, error: null }));
       connectWalletConnect();
     }
-  }, [connectFreighter, connectWalletConnect]);
+  }, [connectFreighter, connectWalletConnect, setState]);
 
   // ── Public API ─────────────────────────────────────────────────────────────
 
   const connect = useCallback(
     async (walletType: WalletType = "freighter") => {
-      setState((s) => ({ ...s, connecting: true, error: null }));
+      setState((s) => ({
+        ...s,
+        connecting: true,
+        reconnecting: false,
+        error: null,
+      }));
       if (walletType === "walletconnect") {
         await connectWalletConnect();
       } else {

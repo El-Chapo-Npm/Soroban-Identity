@@ -6,6 +6,7 @@ export interface WalletState {
   networkPassphrase: string | null;
   connected: boolean;
   connecting: boolean;
+  reconnecting: boolean;
   txLoading: boolean;
   walletType: WalletType | null;
   error: string | null;
@@ -16,6 +17,7 @@ export const DISCONNECTED_STATE: WalletState = {
   networkPassphrase: null,
   connected: false,
   connecting: false,
+  reconnecting: false,
   txLoading: false,
   walletType: null,
   error: null,
