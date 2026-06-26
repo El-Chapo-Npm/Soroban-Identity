@@ -16,14 +16,51 @@ const expiryJob = new ExpiryNotificationJob(config, soroban);
 if (process.env.DISABLE_EXPIRY_JOB !== 'true') expiryJob.start();
 
 const server = http.createServer(createApp({ config, soroban, metrics, metricsAggregator }));
+
+const connections = new Set();
+server.on('connection', (socket) => {
+  connections.add(socket);
+  socket.on('close', () => {
+    connections.delete(socket);
+  });
+});
+
 server.listen(config.port, () => {
   console.log(`Soroban Identity server listening on :${config.port}`);
 });
 
-process.on('SIGTERM', async () => {
-  expiryJob.stop();
+let shuttingDown = false;
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+
+  console.log('Shutting down…');
+
+  if (process.env.DISABLE_EXPIRY_JOB !== 'true') {
+    expiryJob.stop();
+  }
+
+  const timeoutMs = Number.parseInt(process.env.SHUTDOWN_TIMEOUT_MS ?? '10000', 10);
+  const timer = setTimeout(() => {
+    console.warn(`Graceful shutdown timed out after ${timeoutMs}ms. Forcing exit.`);
+    for (const socket of connections) {
+      socket.destroy();
+    }
+    process.exit(1);
+  }, timeoutMs);
+  timer.unref();
+
   server.close(async () => {
-    await soroban.drain();
+    clearTimeout(timer);
+    try {
+      await soroban.drain();
+    } catch (error) {
+      console.error('Error during soroban drain:', error);
+    }
+    console.log('Shutdown complete');
     process.exit(0);
   });
-});
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
