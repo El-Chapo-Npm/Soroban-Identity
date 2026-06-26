@@ -11,7 +11,11 @@ export function createApp({ config, soroban, metrics, metricsAggregator }) {
       if (req.method === 'GET' && url.pathname === '/health') {
         const contracts = await soroban.pingAllContracts();
         const ok = Object.values(contracts).every(Boolean);
-        return sendJson(res, ok ? 200 : 503, { status: ok ? 'ok' : 'degraded', contracts });
+        return sendJson(res, ok ? 200 : 503, {
+          status: ok ? 'ok' : 'degraded',
+          contracts,
+          circuitBreaker: soroban.circuitBreaker.toHealthInfo(),
+        });
       }
 
       if (req.method === 'GET' && url.pathname === '/metrics') {

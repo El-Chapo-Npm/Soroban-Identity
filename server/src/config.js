@@ -28,6 +28,7 @@ export function loadConfig(env = process.env) {
     expiryJobIntervalMs: parseInteger(env.EXPIRY_JOB_INTERVAL_MS, 60 * 60 * 1000),
     notificationWebhookUrl: env.NOTIFICATION_WEBHOOK_URL ?? '',
     subjectNotificationWebhooks: parseJson(env.SUBJECT_NOTIFICATION_WEBHOOKS, {}),
+    poolSize: parseInteger(env.SOROBAN_POOL_SIZE, 4),
     stellarCli: env.STELLAR_CLI ?? 'stellar',
     sourceAccount: env.STELLAR_SOURCE_ACCOUNT ?? env.STELLAR_SECRET_KEY ?? '',
     network: env.STELLAR_NETWORK ?? 'testnet',

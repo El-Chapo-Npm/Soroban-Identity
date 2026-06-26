@@ -161,21 +161,11 @@ export class SorobanClient {
       this.metrics?.observeRpcLatency((performance.now() - started) / 1000);
     }
   }
-}
 
-function runCommand(command, args) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (chunk) => { stdout += chunk; });
-    child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.on('error', reject);
-    child.on('close', (code) => {
-      if (code === 0) resolve(stdout);
-      else reject(new Error(stderr || stdout || `${command} exited with ${code}`));
-    });
-  });
+  /** Gracefully drain the worker pool before shutdown. */
+  drain() {
+    return this.pool.drain();
+  }
 }
 
 function parseAddressList(raw) {

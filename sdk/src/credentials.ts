@@ -24,7 +24,7 @@ import type {
 } from "./types";
 import { validateConfig } from "./types";
 import { retryWithBackoff, validateStellarAddress, pollTransactionStatus, runConcurrent } from "./utils";
-import { ContractError, SorobanIdentityError } from "./errors";
+import { ContractError, SorobanIdentityError, ClaimsValidationError } from "./errors";
 import { CREDENTIAL_MANAGER_ERRORS } from "./error-codes";
 import { BaseClient } from "./base-client";
 import {
@@ -1106,6 +1106,70 @@ export class CredentialClient extends BaseClient {
       items: raw.items.map((b) => Buffer.from(b).toString('hex')),
       nextCursor: raw.next_cursor ?? null,
     };
+  }
+
+  /**
+   * Issue multiple credentials in controlled-concurrency chunks.
+   *
+   * Items are processed in batches of `opts.concurrency` (default: `5`).
+   * Each chunk is dispatched in parallel and fully awaited before the next
+   * chunk starts. A failure in one item does not abort the rest of the batch.
+   *
+   * @param items  Array of credential inputs to issue.
+   * @param opts   Optional batch configuration — primarily `concurrency`.
+   * @returns `{ succeeded, failed }` where `succeeded` contains successful
+   *   responses and `failed` contains per-item errors for any that were rejected.
+   *
+   * @example
+   * ```ts
+   * const { succeeded, failed } = await credentials.issueCredentialBatch(inputs, {
+   *   concurrency: 5,
+   * });
+   * if (failed.length > 0) {
+   *   console.warn(`${failed.length} credentials failed to issue`);
+   * }
+   * ```
+   */
+  async issueCredentialBatch(items: CredentialInput[], opts?: BatchOptions): Promise<BatchResult> {
+    const concurrency = opts?.concurrency ?? 5;
+    const succeeded: BatchResult["succeeded"] = [];
+    const failed: BatchResult["failed"] = [];
+
+    for (let i = 0; i < items.length; i += concurrency) {
+      const chunk = items.slice(i, i + concurrency);
+      const results = await Promise.allSettled(
+        chunk.map((item) =>
+          this.issueCredential(
+            item.issuerKeypair,
+            item.subjectAddress,
+            item.credentialType,
+            item.claims,
+            item.claimsHashHex,
+            item.expiresAt ?? 0,
+            item.options,
+            item.signatureHex
+          )
+        )
+      );
+      for (let j = 0; j < results.length; j++) {
+        const result = results[j]!;
+        if (result.status === "fulfilled") {
+          succeeded.push(result.value);
+        } else {
+          const error =
+            result.reason instanceof SorobanIdentityError
+              ? result.reason
+              : new SorobanIdentityError(
+                  result.reason instanceof Error ? result.reason.message : String(result.reason),
+                  "UNKNOWN",
+                  result.reason
+                );
+          failed.push({ input: chunk[j]!, error });
+        }
+      }
+    }
+
+    return { succeeded, failed };
   }
 
   /**
