@@ -3,8 +3,10 @@ import {
   TransactionBuilder,
   xdr,
   BASE_FEE,
+  SorobanRpc,
 } from '@stellar/stellar-sdk';
-import type { SorobanIdentityConfig } from './types';
+import type { SorobanIdentityConfig, FeeEstimate } from './types';
+import { SimulationError } from './types';
 import type { Account } from '@stellar/stellar-sdk';
 
 /**
@@ -78,25 +80,49 @@ export class SorobanTransactionBuilder {
   }
 
   /**
-   * Get the list of operations (for testing).
-   * @returns Array of operations
+   * Simulate the transaction and return fee breakdown before signing.
+   * Does not prompt for a signature.
    */
+  async estimateFee(operation: xdr.Operation): Promise<FeeEstimate> {
+    const server = new SorobanRpc.Server(this.config.rpcUrl);
+    const builder = new TransactionBuilder(this.account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    });
+    builder.addOperation(operation);
+    builder.setTimeout(30);
+    const tx = builder.build();
+
+    const result = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(result)) {
+      throw new SimulationError(
+        result.error ?? 'Transaction simulation failed',
+        result,
+      );
+    }
+
+    const baseFee = parseInt(BASE_FEE, 10);
+    const resourceFee = parseInt(
+      (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).minResourceFee ?? '0',
+      10,
+    );
+
+    return {
+      baseFee,
+      resourceFee,
+      totalFee: baseFee + resourceFee,
+    };
+  }
+
   getOperations(): xdr.Operation[] {
     return this.operations;
   }
 
-  /**
-   * Get the account (for testing).
-   * @returns The account
-   */
   getAccount(): Account {
     return this.account;
   }
 
-  /**
-   * Get the config (for testing).
-   * @returns The config
-   */
   getConfig(): SorobanIdentityConfig {
     return this.config;
   }

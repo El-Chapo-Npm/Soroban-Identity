@@ -26,7 +26,9 @@ export type {
   IdentityStorageStats,
   CredentialStorageStats,
   ReputationStorageStats,
+  FeeEstimate,
 } from './types';
+export { SimulationError } from './types';
 export type { ReputationRecord, ScoreHistoryEntry } from './reputation';
 export type { EventFilter, ContractEvent } from './events';
 import type { SorobanIdentityConfig } from './types';

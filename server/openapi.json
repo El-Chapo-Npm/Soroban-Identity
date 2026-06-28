@@ -1,0 +1,324 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Soroban Identity API",
+    "version": "1.0.0",
+    "description": "REST API for issuing, verifying, and revoking Soroban-backed verifiable credentials and DID documents."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3001",
+      "description": "Local development"
+    }
+  ],
+  "components": {
+    "schemas": {
+      "ErrorResponse": {
+        "type": "object",
+        "required": ["code", "message"],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Machine-readable error code.",
+            "example": "CREDENTIAL_NOT_FOUND"
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable error description.",
+            "example": "Credential \"abc123\" not found."
+          },
+          "details": {
+            "type": "array",
+            "description": "Optional list of field-level error details.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "field": { "type": "string" },
+                "value": { "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "Credential": {
+        "type": "object",
+        "required": ["id", "subject", "issuer", "credentialType", "claims", "claimsHash", "signature", "issuedAt", "expiresAt", "revoked"],
+        "properties": {
+          "id": { "type": "string", "description": "Hex-encoded 32-byte credential ID." },
+          "subject": { "type": "string", "description": "Stellar address of the credential subject." },
+          "issuer": { "type": "string", "description": "Stellar address of the issuing party." },
+          "credentialType": { "type": "string", "enum": ["Kyc", "Reputation", "Achievement", "Custom"] },
+          "claims": { "type": "object", "additionalProperties": { "type": "string" } },
+          "claimsHash": { "type": "string", "description": "SHA-256 hash of the off-chain claims payload (hex)." },
+          "signature": { "type": "string" },
+          "issuedAt": { "type": "integer", "description": "Unix timestamp of issuance." },
+          "expiresAt": { "type": "integer", "description": "Unix timestamp of expiry; 0 means no expiry." },
+          "revoked": { "type": "boolean" }
+        }
+      },
+      "DidDocument": {
+        "type": "object",
+        "required": ["id", "controller", "metadata", "createdAt", "updatedAt", "active"],
+        "properties": {
+          "id": { "type": "string", "description": "DID in did:stellar:<address> format." },
+          "controller": { "type": "string" },
+          "metadata": { "type": "object", "additionalProperties": { "type": "string" } },
+          "createdAt": { "type": "integer" },
+          "updatedAt": { "type": "integer" },
+          "active": { "type": "boolean" }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/credentials": {
+      "post": {
+        "summary": "Issue a new verifiable credential",
+        "operationId": "issueCredential",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/Credential" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Credential issued successfully.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Credential" }
+              }
+            }
+          },
+          "400": {
+            "description": "Request body is missing required fields.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          },
+          "401": {
+            "description": "Caller is not authenticated.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          },
+          "403": {
+            "description": "Caller is not a registered issuer.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          },
+          "409": {
+            "description": "A credential with this ID already exists.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" },
+                "example": {
+                  "code": "CREDENTIAL_ALREADY_EXISTS",
+                  "message": "Credential with ID \"abc123\" already exists.",
+                  "details": [{ "field": "id", "value": "abc123" }]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Credential data failed validation (e.g. invalid claims hash).",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          }
+        }
+      }
+    },
+    "/credentials/{id}": {
+      "get": {
+        "summary": "Retrieve a credential by ID",
+        "operationId": "getCredential",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "Hex-encoded credential ID."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Credential found.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Credential" } } }
+          },
+          "400": {
+            "description": "The provided ID is not valid hex.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          },
+          "404": {
+            "description": "Credential not found.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Revoke a credential",
+        "operationId": "revokeCredential",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "204": { "description": "Credential revoked." },
+          "401": {
+            "description": "Caller is not authenticated.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          },
+          "403": {
+            "description": "Caller is not the issuer of this credential.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          },
+          "404": {
+            "description": "Credential not found.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          }
+        }
+      }
+    },
+    "/identities": {
+      "post": {
+        "summary": "Create a new DID document",
+        "operationId": "createIdentity",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["controller"],
+                "properties": {
+                  "controller": { "type": "string" },
+                  "metadata": { "type": "object", "additionalProperties": { "type": "string" } }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "DID created successfully.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DidDocument" } } }
+          },
+          "400": {
+            "description": "Missing or invalid request body.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          },
+          "401": {
+            "description": "Caller is not authenticated.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          },
+          "409": {
+            "description": "A DID already exists for this controller.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          },
+          "422": {
+            "description": "Controller address is not a valid Stellar address.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          }
+        }
+      }
+    },
+    "/identities/{address}": {
+      "get": {
+        "summary": "Resolve a DID document",
+        "operationId": "resolveIdentity",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "Stellar address (G…) of the DID controller."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "DID document found.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DidDocument" } } }
+          },
+          "400": {
+            "description": "The provided address is not a valid Stellar address.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          },
+          "404": {
+            "description": "No DID found for this address.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Deactivate a DID",
+        "operationId": "deactivateIdentity",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "204": { "description": "DID deactivated." },
+          "401": {
+            "description": "Caller is not authenticated.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          },
+          "403": {
+            "description": "Caller is not the DID controller.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          },
+          "404": {
+            "description": "No DID found for this address.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          }
+        }
+      }
+    },
+    "/reputations/{address}": {
+      "get": {
+        "summary": "Get reputation record for a Stellar address",
+        "operationId": "getReputation",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "Stellar address (G…)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reputation record found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "subject": { "type": "string" },
+                    "score": { "type": "integer" },
+                    "reporters": { "type": "integer" },
+                    "lastUpdated": { "type": "integer" }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The provided address is not a valid Stellar address.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          },
+          "404": {
+            "description": "No reputation record found for this address.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          }
+        }
+      }
+    }
+  }
+}
