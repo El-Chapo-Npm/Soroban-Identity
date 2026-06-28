@@ -5,6 +5,8 @@ import IdentityPanel from "./components/IdentityPanel";
 import CredentialsPanel from "./components/CredentialsPanel";
 import WalletButton from "./components/WalletButton";
 import ErrorBoundary from "./components/ErrorBoundary";
+import Toast from "./components/Toast";
+import { ToastProvider } from "./context/ToastContext";
 import { useWallet } from "./hooks/useWallet";
 import { useCredentialExpiryCheck } from "./hooks/useCredentialExpiryCheck";
 import {
@@ -115,7 +117,9 @@ export default function App() {
   };
 
   return (
-    <div className="container">
+    <ToastProvider>
+      <Toast />
+      <div className="container">
       <header style={{ position: "relative" }}>
         <h1>{t("app.title")}</h1>
         <p>{t("app.subtitle")}</p>
@@ -294,5 +298,6 @@ export default function App() {
         )}
       </ErrorBoundary>
     </div>
+    </ToastProvider>
   );
 }
