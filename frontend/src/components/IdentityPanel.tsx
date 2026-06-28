@@ -55,6 +55,14 @@ export default function IdentityPanel() {
   const [showHistory, setShowHistory] = useState(false);
   const { history, addAddress, clearHistory } = useAddressHistory();
 
+  const prevConnected = useRef(wallet.connected);
+  useEffect(() => {
+    if (prevConnected.current && !wallet.connected) {
+      clearHistory();
+    }
+    prevConnected.current = wallet.connected;
+  }, [wallet.connected, clearHistory]);
+
   const [createResult, setCreateResult] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
 
@@ -471,7 +479,7 @@ export default function IdentityPanel() {
         <button onClick={handleResolve} disabled={resolving || !resolveAddress}>
           {resolving ? 'Resolving…' : 'Resolve'}
         </button>
-        {resolving && <SkeletonCard rows={4} />}
+        {resolving && <SkeletonCard variant="identity" />}
         {!resolving && resolveResult && (
           <>
             <div style={{ 

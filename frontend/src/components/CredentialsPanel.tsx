@@ -419,7 +419,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
         </div>
 
         {fetching ? (
-          <SkeletonCard rows={3} />
+          <SkeletonCard variant="credential" />
         ) : fetchedCredentials !== null && fetchedCredentials.length === 0 ? (
           <div style={{ textAlign: "center", padding: "2rem 1rem", color: "var(--text-muted)" }}>
             <div style={{ fontSize: "2rem", marginBottom: "0.5rem" }}>🪪</div>
@@ -547,7 +547,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
         <button onClick={() => void handleVerify()} disabled={verifying || !credId}>
           {verifying ? "Verifying…" : "Verify"}
         </button>
-        {verifying && <SkeletonCard rows={2} />}
+        {verifying && <SkeletonCard variant="credential" />}
         {!verifying && verifyState !== "idle" && (
           <div style={{ marginTop: "1rem" }}>
             {verifyState === "valid" && (
