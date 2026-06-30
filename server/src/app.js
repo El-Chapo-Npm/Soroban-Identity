@@ -6,6 +6,7 @@ import {
   notFound,
   readJson,
   requireAdmin,
+  requireAuth,
   sendJson,
   sendText,
   setCorsHeaders,
@@ -87,6 +88,9 @@ export function createApp({ config, soroban, metrics, metricsAggregator }) {
 
         const verifyMatch = url.pathname.match(/^\/credentials\/([^/]+)\/verify$/);
         if (req.method === "POST" && verifyMatch) {
+          // Verify endpoint requires credentials:read scope
+          if (!requireAuth(req, res, config, ['credentials:read'])) return;
+          
           const credentialId = decodeURIComponent(verifyMatch[1]);
           const credentials = await readCredentials(config);
           const credential = credentials.find((c) => c.id === credentialId);
@@ -135,6 +139,9 @@ export function createApp({ config, soroban, metrics, metricsAggregator }) {
         }
 
         if (req.method === "GET" && url.pathname === "/admin/issuers") {
+          // Reading issuers requires admin:read or wildcard scope
+          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          
           const issuers = await soroban.getIssuers();
           return sendJson(res, 200, { issuers });
         }
@@ -156,6 +163,9 @@ export function createApp({ config, soroban, metrics, metricsAggregator }) {
         }
 
         if (req.method === "DELETE" && url.pathname === "/admin/issuers") {
+          // Removing issuers requires admin:write scope
+          if (!requireAuth(req, res, config, ['admin:write'])) return;
+          
           const body = await readJson(req, config);
           if (body.__payloadTooLarge)
             return sendJson(res, 413, { error: "payload_too_large" });
@@ -171,6 +181,9 @@ export function createApp({ config, soroban, metrics, metricsAggregator }) {
         }
 
         if (req.method === "GET" && url.pathname === "/admin/expiry-report") {
+          // Reading expiry reports requires admin:read scope
+          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          
           const windowDays =
             Number.parseInt(url.searchParams.get("windowDays") ?? "", 10) ||
             config.expiryWarningDays;
