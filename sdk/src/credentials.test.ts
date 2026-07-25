@@ -1,5 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { SorobanRpc, scValToNative } from "@stellar/stellar-sdk";
 import { CredentialClient } from "./credentials";
+import { clearServerCache } from "./base-client";
 import type { SorobanIdentityConfig } from "./types";
 
 vi.mock("@stellar/stellar-sdk", () => {
@@ -64,10 +66,20 @@ const config: SorobanIdentityConfig = {
   reputationId: "CBXM5TFFI4DWZ2OQSR37KHVO6OEKTJQTGOQMFTIDFTFUP32COAGW4OPK",
 };
 
+// scValToNative/isSimulationError are shared, module-level mocks (not tied to
+// any one CredentialClient's server instance). A `mockReturnValueOnce` that a
+// test leaves unconsumed would otherwise leak into whichever test runs next
+// and calls the same mock — reset both to their defaults after every test.
+afterEach(() => {
+  vi.mocked(scValToNative).mockReset().mockImplementation((v) => v);
+  vi.mocked(SorobanRpc.Api.isSimulationError).mockReset().mockReturnValue(false);
+});
+
 describe("CredentialClient", () => {
   let client: CredentialClient;
 
   beforeEach(() => {
+    clearServerCache();
     client = new CredentialClient(config);
   });
 
@@ -455,6 +467,7 @@ describe("CredentialClient.issueCredentialBatch (#358)", () => {
   });
 
   beforeEach(() => {
+    clearServerCache();
     client = new CredentialClient(config);
     // Make issueCredential succeed by default (sendTransaction returns PENDING and getTransaction SUCCESS)
     const server = (client as any).server;
@@ -510,6 +523,7 @@ describe("issueCredential — timeoutMs (#351)", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    clearServerCache();
     client = new CredentialClient(config);
   });
 

@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { mkdtemp, readdir, rm, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import {
   FileDlqWriter,
   InMemoryWebhookStore,
@@ -196,10 +197,11 @@ describe("FileDlqWriter (#505)", () => {
     const dlqPath = await mkdtemp(join(tmpdir(), "dlq-test-"));
     try {
       const writer = new FileDlqWriter(dlqPath);
-      await expect(writer.write(makeRecord("../../etc/passwd"))).rejects.toThrow(/unsafe characters/);
+      const marker = `passwd-${randomUUID()}`;
+      await expect(writer.write(makeRecord(`../../etc/${marker}`))).rejects.toThrow(/unsafe characters/);
       // Nothing escaped into the parent directories, and nothing was written
       // inside dlqPath either.
-      await expect(access(join(dlqPath, "..", "..", "etc", "passwd"))).rejects.toThrow();
+      await expect(access(join(dlqPath, "..", "..", "etc", marker))).rejects.toThrow();
       expect(await readdir(dlqPath)).toHaveLength(0);
     } finally {
       await rm(dlqPath, { recursive: true, force: true });

@@ -109,6 +109,9 @@ export function buildIssueCredentialArgs(params: {
   signature: Buffer;
   expiresAt: bigint;
 }): xdr.ScVal[] {
+  // Validate/encode the numeric field first so a bad expiresAt reports its
+  // own clear error rather than being masked by address validation.
+  const expiresAt = encodeU64(params.expiresAt);
   return [
     nativeToScVal(params.issuer, { type: 'address' }),
     nativeToScVal(params.subject, { type: 'address' }),
@@ -116,7 +119,7 @@ export function buildIssueCredentialArgs(params: {
     nativeToScVal(params.claims, { type: 'map' }),
     nativeToScVal(params.claimsHash, { type: 'bytes' }),
     nativeToScVal(params.signature, { type: 'bytes' }),
-    encodeU64(params.expiresAt),
+    expiresAt,
   ];
 }
 

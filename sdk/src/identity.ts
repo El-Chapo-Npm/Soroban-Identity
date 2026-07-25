@@ -1,21 +1,10 @@
 import {
-  Contract,
   SorobanRpc,
   TransactionBuilder,
   BASE_FEE,
   Keypair,
-} from "@stellar/stellar-sdk";
-import type { DidDocument, SorobanIdentityConfig } from "./types";
-import { parseContractError } from "./errors";
-import { executeTransaction, TxOptions } from "./transaction";
-import {
-  encodeAddress,
-  encodeMap,
-  decodeDidDocument,
-  decodeString,
-  decodeBoolean,
-} from "./codec";
   scValToNative,
+  nativeToScVal,
   Account,
 } from "@stellar/stellar-sdk";
 import type { CallOptions, DidDocument, IdentityStorageStats, SorobanIdentityConfig, SorobanResponse, WriteResult } from "./types";
@@ -130,21 +119,16 @@ export class IdentityClient extends BaseClient {
    *
    * @example
    * ```ts
-   * const { did, estimatedFeeXlm } = await identity.createDid(keypair, { email: 'a@b.c' });
+   * const { data: { did, estimatedFeeXlm } } = await identity.createDid(keypair, { email: 'a@b.c' });
    * console.log(`Issued ${did} for ~${estimatedFeeXlm} XLM`);
    * ```
    */
   async createDid(
     keypair: Keypair,
     metadata: Record<string, string> = {},
-    txOptions?: TxOptions
-  ): Promise<string> {
-    const account = await this.server.getAccount(keypair.publicKey());
-
     options?: CallOptions
   ): Promise<SorobanResponse<{ did: string } & WriteResult>> {
     const account = await this.server.getAccount(keypair.publicKey());
-
     const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
 
     const tx = new TransactionBuilder(account, {
@@ -154,22 +138,12 @@ export class IdentityClient extends BaseClient {
       .addOperation(
         this.contract.call(
           "create_did",
-          encodeAddress(keypair.publicKey()),
-          encodeMap(metadata)
           ...buildCreateDidArgs({ controller: keypair.publicKey(), metadata })
         )
       )
       .setTimeout(timeout)
       .build();
 
-    try {
-      const confirmed = await executeTransaction(
-        this.server,
-        tx,
-        (t) => t.sign(keypair),
-        txOptions
-      );
-      return decodeString(confirmed.returnValue!);
     const prepared = await retryWithBackoff(() => this.server.prepareTransaction(tx));
     const estimatedFee = parseInt(prepared.fee, 10);
     const estimatedFeeXlm = (estimatedFee / 10_000_000).toFixed(7);
@@ -181,12 +155,6 @@ export class IdentityClient extends BaseClient {
       throw new SorobanIdentityError(`Transaction failed: ${result.status}`, "CONTRACT_ERROR");
     }
 
-    try {
-      const confirmed = await this.waitForConfirmation(result.hash);
-      return scValToNative(confirmed.returnValue!) as string;
-    } catch (e) {
-      throw parseContractError(e, "identity");
-    }
     const txHash = result.hash;
     try {
       await pollTransactionStatus(this.server, txHash, {
@@ -227,8 +195,6 @@ export class IdentityClient extends BaseClient {
   async updateDid(
     keypair: Keypair,
     metadata: Record<string, string>,
-    txOptions?: TxOptions
-  ): Promise<void> {
     options?: CallOptions
   ): Promise<SorobanResponse<void>> {
     const account = await this.server.getAccount(keypair.publicKey());
@@ -241,16 +207,12 @@ export class IdentityClient extends BaseClient {
       .addOperation(
         this.contract.call(
           "update_did",
-          encodeAddress(keypair.publicKey()),
-          encodeMap(metadata)
           ...buildUpdateDidArgs({ controller: keypair.publicKey(), metadata })
         )
       )
       .setTimeout(timeout)
       .build();
 
-    try {
-      await executeTransaction(this.server, tx, (t) => t.sign(keypair), txOptions);
     const prepared = await retryWithBackoff(() => this.server.prepareTransaction(tx));
     prepared.sign(keypair);
 
@@ -308,7 +270,6 @@ export class IdentityClient extends BaseClient {
       networkPassphrase: this.config.networkPassphrase,
     })
       .addOperation(
-        this.contract.call("resolve_did", encodeAddress(controllerAddress))
         this.contract.call(
           "resolve_did",
           ...buildResolveDidArgs({ controller: controllerAddress })
@@ -317,10 +278,6 @@ export class IdentityClient extends BaseClient {
       .setTimeout(timeout)
       .build();
 
-    const result = await this.server.simulateTransaction(tx);
-    if (SorobanRpc.Api.isSimulationError(result)) {
-      throw parseContractError(result.error, "identity");
-    }
     const maxRetries = options?.maxRetries ?? this.config.maxRetries ?? 3;
     const baseDelayMs = options?.baseDelayMs ?? this.config.baseDelayMs ?? 500;
     const backoffFactor = options?.backoffFactor ?? this.config.backoffFactor ?? 2;
@@ -396,19 +353,6 @@ export class IdentityClient extends BaseClient {
     return typeof native === "boolean" ? native : Boolean(native);
   }
 
-  private async waitForConfirmation(
-    hash: string,
-    retries = 10
-  ): Promise<SorobanRpc.Api.GetSuccessfulTransactionResponse> {
-    for (let i = 0; i < retries; i++) {
-      await new Promise((r) => setTimeout(r, 2000));
-      const status = await this.server.getTransaction(hash);
-      if (status.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
-        return status as SorobanRpc.Api.GetSuccessfulTransactionResponse;
-      }
-      if (status.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
-        throw parseContractError((status as any).resultXdr || "Transaction failed on-chain", "identity");
-      }
   /**
    * Get the total count of active DIDs registered.
    *
@@ -443,9 +387,6 @@ export class IdentityClient extends BaseClient {
       throw new SorobanIdentityError("Failed to get DID count", "UNKNOWN");
     }
 
-    return decodeDidDocument(
-      (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
-    );
     return scValToNative(
       (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
         .result!.retval
@@ -453,7 +394,6 @@ export class IdentityClient extends BaseClient {
   }
 
   /**
-   * Deactivate the DID associated with the given keypair.
    * Deactivate the DID owned by `keypair`.
    *
    * Marks the DID inactive on-chain; subsequent `hasActiveDid` returns `false`.
@@ -481,7 +421,6 @@ export class IdentityClient extends BaseClient {
       networkPassphrase: this.config.networkPassphrase,
     })
       .addOperation(
-        this.contract.call("has_active_did", encodeAddress(controllerAddress))
         this.contract.call(
           "deactivate_did",
           ...buildDeactivateDidArgs({ controller: keypair.publicKey() })
@@ -508,14 +447,6 @@ export class IdentityClient extends BaseClient {
     return { data: undefined, txHash };
   }
 
-  /**
-   * Get storage usage statistics for the identity registry.
-   *
-   * @param callerAddress Stellar address used to build the read simulation.
-   * @param options       Per-call overrides (currently `timeoutSeconds`).
-   * @returns The current {@link IdentityStorageStats}.
-   * @throws {SorobanIdentityError} on simulation failure.
-   */
   /**
    * List DID documents with offset-based pagination.
    *
@@ -562,14 +493,19 @@ export class IdentityClient extends BaseClient {
       throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, "CONTRACT_ERROR");
     }
 
-    return decodeBoolean(
-      (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
-    );
     return scValToNative(
       (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
     ) as DidDocument[];
   }
 
+  /**
+   * Get storage usage statistics for the identity registry.
+   *
+   * @param callerAddress Stellar address used to build the read simulation.
+   * @param options       Per-call overrides (currently `timeoutSeconds`).
+   * @returns The current {@link IdentityStorageStats}.
+   * @throws {SorobanIdentityError} on simulation failure.
+   */
   async getStorageStats(callerAddress: string, options?: CallOptions): Promise<IdentityStorageStats> {
     validateStellarAddress(callerAddress);
     const account = new Account(callerAddress, "0");

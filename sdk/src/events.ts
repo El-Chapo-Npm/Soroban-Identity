@@ -95,7 +95,7 @@ function parseRawEvent(event: SorobanRpc.Api.EventResponse): ContractEvent | nul
         ? (scValToNative(event.value) as Record<string, unknown>)
         : {};
 
-    return { type: event.type, contractId, topic, value, ledger: event.ledger, txHash: event.txHash };
+    return { type: event.type, contractId, topic, value, ledger: event.ledger, txHash: event.txHash, eventId: event.id };
   } catch {
     return null;
   }

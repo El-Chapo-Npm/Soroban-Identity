@@ -160,7 +160,7 @@ describe('IdentityClient', () => {
     mockIsSimulationError.mockReturnValue(false);
     mockSimulateTransaction.mockResolvedValue({ result: { retval: {} } });
     const { scValToNative } = await import('@stellar/stellar-sdk');
-    (scValToNative as ReturnType<typeof vi.fn>).mockReturnValue(mockStats);
+    (scValToNative as ReturnType<typeof vi.fn>).mockReturnValueOnce(mockStats);
 
     const result = await client.getStorageStats('GCALLER');
     expect(result).toEqual(mockStats);
@@ -202,7 +202,7 @@ describe('resolveDid — retry on transient RPC failures (#352)', () => {
 
     await expect(
       client.resolveDid('GABC', { maxRetries: 3, baseDelayMs: 0 })
-    ).rejects.toThrow('NOT_FOUND' || 'No DID found');
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
     expect(mockSimulateTransaction).toHaveBeenCalledTimes(1);
   });
 

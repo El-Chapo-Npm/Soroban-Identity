@@ -76,20 +76,25 @@ export interface VerifiablePresentation {
 // ── Verification result ──────────────────────────────────────────────────────
 
 /**
- * Reason a {@link VerifiablePresentation} failed structural verification.
+ * Reason a {@link VerifiablePresentation} failed verification.
  *
  * - `INVALID_CONTEXT` — the required W3C context URL is absent.
  * - `INVALID_TYPE` — `VerifiablePresentation` is not in the `type` array.
  * - `MISSING_CREDENTIALS` — `verifiableCredential` is empty or absent.
  * - `INCOMPLETE_CREDENTIAL` — a credential subset is missing required fields.
  * - `MISSING_CLAIMS` — a credential subset has no `credentialSubject` claims.
+ * - `MISSING_PROOF` — the presentation has no `proof`/`proof.jws`, or no `holder`.
+ * - `INVALID_PROOF` — `proof.jws` does not verify against the holder's DID key,
+ *   or does not bind to the disclosed claim values.
  */
 export type PresentationVerifyFailReason =
   | 'INVALID_CONTEXT'
   | 'INVALID_TYPE'
   | 'MISSING_CREDENTIALS'
   | 'INCOMPLETE_CREDENTIAL'
-  | 'MISSING_CLAIMS';
+  | 'MISSING_CLAIMS'
+  | 'MISSING_PROOF'
+  | 'INVALID_PROOF';
 
 /**
  * Result from {@link PresentationClient.verifyPresentation}.
@@ -104,6 +109,29 @@ export type PresentationVerifyResult =
 // ── PresentationClient ───────────────────────────────────────────────────────
 
 const W3C_VC_CONTEXT_V2 = 'https://www.w3.org/ns/credentials/v2';
+
+/**
+ * Build the canonical byte payload that a presentation's `proof.jws` signs
+ * over. Binds the signature to the credential identity, the holder, and the
+ * actual disclosed claim *values* (not just the field names) so a verifier
+ * can detect a swapped or stripped claim.
+ */
+function buildPresentationSigningPayload(
+  credentialId: string,
+  holderAddress: string,
+  disclosedClaims: Record<string, string>
+): Buffer {
+  const sortedClaims = Object.fromEntries(
+    Object.entries(disclosedClaims).sort(([a], [b]) => a.localeCompare(b))
+  );
+  return Buffer.from(
+    JSON.stringify({
+      credentialId,
+      holderAddress,
+      disclosedClaims: sortedClaims,
+    })
+  );
+}
 
 /**
  * Client for creating and verifying W3C VC Data Model 2.0 Verifiable
@@ -221,13 +249,10 @@ export class PresentationClient {
         const didDoc = await proofInput.identityClient.resolveDid(holderAddress!);
         const signerAddress = didDoc.controller;
 
-        // Canonical payload: deterministic function of credential identity + fields
-        const payloadBytes = Buffer.from(
-          JSON.stringify({
-            credentialId: credential.id,
-            fieldsToDisclose: [...fieldsToDisclose].sort(),
-            holderAddress,
-          })
+        const payloadBytes = buildPresentationSigningPayload(
+          credential.id,
+          holderAddress!,
+          disclosedClaims
         );
 
         let sigBytes: Buffer;

@@ -1,24 +1,12 @@
 import {
   Account,
-  Contract,
   SorobanRpc,
   TransactionBuilder,
   BASE_FEE,
   Keypair,
+  nativeToScVal,
+  scValToNative,
 } from "@stellar/stellar-sdk";
-import type { Credential, CredentialType, SorobanIdentityConfig, VerifyResult } from "./types";
-import { executeTransaction, TxOptions } from "./transaction";
-import {
-  encodeAddress,
-  encodeMap,
-  encodeBytes,
-  encodeSymbol,
-  encodeU64,
-  decodeCredential,
-  decodeCredentialId,
-  decodeCredentialIdList,
-  decodeBoolean,
-} from "./codec";
 import { createHash } from "node:crypto";
 import type {
   CallOptions,
@@ -36,7 +24,7 @@ import type {
 } from "./types";
 import { validateConfig } from "./types";
 import { retryWithBackoff, validateStellarAddress, pollTransactionStatus, runConcurrent } from "./utils";
-import { ContractError, SorobanIdentityError, wrapError } from "./errors";
+import { ContractError, SorobanIdentityError, wrapError, ClaimsValidationError, ClientDisposedError } from "./errors";
 import { CREDENTIAL_MANAGER_ERRORS } from "./error-codes";
 import { BaseClient } from "./base-client";
 import {
@@ -78,7 +66,33 @@ export function toCredentialExpiry(dateOrMs: Date | number): number {
 }
 const CREDENTIAL_NOT_FOUND_CODE = 3;
 const CREDENTIAL_REVOKED_CODE = 4;
-const CREDENTIAL_EXPIRED_CODE = 9;
+
+/**
+ * Input item for {@link CredentialClient.issueCredentialBatch}. Mirrors the
+ * positional arguments of {@link CredentialClient.issueCredential}.
+ */
+export interface CredentialInput {
+  issuerKeypair: Keypair;
+  subjectAddress: string;
+  credentialType: CredentialType;
+  claims: Record<string, string>;
+  claimsHashHex: string;
+  expiresAt?: number;
+  options?: CallOptions & { nonce?: string; schemaId?: string };
+  signatureHex?: string;
+}
+
+/** Options accepted by {@link CredentialClient.issueCredentialBatch}. */
+export interface BatchOptions {
+  /** Number of items to issue concurrently per chunk. Defaults to `5`. */
+  concurrency?: number;
+}
+
+/** Result of {@link CredentialClient.issueCredentialBatch}. */
+export interface BatchResult {
+  succeeded: SorobanResponse<{ credentialId: string } & WriteResult>[];
+  failed: { input: CredentialInput; error: SorobanIdentityError }[];
+}
 
 /**
  * Client for the credential-manager contract.
@@ -139,13 +153,6 @@ export class CredentialClient extends BaseClient {
   }
 
   /**
-   * Parameters accepted by {@link CredentialClient.issueCredential} and
-   * {@link CredentialClient.estimateIssuanceFee}.
-   */
-  // Defined here (not in types.ts) to keep the Keypair import local to this file.
-  // Re-exported via index.ts as `IssueCredentialParams`.
-
-  /**
    * Estimate the XLM fee for issuing a credential without signing or submitting.
    *
    * Runs the Soroban simulation step only — identical to the first half of
@@ -202,7 +209,7 @@ export class CredentialClient extends BaseClient {
             claims,
             claimsHash: Buffer.from(claimsHashHex, "hex"),
             signature: dummySignature,
-            expiresAt,
+            expiresAt: BigInt(expiresAt),
           })
         )
       )
@@ -246,7 +253,11 @@ export class CredentialClient extends BaseClient {
     if (result.status !== "PENDING") {
       throw new Error(`Transaction failed: ${result.status}`);
     }
-    await this.waitForConfirmation(result.hash);
+    await pollTransactionStatus(this.server, result.hash, {
+      maxAttempts: this.config.pollingRetries,
+      intervalMs: this.config.pollingIntervalMs,
+      exponentialBackoff: this.config.pollingExponentialBackoff,
+    });
   }
 
   /**
@@ -270,7 +281,7 @@ export class CredentialClient extends BaseClient {
    *                        `schemaId` (claims validation, #298).
    * @param signatureHex    Optional pre-computed 64-byte issuer signature as a
    *                        128-char hex string. If omitted, the SDK signs over
-   *                        `JSON.stringify({ subjectAddress, claims })`.
+   *                        the canonical `issuer || subject || claimsHash [|| nonce]` digest.
    * @returns `{ data: { credentialId, estimatedFee, estimatedFeeXlm }, txHash }`
    *          where `txHash` is the on-chain transaction hash for auditing.
    * @throws {SorobanIdentityError} with code `VALIDATION_ERROR` if
@@ -285,29 +296,6 @@ export class CredentialClient extends BaseClient {
     subjectAddress: string,
     credentialType: CredentialType,
     claims: Record<string, string>,
-    expiresAt = 0,
-    txOptions?: TxOptions
-  ): Promise<string> {
-    const account = await this.server.getAccount(issuerKeypair.publicKey());
-
-    // Build canonical signed message matching on-chain build_signed_message
-    let msgBuf = Buffer.concat([
-      Buffer.from(issuerKeypair.publicKey(), "utf8"),
-      Buffer.from(subjectAddress, "utf8"),
-    ]);
-    const sortedKeys = Object.keys(claims).sort();
-    for (const k of sortedKeys) {
-      msgBuf = Buffer.concat([
-        msgBuf,
-        Buffer.from(k, "utf8"),
-        Buffer.from(claims[k], "utf8"),
-      ]);
-    }
-
-    const signature = issuerKeypair.sign(msgBuf);
-    const signature = issuerKeypair.sign(
-      Buffer.from(JSON.stringify({ subjectAddress, claims }))
-    );
     claimsHashHex: string,
     expiresAt = 0,
     options?: CallOptions & { nonce?: string; schemaId?: string },
@@ -452,13 +440,6 @@ export class CredentialClient extends BaseClient {
     })
       .addOperation(
         this.contract.call(
-          "issue_credential",
-          encodeAddress(issuerKeypair.publicKey()),
-          encodeAddress(subjectAddress),
-          encodeSymbol(credentialType),
-          encodeMap(claims),
-          encodeBytes(Buffer.from(signature)),
-          encodeU64(expiresAt)
           'revoke_credential',
           ...buildRevokeCredentialArgs({ issuer: issuerKeypair.publicKey(), credentialId: idBytes })
         )
@@ -466,14 +447,6 @@ export class CredentialClient extends BaseClient {
       .setTimeout(timeout)
       .build();
 
-    const confirmed = await executeTransaction(
-      this.server,
-      tx,
-      (t) => t.sign(issuerKeypair),
-      txOptions
-    );
-    const raw = decodeCredentialId(confirmed.returnValue!);
-    return Buffer.from(raw).toString("hex");
     try {
       const prepared = await retryWithBackoff(() => this.server.prepareTransaction(tx));
       prepared.sign(issuerKeypair);
@@ -547,7 +520,6 @@ export class CredentialClient extends BaseClient {
     }
   }
 
-
   /**
    * Verify a credential and get a typed result describing any failure reason.
    *
@@ -582,6 +554,9 @@ export class CredentialClient extends BaseClient {
     credentialId: string,
     options?: CallOptions
   ): Promise<VerifyResult> {
+    if (this.isDisposed) {
+      throw new ClientDisposedError();
+    }
     validateStellarAddress(callerAddress);
     const account = await this.server.getAccount(callerAddress);
     const idBytes = Buffer.from(credentialId, "hex");
@@ -592,7 +567,6 @@ export class CredentialClient extends BaseClient {
       networkPassphrase: this.config.networkPassphrase,
     })
       .addOperation(
-        this.contract.call("verify_credential", encodeBytes(idBytes))
         this.contract.call(
           "verify_credential",
           ...buildVerifyCredentialArgs({ credentialId: idBytes })
@@ -614,7 +588,6 @@ export class CredentialClient extends BaseClient {
       return { valid: false, reason: 'unknown' };
     }
 
-    const valid = decodeBoolean(
     const retval = scValToNative(
       (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
     );
@@ -631,7 +604,6 @@ export class CredentialClient extends BaseClient {
       }
       return { valid: false, reason: 'unknown' };
     } catch {
-      return { valid: false, reason: "not_found" };
       return { valid: false, reason: 'unknown' };
     }
   }
@@ -671,7 +643,6 @@ export class CredentialClient extends BaseClient {
       .addOperation(
         this.contract.call(
           "get_subject_credentials",
-          encodeAddress(subjectAddress)
           ...buildGetSubjectCredentialsArgs({ subject: subjectAddress })
         )
       )
@@ -688,8 +659,6 @@ export class CredentialClient extends BaseClient {
       throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, "CONTRACT_ERROR");
     }
 
-    const ids = decodeCredentialIdList(
-      (idsResult as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
     const ids = scValToNative(
       (idsResult as SorobanRpc.Api.SimulateTransactionSuccessResponse)
         .result!.retval
@@ -760,10 +729,10 @@ export class CredentialClient extends BaseClient {
       throw contractErr;
     }
 
-    return decodeCredential(
+    return scValToNative(
       (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
         .result!.retval
-    );
+    ) as Credential;
   }
 
   /**
@@ -1262,7 +1231,6 @@ export class CredentialClient extends BaseClient {
       networkPassphrase: this.config.networkPassphrase,
     })
       .addOperation(
-        this.contract.call("get_credential", encodeBytes(idBytes))
         this.contract.call(
           'list_issuer_credentials',
           ...buildListIssuerCredentialsArgs({
@@ -1283,9 +1251,6 @@ export class CredentialClient extends BaseClient {
       throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, 'CONTRACT_ERROR');
     }
 
-    return decodeCredential(
-      (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
-    );
     const raw = scValToNative(
       (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
     ) as { items: Uint8Array[]; next_cursor: number | null };
