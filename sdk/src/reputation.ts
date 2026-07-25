@@ -1,30 +1,19 @@
 import {
   Account,
-  Contract,
   SorobanRpc,
   TransactionBuilder,
   BASE_FEE,
   Keypair,
-} from "@stellar/stellar-sdk";
-import type { SorobanIdentityConfig, ReputationRecord, ScoreHistoryEntry } from "./types";
-import { executeTransaction, TxOptions } from "./transaction";
-import {
-  encodeAddress,
-  encodeI64,
-  encodeU32,
-  encodeString,
-  decodeReputationRecord,
-  decodeScoreHistory,
-  decodeBoolean,
-} from "./codec";
   nativeToScVal,
   scValToNative,
-} from '@stellar/stellar-sdk';
+} from "@stellar/stellar-sdk";
 import type {
   CallOptions,
   Page,
   PaginationOptions,
+  ReputationRecord,
   ReputationStorageStats,
+  ScoreHistoryEntry,
   SorobanIdentityConfig,
   SorobanResponse,
   WriteResult,
@@ -51,13 +40,6 @@ import {
 } from './contract-args';
 
 const PROBE_ADDRESS = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
-
-export interface ReputationRecord {
-  subject: string;
-  score: number;
-  reporterCount: number;
-  updatedAt: number;
-}
 
 export type { ReputationRecord, ScoreHistoryEntry };
 
@@ -196,7 +178,6 @@ export class ReputationClient extends BaseClient {
       networkPassphrase: this.config.networkPassphrase,
     })
       .addOperation(
-        this.contract.call("get_reputation", encodeAddress(subjectAddress))
         this.contract.call(
           'get_reputation',
           ...buildGetReputationArgs({ subject: subjectAddress })
@@ -227,9 +208,6 @@ export class ReputationClient extends BaseClient {
       throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, 'CONTRACT_ERROR');
     }
 
-    return decodeReputationRecord(
-      (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
-    );
     return scValToNative(
       (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!
         .retval
@@ -275,11 +253,6 @@ export class ReputationClient extends BaseClient {
     })
       .addOperation(
         this.contract.call(
-          "get_history",
-          encodeAddress(subjectAddress),
-          encodeAddress(reporterAddress),
-          encodeU32(offset),
-          encodeU32(limit)
           'get_history',
           ...buildGetHistoryArgs({
             subject: subjectAddress,
@@ -302,9 +275,6 @@ export class ReputationClient extends BaseClient {
       throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, 'CONTRACT_ERROR');
     }
 
-    return decodeScoreHistory(
-      (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
-    );
     return scValToNative(
       (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!
         .retval
@@ -390,10 +360,6 @@ export class ReputationClient extends BaseClient {
     })
       .addOperation(
         this.contract.call(
-          "passes_sybil_check",
-          encodeAddress(subjectAddress),
-          encodeI64(minScore),
-          encodeU32(minReporters)
           'passes_sybil_check',
           ...buildPassesSybilCheckArgs({ subject: subjectAddress, minScore: BigInt(minScore), minReporters })
         )
@@ -406,9 +372,6 @@ export class ReputationClient extends BaseClient {
     );
     if (SorobanRpc.Api.isSimulationError(result)) return false;
 
-    return decodeBoolean(
-      (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
-    );
     return scValToNative(
       (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!
         .retval
@@ -436,8 +399,6 @@ export class ReputationClient extends BaseClient {
     subjectAddress: string,
     delta: number,
     reason: string,
-    txOptions?: TxOptions
-  ): Promise<void> {
     options?: CallOptions
   ): Promise<SorobanResponse<WriteResult>> {
     const account = await this.server.getAccount(reporterKeypair.publicKey());
@@ -593,11 +554,6 @@ export class ReputationClient extends BaseClient {
     })
       .addOperation(
         this.contract.call(
-          "submit_score",
-          encodeAddress(reporterKeypair.publicKey()),
-          encodeAddress(subjectAddress),
-          encodeI64(delta),
-          encodeString(reason)
           'list_reporters',
           ...buildListReportersArgs({ cursor: cursorArg, limit: options?.limit ?? 0 })
         )
@@ -605,12 +561,6 @@ export class ReputationClient extends BaseClient {
       .setTimeout(timeout)
       .build();
 
-    await executeTransaction(
-      this.server,
-      tx,
-      (t) => t.sign(reporterKeypair),
-      txOptions
-    );
     const result = await retryWithBackoff(() => this.server.simulateTransaction(tx));
     if (SorobanRpc.Api.isSimulationError(result)) {
       const errMsg = result.error ?? '';
@@ -626,19 +576,6 @@ export class ReputationClient extends BaseClient {
     return { items: raw.items, nextCursor: raw.next_cursor ?? null };
   }
 
-  /**
-   * Cursor-paginated variant of {@link ReputationClient.getScoreHistory}.
-   *
-   * See [issue #248](https://github.com/El-Chapo-Npm/Soroban-Identity/issues/248).
-   *
-   * @param callerAddress   Stellar address used to build the read-only simulation.
-   * @param subjectAddress  Subject whose history is being queried.
-   * @param reporterAddress Reporter whose submissions to include.
-   * @param options         Pagination + per-call overrides.
-   * @returns A page of {@link ScoreHistoryEntry} with the next resume cursor.
-   * @throws {SorobanIdentityError} on simulation failure (network or contract error,
-   *         including `ReporterNotFound` when the reporter is not registered).
-   */
   /**
    * Get the current numeric score for a subject.
    *
@@ -662,6 +599,19 @@ export class ReputationClient extends BaseClient {
     return record.score;
   }
 
+  /**
+   * Cursor-paginated variant of {@link ReputationClient.getScoreHistory}.
+   *
+   * See [issue #248](https://github.com/El-Chapo-Npm/Soroban-Identity/issues/248).
+   *
+   * @param callerAddress   Stellar address used to build the read-only simulation.
+   * @param subjectAddress  Subject whose history is being queried.
+   * @param reporterAddress Reporter whose submissions to include.
+   * @param options         Pagination + per-call overrides.
+   * @returns A page of {@link ScoreHistoryEntry} with the next resume cursor.
+   * @throws {SorobanIdentityError} on simulation failure (network or contract error,
+   *         including `ReporterNotFound` when the reporter is not registered).
+   */
   async listScoreHistory(
     callerAddress: string,
     subjectAddress: string,

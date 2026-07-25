@@ -1,10 +1,7 @@
-export { IdentityClient } from "./identity";
-export { CredentialClient } from "./credentials";
-export { ReputationClient } from "./reputation";
-export { SorobanIdentityError, parseContractError } from "./errors";
-export type { SorobanErrorCode } from "./errors";
-export * as v1 from './v1';
+import type { SorobanIdentityConfig } from './types';
+
 export { IdentityClient } from './identity';
+export * as v1 from './v1';
 export { health, healthCheck } from './health';
 export type { HealthResult, HealthCheckResult } from './health';
 export { CredentialClient } from './credentials';
@@ -88,12 +85,6 @@ export type {
   CredentialListOptions,
   VerifyResult,
   VerifyFailReason,
-  SorobanIdentityConfig,
-  ReputationRecord,
-  ScoreHistoryEntry,
-} from "./types";
-export { executeTransaction } from "./transaction";
-export type { TxOptions } from "./transaction";
   CallOptions,
   IdentityStorageStats,
   CredentialStorageStats,
@@ -103,11 +94,14 @@ export type { TxOptions } from "./transaction";
   SorobanIdentityContractIdField,
   ValidateConfigOptions,
   SorobanResponse,
-} from './types';
+} from "./types";
+export { executeTransaction } from "./transaction";
+export type { TxOptions } from "./transaction";
 export { validateConfig } from './types';
 export type { ReputationRecord, ScoreHistoryEntry } from './reputation';
 export type { EventFilter, ContractEvent, GetEventsOptions } from './events';
-export type { SorobanIdentityConfig, SorobanIdentityLogger, WriteResult } from './types';
+export type { SorobanIdentityLogger, WriteResult } from './types';
+export type { SorobanIdentityConfig };
 
 // Testnet defaults — fill contract IDs after deployment
 export const TESTNET_CONFIG: SorobanIdentityConfig = {

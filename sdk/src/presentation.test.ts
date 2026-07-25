@@ -30,14 +30,17 @@ const CREDENTIAL: Credential = {
 
 function makePayloadBytes(
   credentialId: string,
-  fieldsToDisclose: string[],
+  disclosedClaims: Record<string, string>,
   holderAddress: string
 ): Buffer {
+  const sortedClaims = Object.fromEntries(
+    Object.entries(disclosedClaims).sort(([a], [b]) => a.localeCompare(b))
+  );
   return Buffer.from(
     JSON.stringify({
       credentialId,
-      fieldsToDisclose: [...fieldsToDisclose].sort(),
       holderAddress,
+      disclosedClaims: sortedClaims,
     })
   );
 }
@@ -68,7 +71,11 @@ describe("PresentationClient.createPresentation", () => {
     const holder = Keypair.random();
     const holderAddress = holder.publicKey();
 
-    const payloadBytes = makePayloadBytes(CREDENTIAL.id, ["name", "country"], holderAddress);
+    const payloadBytes = makePayloadBytes(
+      CREDENTIAL.id,
+      { name: CREDENTIAL.claims["name"]!, country: CREDENTIAL.claims["country"]! },
+      holderAddress
+    );
     const sigBytes = holder.sign(payloadBytes);
     const jws = Buffer.from(sigBytes).toString("base64url");
 
