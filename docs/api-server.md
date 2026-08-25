@@ -103,3 +103,35 @@ envelope body `{ error: { code: "RATE_LIMITED", ... } }`.
 
 Limits are configurable via environment variables when host
 applications read them at startup; defaults match the issue's spec.
+
+## Content Negotiation (#683)
+
+The API server supports multiple response formats based on the client's `Accept` HTTP header.
+
+### Supported Media Types
+- **JSON** (Default): `application/json`, `*/*`, `application/*`
+- **XML**: `application/xml`, `text/xml`
+- **YAML**: `application/yaml`, `application/x-yaml`, `text/yaml`, `text/x-yaml`
+
+### Content Negotiation Behavior
+1. When no `Accept` header is present or `*/*` is provided, responses are formatted as `application/json; charset=utf-8`.
+2. When `Accept: application/xml` or `Accept: text/xml` is specified, responses are serialized as standard XML with `application/xml; charset=utf-8`.
+3. When `Accept: application/yaml` or `Accept: text/yaml` is specified, responses are serialized as YAML with `application/yaml; charset=utf-8`.
+4. Quality factors (`q` parameter, e.g. `application/xml;q=0.9, application/json;q=0.8`) are parsed and respected in order of client preference.
+5. If the requested media type is unsupported and cannot be satisfied (e.g. `Accept: image/png` or `Accept: text/html`), the server returns `406 Not Acceptable`:
+
+```json
+{
+  "error": "not_acceptable",
+  "code": "NOT_ACCEPTABLE",
+  "message": "Unsupported format requested in Accept header. Supported formats: application/json, application/xml, text/xml, application/yaml, text/yaml",
+  "supportedFormats": [
+    "application/json",
+    "application/xml",
+    "text/xml",
+    "application/yaml",
+    "text/yaml"
+  ]
+}
+```
+

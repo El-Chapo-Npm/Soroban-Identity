@@ -7,6 +7,7 @@ import {
   readJson,
   requireAdmin,
   requireAuth,
+  sendFormatted,
   sendJson,
   sendText,
   setCorsHeaders,
@@ -44,7 +45,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator }) {
     return requestContextStore.run({ requestId }, async () => {
       try {
         if (req.method === "GET" && url.pathname === "/info") {
-          return sendJson(res, 200, {
+          return sendFormatted(req, res, 200, {
             version: SERVER_VERSION,
             features: SERVER_FEATURES,
             minSdkVersion: MIN_SDK_VERSION,
@@ -54,7 +55,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator }) {
         if (req.method === "GET" && url.pathname === "/health") {
           const contracts = await soroban.pingAllContracts();
           const ok = Object.values(contracts).every(Boolean);
-          return sendJson(res, ok ? 200 : 503, {
+          return sendFormatted(req, res, ok ? 200 : 503, {
             status: ok ? "ok" : "degraded",
             contracts,
             circuitBreaker: soroban.circuitBreaker.toHealthInfo(),
@@ -74,14 +75,14 @@ export function createApp({ config, soroban, metrics, metricsAggregator }) {
           const limitParam = url.searchParams.get("limit") ?? "50";
           const limitNum = Number.parseInt(limitParam, 10) || 50;
           if (limitNum > 200) {
-            return sendJson(res, 400, { code: "INVALID_REQUEST", message: "limit must not exceed 200" });
+            return sendFormatted(req, res, 400, { code: "INVALID_REQUEST", message: "limit must not exceed 200" });
           }
           const credentials = await readCredentials(config);
           const { items, nextCursor } = paginateCursor(credentials, {
             limit: limitNum,
             cursor: url.searchParams.get("cursor"),
           });
-          return sendJson(res, 200, { items, nextCursor });
+          return sendFormatted(req, res, 200, { items, nextCursor });
         }
 
         // Single-item GET /credentials/:id
@@ -90,8 +91,8 @@ export function createApp({ config, soroban, metrics, metricsAggregator }) {
           const credentialId = decodeURIComponent(credentialIdMatch[1]);
           const credentials = await readCredentials(config);
           const credential = credentials.find((c) => c.id === credentialId);
-          if (!credential) return notFound(res);
-          return sendJson(res, 200, credential);
+          if (!credential) return notFound(res, req);
+          return sendFormatted(req, res, 200, credential);
         }
 
         const verifyMatch = url.pathname.match(/^\/credentials\/([^/]+)\/verify$/);
@@ -103,16 +104,16 @@ export function createApp({ config, soroban, metrics, metricsAggregator }) {
           const credentials = await readCredentials(config);
           const credential = credentials.find((c) => c.id === credentialId);
           if (!credential) {
-            return sendJson(res, 200, { verified: false, reason: "not_found" });
+            return sendFormatted(req, res, 200, { verified: false, reason: "not_found" });
           }
           if (credential.revoked) {
-            return sendJson(res, 200, { verified: false, reason: "revoked" });
+            return sendFormatted(req, res, 200, { verified: false, reason: "revoked" });
           }
           const now = Math.floor(Date.now() / 1000);
           if (credential.expiresAt > 0 && credential.expiresAt < now) {
-            return sendJson(res, 200, { verified: false, reason: "expired" });
+            return sendFormatted(req, res, 200, { verified: false, reason: "expired" });
           }
-          return sendJson(res, 200, { verified: true, credential });
+          return sendFormatted(req, res, 200, { verified: true, credential });
         }
 
         if (
@@ -126,16 +127,16 @@ export function createApp({ config, soroban, metrics, metricsAggregator }) {
           if (validateContentType(req, res)) return;
           const body = await readJson(req, config);
           if (body.__payloadTooLarge)
-            return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+            return sendFormatted(req, res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
           if (!body.id)
-            return sendJson(res, 400, { code: "INVALID_REQUEST", message: "Request body must include a credential id." });
+            return sendFormatted(req, res, 400, { code: "INVALID_REQUEST", message: "Request body must include a credential id." });
           try {
             const updated = await createAndPersistCredential(config, body);
             await appendAuditLog(config, { action: "issue_credential", credentialId: body.id });
-            return sendJson(res, 201, body);
+            return sendFormatted(req, res, 201, body);
           } catch (err) {
             if (err instanceof DuplicateCredentialError) {
-              return sendJson(res, 409, {
+              return sendFormatted(req, res, 409, {
                 code: "CREDENTIAL_ALREADY_EXISTS",
                 message: err.message,
                 details: [{ field: "id", value: err.id }],
@@ -150,23 +151,23 @@ export function createApp({ config, soroban, metrics, metricsAggregator }) {
           if (!requireAuth(req, res, config, ['admin:read'])) return;
           
           const issuers = await soroban.getIssuers();
-          return sendJson(res, 200, { issuers });
+          return sendFormatted(req, res, 200, { issuers });
         }
 
         if (req.method === "POST" && url.pathname === "/admin/issuers") {
           if (validateContentType(req, res)) return;
           const body = await readJson(req, config);
           if (body.__payloadTooLarge)
-            return sendJson(res, 413, { error: "payload_too_large" });
+            return sendFormatted(req, res, 413, { error: "payload_too_large" });
           if (!body.issuer)
-            return sendJson(res, 400, { error: "issuer_required" });
+            return sendFormatted(req, res, 400, { error: "issuer_required" });
           await soroban.addIssuer(body.issuer);
           await appendAuditLog(config, {
             action: "add_issuer",
             actor: req.headers["x-actor"] ?? config.adminActor,
             issuer: body.issuer,
           });
-          return sendJson(res, 201, { issuer: body.issuer });
+          return sendFormatted(req, res, 201, { issuer: body.issuer });
         }
 
         if (req.method === "DELETE" && url.pathname === "/admin/issuers") {
@@ -175,16 +176,16 @@ export function createApp({ config, soroban, metrics, metricsAggregator }) {
           
           const body = await readJson(req, config);
           if (body.__payloadTooLarge)
-            return sendJson(res, 413, { error: "payload_too_large" });
+            return sendFormatted(req, res, 413, { error: "payload_too_large" });
           const issuer = body.issuer ?? url.searchParams.get("issuer");
-          if (!issuer) return sendJson(res, 400, { error: "issuer_required" });
+          if (!issuer) return sendFormatted(req, res, 400, { error: "issuer_required" });
           await soroban.removeIssuer(issuer);
           await appendAuditLog(config, {
             action: "remove_issuer",
             actor: req.headers["x-actor"] ?? config.adminActor,
             issuer,
           });
-          return sendJson(res, 200, { issuer });
+          return sendFormatted(req, res, 200, { issuer });
         }
 
         if (req.method === "GET" && url.pathname === "/admin/expiry-report") {
@@ -199,7 +200,8 @@ export function createApp({ config, soroban, metrics, metricsAggregator }) {
             windowDays,
             includeNotified: true,
           });
-          return sendJson(
+          return sendFormatted(
+            req,
             res,
             200,
             paginate(expiring, {
@@ -209,7 +211,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator }) {
           );
         }
 
-        return notFound(res);
+        return notFound(res, req);
       } catch (error) {
         if (error.name === "SorobanError") {
           logger.error({ 
@@ -217,13 +219,13 @@ export function createApp({ config, soroban, metrics, metricsAggregator }) {
             message: error.publicMessage,
             internalDetail: error.internalDetail 
           }, 'Soroban error occurred');
-          return sendJson(res, 500, {
+          return sendFormatted(req, res, 500, {
             error: error.category,
             message: error.publicMessage,
           });
         }
         logger.error({ error: error.message, stack: error.stack }, 'Internal server error');
-        return sendJson(res, 500, {
+        return sendFormatted(req, res, 500, {
           error: "internal_server_error",
           message: error.message,
         });
