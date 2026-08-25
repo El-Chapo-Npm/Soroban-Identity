@@ -135,3 +135,20 @@ The API server supports multiple response formats based on the client's `Accept`
 }
 ```
 
+## API Analytics & Usage Dashboard (#682)
+
+The server includes real-time API analytics monitoring and an administrative usage dashboard.
+
+### Features
+- **Requests & Latency Tracking**: Tracks total requests, response times (min, max, average), and error counts per endpoint.
+- **Top Consumers**: Tracks API consumption and error rates broken down by API key / client.
+- **Geographic Distribution**: Analyzes client geographic traffic distribution based on proxy headers (`CF-IPCountry`, `X-Country`, etc.) and client addresses.
+- **Real-Time Graphs**: Interactive dashboard rendering time-series request/error trends and geo breakdown.
+- **Export Data**: Analytics summary and recent request logs can be exported in CSV or JSON.
+
+### Endpoints (Requires `admin:read` scope)
+- `GET /admin/analytics`: Returns aggregated analytics JSON summary with overview stats, endpoints breakdown, top consumers, and time-series buckets.
+- `GET /admin/analytics/dashboard`: Serves the interactive HTML/JS dashboard with real-time charts and live status metrics.
+- `GET /admin/analytics/export`: Exports analytics data as downloadable CSV (`?format=csv`) or JSON (`?format=json`).
+
+

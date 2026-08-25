@@ -4,6 +4,7 @@ import { createApp } from './app.js';
 import { ensureDataDir } from './storage.js';
 import { ExpiryNotificationJob } from './expiry.js';
 import { MetricsAggregator, MetricsService } from './metrics.js';
+import { AnalyticsService } from './analytics.js';
 import { SorobanClient } from './soroban.js';
 import { logger } from './logger.js';
 
@@ -29,13 +30,14 @@ logDefaultValues();
 const config = loadConfig();
 await ensureDataDir(config);
 const metrics = new MetricsService();
+const analytics = new AnalyticsService();
 const soroban = new SorobanClient(config, metrics);
 const metricsAggregator = new MetricsAggregator(soroban, metrics, { startLedger: Number.parseInt(process.env.METRICS_START_LEDGER ?? '0', 10) });
 const expiryJob = new ExpiryNotificationJob(config, soroban);
 
 if (process.env.DISABLE_EXPIRY_JOB !== 'true') expiryJob.start();
 
-const server = http.createServer(createApp({ config, soroban, metrics, metricsAggregator }));
+const server = http.createServer(createApp({ config, soroban, metrics, metricsAggregator, analytics }));
 
 const connections = new Set();
 server.on('connection', (socket) => {

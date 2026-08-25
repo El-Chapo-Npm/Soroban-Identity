@@ -15,12 +15,14 @@ import {
 } from "./http-utils.js";
 import { requestContextStore } from "./request-context.js";
 import { logger } from "./logger.js";
+import { AnalyticsService, detectCountry } from "./analytics.js";
 const SERVER_VERSION = "0.1.0";
 const MIN_SDK_VERSION = "0.1.0";
 const SERVER_FEATURES = ["webhook_delivery", "batch_issuance", "event_polling"];
 
-export function createApp({ config, soroban, metrics, metricsAggregator }) {
+export function createApp({ config, soroban, metrics, metricsAggregator, analytics = new AnalyticsService() }) {
   return function app(req, res) {
+    const startTime = Date.now();
     const url = new URL(
       req.url,
       `http://${req.headers.host ?? "localhost"}`,
@@ -41,6 +43,25 @@ export function createApp({ config, soroban, metrics, metricsAggregator }) {
       // Preflight OPTIONS request
       return res.writeHead(204).end();
     }
+
+    // Record analytics when response completes
+    res.on("finish", () => {
+      const durationMs = Math.max(0, Date.now() - startTime);
+      const consumer =
+        req.headers["x-api-key"] ||
+        req.headers.authorization?.replace(/^Bearer\s+/i, "") ||
+        "anonymous";
+      const country = detectCountry(req);
+
+      analytics.recordRequest({
+        method: req.method,
+        path: url.pathname,
+        statusCode: res.statusCode,
+        durationMs,
+        consumer,
+        country,
+      });
+    });
 
     return requestContextStore.run({ requestId }, async () => {
       try {
@@ -121,6 +142,35 @@ export function createApp({ config, soroban, metrics, metricsAggregator }) {
           !requireAdmin(req, res, config)
         )
           return;
+
+        // Analytics Dashboard
+        if (req.method === "GET" && url.pathname === "/admin/analytics/dashboard") {
+          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+          return res.end(analytics.renderDashboardHtml());
+        }
+
+        // Analytics Export (CSV or JSON)
+        if (req.method === "GET" && url.pathname === "/admin/analytics/export") {
+          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          const format = url.searchParams.get("format")?.toLowerCase();
+          if (format === "json" || req.headers["accept"] === "application/json") {
+            return sendFormatted(req, res, 200, analytics.exportJson(), {
+              "content-disposition": 'attachment; filename="analytics.json"',
+            });
+          }
+          res.writeHead(200, {
+            "content-type": "text/csv; charset=utf-8",
+            "content-disposition": 'attachment; filename="analytics.csv"',
+          });
+          return res.end(analytics.exportCsv());
+        }
+
+        // Analytics Summary Data
+        if (req.method === "GET" && url.pathname === "/admin/analytics") {
+          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          return sendFormatted(req, res, 200, analytics.getSummary());
+        }
 
         if (req.method === "POST" && url.pathname === "/credentials") {
           if (!requireAuth(req, res, config, ['credentials:write'])) return;
