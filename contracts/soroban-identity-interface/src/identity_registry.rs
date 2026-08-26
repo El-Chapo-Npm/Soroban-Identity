@@ -34,6 +34,11 @@ pub trait IdentityRegistryInterface {
         metadata: Map<String, String>,
     ) -> Result<String, ContractError>;
 
+    fn create_dids_batch(
+        env: Env,
+        entries: Vec<(Address, Map<String, String>)>,
+    ) -> Result<Vec<String>, ContractError>;
+
     fn add_service(
         env: Env,
         controller: Address,
@@ -107,6 +112,13 @@ impl IdentityRegistryInterface for IdentityRegistry {
         metadata: Map<String, String>,
     ) -> Result<String, ContractError> {
         Self::create_did(env, controller, metadata)
+    }
+
+    fn create_dids_batch(
+        env: Env,
+        entries: Vec<(Address, Map<String, String>)>,
+    ) -> Result<Vec<String>, ContractError> {
+        Self::create_dids_batch(env, entries)
     }
 
     fn add_service(
