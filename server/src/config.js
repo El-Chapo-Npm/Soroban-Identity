@@ -289,6 +289,13 @@ export function loadConfig(env = process.env) {
     rpcRetryBackoff: parseInteger(env.RPC_RETRY_BACKOFF, 2),
     // EVENT_POLL_INTERVAL_MS=0 disables the event poller (allowZero: true)
     eventPollIntervalMs: parseInteger(env.EVENT_POLL_INTERVAL_MS, 5000, true),
+    // #750: GET /events/poll long-polling. Timeout is clamped to
+    // [1s, longPollMaxTimeoutMs] regardless of what a caller requests.
+    longPollDefaultTimeoutMs: parseInteger(env.LONG_POLL_DEFAULT_TIMEOUT_MS, 30_000),
+    longPollMaxTimeoutMs: parseInteger(env.LONG_POLL_MAX_TIMEOUT_MS, 60_000),
+    // #748: whether a request over its daily/monthly quota is rejected
+    // ("block") or let through flagged as overage ("allow").
+    quotaOverageMode: (env.QUOTA_OVERAGE_MODE ?? "block").toLowerCase() === "allow" ? "allow" : "block",
     // WS_ENABLED=false turns the WebSocket endpoint off entirely
     wsEnabled: (env.WS_ENABLED ?? "true").toLowerCase() !== "false",
     wsPath: env.WS_PATH ?? "/ws",
@@ -345,6 +352,8 @@ export function validateConfig(env = process.env) {
     { key: "RPC_RETRY_BASE_MS", desc: "must be a valid integer" },
     { key: "RPC_RETRY_BACKOFF", desc: "must be a valid integer" },
     { key: "EVENT_POLL_INTERVAL_MS", desc: "must be a valid integer" },
+    { key: "LONG_POLL_DEFAULT_TIMEOUT_MS", desc: "must be a valid integer" },
+    { key: "LONG_POLL_MAX_TIMEOUT_MS", desc: "must be a valid integer" },
     { key: "RATE_LIMIT_MAX_BUCKETS", desc: "must be a valid integer" },
     { key: "CORS_MAX_AGE", desc: "must be a valid integer" },
     { key: "ACCESS_LOG_MAX_BYTES", desc: "must be a valid integer" },
@@ -507,6 +516,9 @@ export function logDefaultValues(env = process.env) {
     { key: "RPC_RETRY_BASE_MS", defaultVal: "500" },
     { key: "RPC_RETRY_BACKOFF", defaultVal: "2" },
     { key: "EVENT_POLL_INTERVAL_MS", defaultVal: "5000" },
+    { key: "LONG_POLL_DEFAULT_TIMEOUT_MS", defaultVal: "30000" },
+    { key: "LONG_POLL_MAX_TIMEOUT_MS", defaultVal: "60000" },
+    { key: "QUOTA_OVERAGE_MODE", defaultVal: "'block'" },
     { key: "CORS_ORIGIN", defaultVal: "'*' in development, none in production" },
     { key: "CORS_CREDENTIALS", defaultVal: "false" },
     { key: "CORS_METHODS", defaultVal: DEFAULT_CORS_METHODS.join(",") },

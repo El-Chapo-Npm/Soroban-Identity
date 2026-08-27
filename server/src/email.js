@@ -70,6 +70,86 @@ export function renderExpiryBody({ credential, daysRemaining, threshold }) {
 }
 
 /**
+ * Render the subject line for a quota threshold notification (#748).
+ */
+export function renderQuotaSubject({ tier, period, threshold }) {
+  const pct = Math.round(threshold * 100);
+  const periodLabel = period === 'daily' ? 'Daily' : 'Monthly';
+  return pct >= 100
+    ? `${periodLabel} API quota exhausted (${tier} tier)`
+    : `${periodLabel} API quota at ${pct}% (${tier} tier)`;
+}
+
+/**
+ * Render both the plain-text and HTML bodies for a quota threshold
+ * notification, sent at 80% and 100% usage of a daily or monthly quota.
+ */
+export function renderQuotaBody({ tier, period, threshold, used, limit }) {
+  const pct = Math.round(threshold * 100);
+  const periodNoun = period === 'daily' ? 'day' : 'month';
+  const summary = pct >= 100
+    ? `Your API key has used its entire ${period} quota.`
+    : `Your API key has reached ${pct}% of its ${period} quota.`;
+  const action = pct >= 100
+    ? `Requests will be limited until the quota resets at the start of the next ${periodNoun}.`
+    : 'Consider upgrading your tier if you expect to exceed this limit.';
+
+  const lines = [
+    `Tier: ${tier}`,
+    `Period: ${period}`,
+    `Usage: ${used} / ${limit} requests`,
+    `Threshold crossed: ${pct}%`,
+  ];
+
+  const text = [summary, '', ...lines, '', action].join('\n');
+  const html = [
+    '<div>',
+    `<p>${escapeHtml(summary)}</p>`,
+    '<ul>',
+    ...lines.map((line) => `<li>${escapeHtml(line)}</li>`),
+    '</ul>',
+    `<p>${escapeHtml(action)}</p>`,
+    '</div>',
+  ].join('');
+
+  return { text, html };
+}
+
+/**
+ * Render the subject line for a deprecated-endpoint usage notification (#751).
+ */
+export function renderDeprecationSubject(rule) {
+  return `Deprecated API endpoint in use: ${rule.name}`;
+}
+
+/**
+ * Render both the plain-text and HTML bodies for a deprecated-endpoint usage
+ * notification, sent at most once per API key per endpoint per day.
+ */
+export function renderDeprecationBody(rule) {
+  const summary = rule.description ?? 'One of your API keys is calling a deprecated endpoint.';
+  const lines = [
+    `Endpoint: ${rule.method ?? 'ANY'} ${rule.name}`,
+    `Deprecated since: ${rule.deprecatedSince}`,
+    `Sunset date: ${rule.sunsetDate}`,
+    `Migration guide: ${rule.migrationUrl}`,
+  ];
+
+  const text = [summary, '', ...lines, '', 'Please migrate before the sunset date to avoid disruption.'].join('\n');
+  const html = [
+    '<div>',
+    `<p>${escapeHtml(summary)}</p>`,
+    '<ul>',
+    ...lines.map((line) => `<li>${escapeHtml(line)}</li>`),
+    '</ul>',
+    '<p>Please migrate before the sunset date to avoid disruption.</p>',
+    '</div>',
+  ].join('');
+
+  return { text, html };
+}
+
+/**
  * HTTP-API email transport.
  *
  * Deliberately provider-agnostic: it POSTs a JSON message to
