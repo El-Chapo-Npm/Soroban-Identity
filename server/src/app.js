@@ -12,8 +12,7 @@ import {
   readWebhooks,
   WebhookDeliveryService,
 } from "./webhooks.js";
-import { collectHealth, collectReadiness } from "./health.js";
-import { readNotificationLog, summarizeNotificationLog } from "./notification-log.js";
+import { startAccessLog } from "./access-log.js";
 import { createDataLoaders } from "./dataloader.js";
 import { executeGraphQL, renderGraphiQLPlayground } from "./graphql.js";
 import {
@@ -82,7 +81,8 @@ export function createApp({
   redisClient = didCache?.client ?? null,
   webhookService = new WebhookDeliveryService(config),
   apiKeyService = new ApiKeyService(config),
-  rateLimiter = new TieredRateLimiter(),
+  rateLimiter = null,
+  accessLogSink = null,
   realtime = null,
   nonceStore = new NonceStore({ ttlSeconds: config.requestSigningMaxAgeSeconds }),
   vcSerializer = createVcSerializer(config, { logger }),
@@ -90,6 +90,16 @@ export function createApp({
   // Expose the key service on config so http-utils.requireAuth can validate
   // issued API keys instead of falling back to the single admin key.
   config.apiKeyService = apiKeyService;
+
+  // One limiter per app instance, so its buckets live as long as the server
+  // rather than being rebuilt per request.
+  const limiter =
+    rateLimiter ??
+    new TieredRateLimiter({
+      whitelist: config.rateLimitWhitelist ?? [],
+      trustProxy: config.trustProxy ?? false,
+      maxBuckets: config.rateLimitMaxBuckets ?? 10000,
+    });
 
   return async function app(req, res) {
     const url = new URL(
@@ -135,6 +145,17 @@ export function createApp({
     // can produce a response, so an early return still carries them. The
     // nonce is stashed on the request for the one HTML page we render.
     req.cspNonce = setSecurityHeaders(req, res, config);
+
+    // Access logging is attached before any routing so a request that is
+    // rejected by CORS, auth, or the rate limiter is still recorded.
+    if (config.accessLogEnabled && !isMetricsEndpoint) {
+      const finishAccessLog = startAccessLog(req, res, {
+        requestId,
+        config,
+        sink: accessLogSink,
+      });
+      res.on("finish", () => finishAccessLog({ requestBody: req.loggedBody ?? null }));
+    }
 
     // Apply CORS headers
     if (setCorsHeaders(req, res, config)) {
@@ -231,28 +252,52 @@ export function createApp({
     }
 
     if (!isExempt) {
-      const rateResult = rateLimiter.consume(req);
-      res.setHeader("X-RateLimit-Tier", rateResult.tier);
-      res.setHeader("X-RateLimit-Limit", String(rateResult.limit));
-      res.setHeader("X-RateLimit-Remaining", String(rateResult.remaining));
-      res.setHeader("X-RateLimit-Reset", String(rateResult.resetAt));
+      const rateResult = limiter.check(req, url.pathname);
+
+      if (rateResult.whitelisted) {
+        res.setHeader("X-RateLimit-Bypass", "whitelist");
+      } else {
+        // Report whichever budget is closest to exhaustion, so a client sees
+        // the limit that will actually stop it first.
+        const reported = rateResult.binding ?? rateResult;
+        res.setHeader("X-RateLimit-Tier", String(rateResult.tier ?? reported.rule ?? "free"));
+        res.setHeader("X-RateLimit-Limit", String(reported.limit));
+        res.setHeader("X-RateLimit-Remaining", String(reported.remaining));
+        res.setHeader("X-RateLimit-Reset", String(reported.resetAt));
+        if (rateResult.scope === "endpoint" || rateResult.endpoint?.rule) {
+          res.setHeader("X-RateLimit-Scope", rateResult.scope === "endpoint" ? "endpoint" : "tier");
+        }
+      }
 
       if (!rateResult.allowed) {
         res.setHeader("Retry-After", String(rateResult.retryAfter));
-        if (rateResult.tier === "free") {
+
+        // An endpoint denial is not a tier problem, so it must not be dressed
+        // up as one — upgrading would not raise a per-endpoint limit.
+        const isEndpointDenial = rateResult.scope === "endpoint";
+
+        if (!isEndpointDenial && rateResult.tier === "free") {
           res.setHeader(
             "X-Upgrade-Available",
             "Upgrade to Pro or Enterprise for higher limits: https://soroban-identity.org/pricing"
           );
         }
+
+        const windowMinutes = Math.round(
+          ((rateResult.resetAt * 1000) - Date.now()) / 60000
+        );
+
         return sendJson(res, 429, {
           error: "rate_limit_exceeded",
           code: "RATE_LIMIT_EXCEEDED",
-          message: rateResult.tier === "free"
-            ? `Free tier rate limit exceeded (${rateResult.limit} req/min). Upgrade to Pro (300 req/min) or Enterprise (1200 req/min) for higher limits.`
-            : `Rate limit exceeded for tier '${rateResult.tier}' (${rateResult.limit} req/min).`,
-          tier: rateResult.tier,
-          ...(rateResult.tier === "free"
+          scope: rateResult.scope,
+          message: isEndpointDenial
+            ? `Rate limit exceeded for '${rateResult.rule}' (${rateResult.limit} requests per window). Retry in ${rateResult.retryAfter}s.`
+            : rateResult.tier === "free"
+              ? `Free tier rate limit exceeded (${rateResult.limit} req/min). Upgrade to Pro (300 req/min) or Enterprise (1200 req/min) for higher limits.`
+              : `Rate limit exceeded for tier '${rateResult.tier}' (${rateResult.limit} req/min).`,
+          ...(isEndpointDenial ? { rule: rateResult.rule, windowMinutes } : { tier: rateResult.tier }),
+          ...(!isEndpointDenial && rateResult.tier === "free"
             ? {
                 upgrade: {
                   message: "Upgrade to Pro or Enterprise for increased rate limits.",
@@ -261,6 +306,7 @@ export function createApp({
                 },
               }
             : {}),
+          limit: rateResult.limit,
           retryAfter: rateResult.retryAfter,
         });
       }

@@ -28,14 +28,41 @@ The server configuration can be customized using the following environment varia
 | `AUDIT_LOG_RETENTION_DAYS` | Number of days to retain rotated audit logs. | `30` |
 | `CREDENTIAL_STORE_PATH` | Storage location for credential records. | `[DATA_DIR]/credentials.json` |
 | `EXPIRY_CONCURRENCY` | Maximum concurrent credential expiry notifications. Controls parallelism to prevent event loop blocking. | `8` |
+| `RATE_LIMIT_WHITELIST` | Comma-separated IPs or CIDR ranges exempt from rate limiting. | unset |
+| `RATE_LIMIT_MAX_BUCKETS` | Bucket count that triggers eviction of expired windows. | `10000` |
+| `TRUST_PROXY` | Trust `X-Forwarded-For` when resolving the client IP. | `false` |
+
+## Rate Limiting
+
+Two budgets apply to every non-exempt request, and both must be satisfied.
+`/info`, `/health`, and `/metrics` are exempt.
+
+### Per-endpoint limits
+
+Evaluated first, since they are the tighter constraint on the expensive routes.
+The first matching rule wins.
+
+| Rule | Match | Limit |
+| --- | --- | --- |
+| `credential_issuance` | `POST /credentials`, `POST /credentials/issue` | 10 per 15 min |
+| `credential_revocation` | `POST /credentials/:id/revoke` | 20 per 15 min |
+| `general` | everything else | 100 per 15 min |
 | `CORS_ORIGIN` | Allowed browser origins. A single origin, a comma-separated list, or `*`. | `*` in development, none in production |
 | `CORS_CREDENTIALS` | Whether to send `Access-Control-Allow-Credentials`. Cannot be combined with `CORS_ORIGIN=*`. | `false` |
 | `CORS_METHODS` | Comma-separated methods advertised on a preflight. | `GET,POST,PUT,PATCH,DELETE,OPTIONS` |
 | `CORS_ALLOWED_HEADERS` | Comma-separated request headers a browser may send. | `Content-Type,Authorization,X-API-Key,X-Request-ID,X-Actor,X-User-Tier,X-API-Version` |
 | `CORS_EXPOSED_HEADERS` | Comma-separated response headers readable by browser JavaScript. | `X-Request-ID,Content-Type,X-RateLimit-Limit,X-RateLimit-Remaining,X-RateLimit-Reset,X-API-Version` |
 | `CORS_MAX_AGE` | Seconds a browser may cache a preflight result. `0` disables caching. | `86400` |
+| `ACCESS_LOG_ENABLED` | Emit one structured record per completed request. | `true` |
+| `ACCESS_LOG_PATH` | Also write access records to this file, with rotation. Unset means stdout only. | unset |
+| `ACCESS_LOG_MAX_BYTES` | Size at which the access log file rotates. | `10485760` |
+| `ACCESS_LOG_MAX_FILES` | Rotated files to retain. | `5` |
+| `LOG_PAYLOADS` | Include redacted request and response bodies in access records. | `false` |
+| `LOG_HEADERS` | Include redacted request headers in access records. | `false` |
+| `LOG_PAYLOAD_MAX_BYTES` | Size at which a logged payload is truncated. | `2048` |
+| `TRUST_PROXY` | Trust `X-Forwarded-For` / `X-Real-IP` for the client IP. | `false` |
 
-## CORS
+## API Request Logging
 
 Cross-origin access is configured entirely through environment variables, so a
 single build serves local development, staging and production.
@@ -127,14 +154,49 @@ NODE_ENV=production CORS_ORIGIN=https://staging.example.com CORS_CREDENTIALS=tru
 NODE_ENV=production CORS_ORIGIN=https://app.example.com,https://docs.example.com CORS_METHODS=GET,OPTIONS CORS_MAX_AGE=300 npm start
 ```
 
-## Request Validation
+These are per client, and independent of each other: exhausting the issuance
+budget does not block reads. A `GET /credentials` is a read and falls under
+`general`, not `credential_issuance`.
 
-Every mutating endpoint and every query-bearing endpoint is validated with a
-[Zod](https://zod.dev) schema before its handler runs. Schemas live in
-`src/validation.js` and are keyed by route.
+### Per-tier limits
 
-### What is validated
+The existing subscription tiers still apply on top, with separate read and
+write budgets:
 
+| Tier | Reads | Writes |
+| --- | --- | --- |
+| free | 60/min | 20/min |
+| pro | 300/min | 100/min |
+| enterprise | 1200/min | 500/min |
+
+### Response headers
+
+| Header | Meaning |
+| --- | --- |
+| `X-RateLimit-Limit` | Limit of whichever budget is closest to exhaustion |
+| `X-RateLimit-Remaining` | Requests left in that budget |
+| `X-RateLimit-Reset` | Unix seconds at which it resets |
+| `X-RateLimit-Tier` | Resolved subscription tier |
+| `X-RateLimit-Scope` | `endpoint` or `tier` |
+| `X-RateLimit-Bypass` | `whitelist` when the caller is exempt |
+| `Retry-After` | Seconds to wait, sent with every 429 |
+
+The reported budget is whichever will stop the client first, so the headers are
+not misleading when the endpoint limit is nearly spent but the tier limit is
+not.
+
+### 429 responses
+
+```json
+{
+  "error": "rate_limit_exceeded",
+  "code": "RATE_LIMIT_EXCEEDED",
+  "scope": "endpoint",
+  "rule": "credential_issuance",
+  "message": "Rate limit exceeded for 'credential_issuance' (10 requests per window). Retry in 840s.",
+  "limit": 10,
+  "windowMinutes": 14,
+  "retryAfter": 840
 | Section | Notes |
 | --- | --- |
 | Body | JSON bodies are validated against a strict schema — unknown keys are rejected. |
@@ -181,183 +243,95 @@ ws://localhost:3001/ws?token=KEY&did=GABC...&did=GDEF...
 ```
 
 On success the server sends:
+Every completed request emits one structured JSON record through pino, at a
+level derived from the status: `info` below 400, `warn` for 4xx, `error` for
+5xx.
 
 ```json
 {
-  "type": "connected",
-  "subscriptions": ["did:GABC..."],
-  "heartbeatIntervalMs": 30000,
-  "rateLimit": { "limit": 60, "windowMs": 60000 },
-  "ts": "2026-01-01T00:00:00.000Z"
+  "level": "info",
+  "time": "2026-01-01T00:00:00.000Z",
+  "type": "http_access",
+  "requestId": "8f14e45f-ceea-467a-9f2c-9d4c1a5f0f21",
+  "method": "POST",
+  "path": "/credentials",
+  "status": 201,
+  "durationMs": 42,
+  "ip": "10.0.0.5",
+  "userAgent": "curl/8.4.0",
+  "contentLength": "128",
+  "apiKeyId": "key_01",
+  "userTier": "pro",
+  "msg": "http request completed"
 }
 ```
 
-### Rooms
+### Correlation IDs
 
-A subscription is a room. `did:<account>` receives events concerning one
-subject; `all` receives everything. A subject may be named as a bare Stellar
-account or as a `did:stellar:` DID — both resolve to the same room, so a client
-need not know which form a credential was stored with.
+An inbound `X-Request-ID` is honoured; otherwise one is generated. The value is
+echoed on the response, carried in AsyncLocalStorage, and mixed into every log
+line emitted while handling that request — so an application log and its access
+record share one id.
 
-A connection may hold at most 50 subscriptions.
+### Client IP
 
-### Client messages
+`X-Forwarded-For` and `X-Real-IP` are only consulted when `TRUST_PROXY=true`.
+Without it the socket address is used, because any client can set those headers
+and would otherwise be able to forge the logged IP. Behind a proxy the first
+hop in the chain is taken.
 
-| Message | Effect |
-| --- | --- |
-| `{"type":"subscribe","did":"GABC..."}` | Join one DID room. |
-| `{"type":"subscribe","dids":["GABC...","GDEF..."]}` | Join several DID rooms. |
-| `{"type":"subscribe","all":true}` | Join the global room. |
-| `{"type":"unsubscribe","did":"GABC..."}` | Leave a room. Accepts the same fields as `subscribe`. |
-| `{"type":"ping"}` | Answered with `{"type":"pong","ts":...}`. |
+### Payloads and redaction
 
-`subscribe` is answered with `{"type":"subscribed","rooms":[...],"subscriptions":[...]}`,
-and `unsubscribe` with the equivalent `unsubscribed` frame.
+`LOG_PAYLOADS=true` adds the request and response bodies; `LOG_HEADERS=true`
+adds the request headers. Both are redacted before they reach the log:
 
-### Server events
+- Headers: `authorization`, `x-api-key`, `cookie`, `set-cookie`,
+  `proxy-authorization`, `x-auth-token`
+- Body fields at any depth: `password`, `secret`, `token`, `apiKey`,
+  `privateKey`, `secretKey`, `seed`, `mnemonic`, `signature`, `credential`, and
+  their snake_case and kebab-case spellings
 
-| Event | Sent when |
-| --- | --- |
-| `credential.status` | A credential is issued or revoked. Carries `status` (`issued`/`revoked`) and the `credential`. |
-| `did.updated` | A DID changes — currently `issuer_added` and `issuer_removed`. |
-| `contract.event` | A normalized on-chain event from the ledger poller. |
+Recursion is depth-bounded, and a body over `LOG_PAYLOAD_MAX_BYTES` is
+truncated to a preview plus its real size, so one large upload cannot flood the
+log.
 
-Every event carries a `ts` timestamp. A client subscribed to both the global
-room and the relevant DID room receives one copy, not two.
+### Rotation
 
-### Errors
+Setting `ACCESS_LOG_PATH` additionally writes each record to a file that
+rotates at `ACCESS_LOG_MAX_BYTES`, keeping `ACCESS_LOG_MAX_FILES` generations
+(`access.log.1` … `access.log.N`) and dropping the rest. Rotation is checked on
+write rather than on a timer, so an idle process does not accumulate empty
+rotations and a burst cannot overshoot the limit while waiting for a tick.
 
-Protocol problems are reported without dropping the connection:
+An endpoint denial is reported as such and does **not** carry the upgrade
+prompt, because upgrading a subscription does not raise a per-endpoint limit.
+Tier denials keep the existing upgrade payload.
 
-| Code | Meaning |
-| --- | --- |
-| `INVALID_MESSAGE` | The message was not JSON, or a `subscribe` named no rooms. |
-| `UNKNOWN_MESSAGE_TYPE` | Unsupported `type`. |
-| `SUBSCRIPTION_LIMIT` | The connection is already at 50 subscriptions. |
-| `RATE_LIMIT_EXCEEDED` | Too many inbound messages; the connection is then closed with code `4029`. |
+### Whitelisting
 
-### Rate limiting
+`RATE_LIMIT_WHITELIST` accepts exact addresses and IPv4 CIDR ranges
+(`10.0.0.5,10.0.0.0/24`). Whitelisted callers skip both budgets and are
+answered with `X-RateLimit-Bypass: whitelist`.
 
-Each connection holds its own token bucket — `WS_MESSAGE_LIMIT` messages per
-`WS_MESSAGE_WINDOW_MS`. A client that exhausts it is sent a
-`RATE_LIMIT_EXCEEDED` error carrying `retryAfterSeconds` and then closed with
-code `4029`, rather than being silently throttled: dropping subscribe messages
-would leave a client believing it is subscribed when it is not.
+Whitelist matching uses the socket address unless `TRUST_PROXY=true`. Without
+that, a caller could whitelist itself simply by sending an `X-Forwarded-For`
+header.
 
-Inbound messages larger than 16KB are rejected by the protocol layer.
+### Violations and memory
 
-### Reconnection
-
-The server pings every connection every `WS_HEARTBEAT_INTERVAL_MS` and
-terminates any that missed the previous ping, so a half-open connection is
-reaped rather than lingering.
-
-Clients should reconnect with exponential backoff and restore their
-subscriptions using `did` query parameters on the new handshake. Close codes
-tell a client whether reconnecting is worthwhile:
-
-| Code | Meaning |
-| --- | --- |
-| `1001` | Server shutting down — reconnect after a delay. |
-| `4001` | Credentials are no longer valid — do not retry without a new key. |
-| `4029` | Rate limited — reconnect after `retryAfterSeconds`. |
-
-```js
-function connect(url, backoffMs = 1000) {
-  const ws = new WebSocket(url);
-  ws.addEventListener('close', (event) => {
-    if (event.code === 4001) return;              // fix the key first
-    const delay = event.code === 4029 ? 60_000 : backoffMs;
-    setTimeout(() => connect(url, Math.min(backoffMs * 2, 30_000)), delay);
-  });
-  return ws;
-}
-```
-| `EXPIRY_WARNING_DAYS` | Fallback warning window in days when no reminder threshold applies. | `7` |
-| `EXPIRY_REMINDER_THRESHOLDS` | Comma-separated days-before-expiry at which a reminder is sent. | `30,7,1` |
-| `EXPIRY_JOB_INTERVAL_MS` | Interval between expiry job runs when no cron schedule is configured. | `3600000` |
-| `EXPIRY_CRON_SCHEDULE` | Standard 5-field cron expression for the expiry job. When set it replaces the fixed interval. | unset |
-| `NOTIFICATION_WEBHOOK_URL` | Fallback webhook receiving expiry reminders. | unset |
-| `SUBJECT_NOTIFICATION_WEBHOOKS` | JSON map of subject address to webhook url. | `{}` |
-| `EMAIL_API_URL` | HTTP endpoint of the email provider used for expiry reminders. Enables email delivery together with `EMAIL_FROM`. | unset |
-| `EMAIL_API_KEY` | Bearer token sent to `EMAIL_API_URL`. | unset |
-| `EMAIL_FROM` | Sender address for reminder emails. Required when `EMAIL_API_URL` is set. | unset |
-| `NOTIFICATION_EMAIL` | Fallback recipient address for reminder emails. | unset |
-| `SUBJECT_NOTIFICATION_EMAILS` | JSON map of subject address to recipient email. | `{}` |
-| `NOTIFICATION_MAX_RETRIES` | Attempts per notification channel before it is recorded as failed. | `3` |
-| `NOTIFICATION_RETRY_BASE_MS` | Base delay for exponential backoff between notification attempts. | `500` |
-
-## Credential Expiry Notifications
-
-A background job scans stored credentials and notifies holders before a
-credential expires.
-
-### Scheduling
-
-By default the job runs on a fixed interval (`EXPIRY_JOB_INTERVAL_MS`). Setting
-`EXPIRY_CRON_SCHEDULE` switches it to a cron schedule instead:
-| `REDIS_URL` | Redis connection URL (`redis://` or `rediss://`). Unset disables the DID cache. | unset |
-| `DID_CACHE_TTL_MS` | TTL applied to cached DID documents. | `60000` |
-| `REDIS_MAX_RETRIES` | Connection attempts before the cache is left unavailable. | `5` |
-| `REDIS_RETRY_BASE_MS` | Base delay for connection backoff. | `200` |
-| `REDIS_COMMAND_TIMEOUT_MS` | Per-command timeout. | `1000` |
-| `CACHE_FAILURE_THRESHOLD` | Consecutive failures before the cache is bypassed. | `3` |
-| `DID_CACHE_WARM_LIST` | Comma-separated DIDs or addresses to pre-resolve at startup. | unset |
-
-## DID Resolution Cache
-
-`SorobanClient.resolveDid()` reads through a Redis cache when `REDIS_URL` is
-set, cutting repeat resolutions of the same DID down to one Redis round trip
-instead of an RPC call.
-
-### Graceful degradation
-
-The cache is never on the critical path. A miss, a Redis error, a command
-timeout, or a completely unreachable Redis all fall through to the contract, so
-resolution still succeeds — just slower. Specifically:
-
-- A failed connection at startup logs and continues; the server boots uncached.
-- After `CACHE_FAILURE_THRESHOLD` consecutive failures the cache is bypassed
-  entirely and a reconnect runs in the background, so requests stop paying the
-  Redis timeout on every call. A successful reconnect closes the breaker.
-- A corrupt cache entry is treated as a miss and deleted, rather than being
-  left to poison every later read of that DID.
-- Only real documents are cached. A negative result is never stored, so a DID
-  created moments later is not invisible for the whole TTL.
-
-### Keys and invalidation
-
-`did:stellar:G...` and a bare `G...` normalise to the same key
-(`did:doc:<address>`), so the two forms cannot drift apart on invalidation.
-
-`SorobanClient.invalidateDid()` drops one entry — call it after any write that
-changes a document. Two admin endpoints expose this operationally:
-
-| Endpoint | Scope | Description |
-| --- | --- | --- |
-| `GET /cache/stats` | `admin:read` | Hits, misses, errors, invalidations, and hit rate |
-| `DELETE /cache/dids` | `admin:write` | Flush every cached DID (SCAN-based, never `KEYS`) |
-| `DELETE /cache/dids/:did` | `admin:write` | Invalidate one DID |
-
-### Metrics
-
-`did_cache_hits_total`, `did_cache_misses_total`, `did_cache_sets_total`,
-`did_cache_errors_total`, and `did_cache_invalidations_total` are exported on
-`/metrics` alongside the existing counters.
-
-### Warming
-
-`DID_CACHE_WARM_LIST` pre-resolves a comma-separated set of DIDs at startup.
-Warming runs in the background so boot is not blocked on RPC round trips, and
-one failing DID does not abort the rest.
-
-### Redis client
-
+Every denial is logged at `warn` with `type: "rate_limit_violation"`, the rule,
+scope, IP, method, path, API key id, and user agent. Expired buckets are
+evicted once the map reaches `RATE_LIMIT_MAX_BUCKETS`, so a stream of distinct
+client addresses cannot grow it without bound. Eviction runs on write, not on a
+timer, so an idle process does no work.
 The client is implemented directly against `node:net`/`node:tls` in
 `src/redis-client.js`, because this server ships with pino as its only runtime
 dependency. It speaks RESP, supports `redis://` and `rediss://` with optional
 auth and database selection, and covers GET, SET with TTL, DEL, SCAN, and PING
 with connection retry and per-command timeouts.
+A file-sink failure is logged and swallowed: it never breaks the response, and
+a log file that cannot be opened at startup falls back to stdout-only logging
+rather than preventing the server from booting.
 
 ## API Key Scopes
 

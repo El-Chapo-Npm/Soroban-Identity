@@ -226,6 +226,12 @@ export function loadConfig(env = process.env) {
     credentialStorePath: env.CREDENTIAL_STORE_PATH
       ? path.resolve(env.CREDENTIAL_STORE_PATH)
       : path.join(DEFAULT_DATA_DIR, "credentials.json"),
+    rateLimitWhitelist: (env.RATE_LIMIT_WHITELIST ?? "")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean),
+    rateLimitMaxBuckets: parseInteger(env.RATE_LIMIT_MAX_BUCKETS, 10000),
+    trustProxy: env.TRUST_PROXY === "true",
     redisUrl: env.REDIS_URL ?? "",
     didCacheTtlMs: parseInteger(env.DID_CACHE_TTL_MS, 60 * 1000),
     redisMaxRetries: parseInteger(env.REDIS_MAX_RETRIES, 5),
@@ -238,6 +244,14 @@ export function loadConfig(env = process.env) {
       .filter(Boolean),
     healthProbeTimeoutMs: parseInteger(env.HEALTH_PROBE_TIMEOUT_MS, 2000),
     redisUrl: env.REDIS_URL ?? "",
+    accessLogEnabled: env.ACCESS_LOG_ENABLED !== "false",
+    accessLogPath: env.ACCESS_LOG_PATH ?? "",
+    accessLogMaxBytes: parseInteger(env.ACCESS_LOG_MAX_BYTES, 10 * 1024 * 1024),
+    accessLogMaxFiles: parseInteger(env.ACCESS_LOG_MAX_FILES, 5),
+    logPayloads: env.LOG_PAYLOADS === "true",
+    logHeaders: env.LOG_HEADERS === "true",
+    logPayloadMaxBytes: parseInteger(env.LOG_PAYLOAD_MAX_BYTES, 2048),
+    trustProxy: env.TRUST_PROXY === "true",
     expiryWarningDays: parseInteger(env.EXPIRY_WARNING_DAYS, 7),
     expiryReminderThresholds: parseThresholds(
       env.EXPIRY_REMINDER_THRESHOLDS,
@@ -331,7 +345,11 @@ export function validateConfig(env = process.env) {
     { key: "RPC_RETRY_BASE_MS", desc: "must be a valid integer" },
     { key: "RPC_RETRY_BACKOFF", desc: "must be a valid integer" },
     { key: "EVENT_POLL_INTERVAL_MS", desc: "must be a valid integer" },
+    { key: "RATE_LIMIT_MAX_BUCKETS", desc: "must be a valid integer" },
     { key: "CORS_MAX_AGE", desc: "must be a valid integer" },
+    { key: "ACCESS_LOG_MAX_BYTES", desc: "must be a valid integer" },
+    { key: "ACCESS_LOG_MAX_FILES", desc: "must be a valid integer" },
+    { key: "LOG_PAYLOAD_MAX_BYTES", desc: "must be a valid integer" },
   ];
 
   for (const item of numericVars) {
@@ -452,6 +470,9 @@ export function logDefaultValues(env = process.env) {
     { key: "EXPIRY_WARNING_DAYS", defaultVal: "7" },
     { key: "EXPIRY_JOB_INTERVAL_MS", defaultVal: "3600000" },
     { key: "EXPIRY_CONCURRENCY", defaultVal: "8" },
+    { key: "RATE_LIMIT_WHITELIST", defaultVal: "'' (no exemptions)" },
+    { key: "RATE_LIMIT_MAX_BUCKETS", defaultVal: "10000" },
+    { key: "TRUST_PROXY", defaultVal: "false" },
     { key: "REDIS_URL", defaultVal: "'' (cache disabled)" },
     { key: "DID_CACHE_TTL_MS", defaultVal: "60000" },
     { key: "REDIS_MAX_RETRIES", defaultVal: "5" },
@@ -459,6 +480,13 @@ export function logDefaultValues(env = process.env) {
     { key: "HEALTH_PROBE_TIMEOUT_MS", defaultVal: "2000" },
     { key: "REDIS_URL", defaultVal: "'' (disabled)" },
     { key: "EXPIRY_CRON_SCHEDULE", defaultVal: "'' (interval mode)" },
+    { key: "ACCESS_LOG_ENABLED", defaultVal: "true" },
+    { key: "ACCESS_LOG_PATH", defaultVal: "'' (stdout only)" },
+    { key: "ACCESS_LOG_MAX_BYTES", defaultVal: "10485760" },
+    { key: "ACCESS_LOG_MAX_FILES", defaultVal: "5" },
+    { key: "LOG_PAYLOADS", defaultVal: "false" },
+    { key: "LOG_HEADERS", defaultVal: "false" },
+    { key: "TRUST_PROXY", defaultVal: "false" },
     { key: "NOTIFICATION_WEBHOOK_URL", defaultVal: "''" },
     { key: "EMAIL_API_URL", defaultVal: "''" },
     { key: "EMAIL_FROM", defaultVal: "''" },

@@ -10,6 +10,7 @@ import { WebhookDeliveryService } from './webhooks.js';
 import { ApiKeyService } from './api-keys.js';
 import { WebSocketHub } from './websocket.js';
 import { logger } from './logger.js';
+import { RotatingFileSink } from './access-log.js';
 
 const validationResult = validateConfig();
 if (!validationResult.isValid) {
@@ -63,6 +64,21 @@ const realtime = config.wsEnabled
     })
   : null;
 
+let accessLogSink = null;
+if (config.accessLogEnabled && config.accessLogPath) {
+  accessLogSink = new RotatingFileSink({
+    filePath: config.accessLogPath,
+    maxBytes: config.accessLogMaxBytes,
+    maxFiles: config.accessLogMaxFiles,
+  });
+  // A file sink that cannot be opened falls back to stdout-only logging
+  // rather than preventing the server from starting.
+  await accessLogSink.open().catch((error) => {
+    logger.error({ error: error.message, path: config.accessLogPath }, 'Access log file unavailable; logging to stdout only');
+    accessLogSink = null;
+  });
+}
+
 const server = http.createServer(
   createApp({
     config,
@@ -72,6 +88,7 @@ const server = http.createServer(
     didCache,
     webhookService,
     apiKeyService,
+    accessLogSink,
     realtime,
   }),
 );
@@ -121,7 +138,7 @@ function shutdown(signal) {
       if (realtime) await realtime.close();
       webhookService.drain();
       await soroban.drain();
-      await didCache.close();
+      if (accessLogSink) await accessLogSink.close();
     } catch (error) {
       logger.error({ error: error.message, stack: error.stack }, 'Error during drain');
     }
