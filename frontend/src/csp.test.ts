@@ -95,12 +95,8 @@ describe("buildFrontendCsp", () => {
   });
 
   it("adds upgrade-insecure-requests in production only", () => {
-    expect(buildFrontendCsp({ mode: "production" })).toContain(
-      "upgrade-insecure-requests"
-    );
-    expect(buildFrontendCsp({ mode: "development" })).not.toContain(
-      "upgrade-insecure-requests"
-    );
+    expect(buildFrontendCsp({ mode: "production" })).toContain("upgrade-insecure-requests");
+    expect(buildFrontendCsp({ mode: "development" })).not.toContain("upgrade-insecure-requests");
   });
 
   it("includes report-uri only when one is configured", () => {
@@ -142,9 +138,7 @@ describe("buildSecurityHeaders", () => {
   });
 
   it("sets HSTS in production only", () => {
-    expect(
-      buildSecurityHeaders({ mode: "production" })["Strict-Transport-Security"]
-    ).toBeDefined();
+    expect(buildSecurityHeaders({ mode: "production" })["Strict-Transport-Security"]).toBeDefined();
     expect(
       buildSecurityHeaders({ mode: "development" })["Strict-Transport-Security"]
     ).toBeUndefined();
@@ -159,6 +153,9 @@ describe("renderHeadersFile", () => {
     expect(lines[0]).toBe("/*");
     expect(file).toContain("  Content-Security-Policy: default-src 'self'");
     expect(file).toContain("  X-Content-Type-Options: nosniff");
+    expect(file).toContain("/assets/*");
+    expect(file).toContain("Cache-Control: public, max-age=31536000, immutable");
+    expect(file).toContain("max-age=0, must-revalidate");
   });
 });
 
@@ -179,9 +176,7 @@ describe("emitSecurityHeaders", () => {
     expect(emitted).toHaveLength(1);
     expect(emitted[0].fileName).toBe("_headers");
     expect(emitted[0].source).toContain("Content-Security-Policy: default-src 'self'");
-    expect(emitted[0].source).toContain(
-      "report-uri https://api.example.org/csp-report"
-    );
+    expect(emitted[0].source).toContain("report-uri https://api.example.org/csp-report");
   });
 
   it("emits the production policy even when the dev server is relaxed", () => {

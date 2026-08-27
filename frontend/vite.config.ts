@@ -30,6 +30,21 @@ export default defineConfig(({ mode }) => {
     define: {
       global: "globalThis",
     },
+    build: {
+      manifest: true,
+      sourcemap: isDev,
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            react: ["react", "react-dom"],
+            i18n: ["i18next", "react-i18next"],
+            stellar: ["@stellar/stellar-sdk"],
+            wallet: ["@creit.tech/stellar-wallets-kit", "@walletconnect/sign-client"],
+            charts: ["recharts"],
+          },
+        },
+      },
+    },
     server: {
       headers: devHeaders,
     },
