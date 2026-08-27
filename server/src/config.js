@@ -186,6 +186,24 @@ export function loadConfig(env = process.env) {
     credentialStorePath: env.CREDENTIAL_STORE_PATH
       ? path.resolve(env.CREDENTIAL_STORE_PATH)
       : path.join(DEFAULT_DATA_DIR, "credentials.json"),
+    rateLimitWhitelist: (env.RATE_LIMIT_WHITELIST ?? "")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean),
+    rateLimitMaxBuckets: parseInteger(env.RATE_LIMIT_MAX_BUCKETS, 10000),
+    trustProxy: env.TRUST_PROXY === "true",
+    redisUrl: env.REDIS_URL ?? "",
+    didCacheTtlMs: parseInteger(env.DID_CACHE_TTL_MS, 60 * 1000),
+    redisMaxRetries: parseInteger(env.REDIS_MAX_RETRIES, 5),
+    redisRetryBaseMs: parseInteger(env.REDIS_RETRY_BASE_MS, 200),
+    redisCommandTimeoutMs: parseInteger(env.REDIS_COMMAND_TIMEOUT_MS, 1000),
+    cacheFailureThreshold: parseInteger(env.CACHE_FAILURE_THRESHOLD, 3),
+    didCacheWarmList: (env.DID_CACHE_WARM_LIST ?? "")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean),
+    healthProbeTimeoutMs: parseInteger(env.HEALTH_PROBE_TIMEOUT_MS, 2000),
+    redisUrl: env.REDIS_URL ?? "",
     accessLogEnabled: env.ACCESS_LOG_ENABLED !== "false",
     accessLogPath: env.ACCESS_LOG_PATH ?? "",
     accessLogMaxBytes: parseInteger(env.ACCESS_LOG_MAX_BYTES, 10 * 1024 * 1024),
@@ -287,6 +305,8 @@ export function validateConfig(env = process.env) {
     { key: "RPC_RETRY_BASE_MS", desc: "must be a valid integer" },
     { key: "RPC_RETRY_BACKOFF", desc: "must be a valid integer" },
     { key: "EVENT_POLL_INTERVAL_MS", desc: "must be a valid integer" },
+    { key: "RATE_LIMIT_MAX_BUCKETS", desc: "must be a valid integer" },
+    { key: "CORS_MAX_AGE", desc: "must be a valid integer" },
     { key: "ACCESS_LOG_MAX_BYTES", desc: "must be a valid integer" },
     { key: "ACCESS_LOG_MAX_FILES", desc: "must be a valid integer" },
     { key: "LOG_PAYLOAD_MAX_BYTES", desc: "must be a valid integer" },
@@ -410,6 +430,16 @@ export function logDefaultValues(env = process.env) {
     { key: "EXPIRY_WARNING_DAYS", defaultVal: "7" },
     { key: "EXPIRY_JOB_INTERVAL_MS", defaultVal: "3600000" },
     { key: "EXPIRY_CONCURRENCY", defaultVal: "8" },
+    { key: "RATE_LIMIT_WHITELIST", defaultVal: "'' (no exemptions)" },
+    { key: "RATE_LIMIT_MAX_BUCKETS", defaultVal: "10000" },
+    { key: "TRUST_PROXY", defaultVal: "false" },
+    { key: "REDIS_URL", defaultVal: "'' (cache disabled)" },
+    { key: "DID_CACHE_TTL_MS", defaultVal: "60000" },
+    { key: "REDIS_MAX_RETRIES", defaultVal: "5" },
+    { key: "CACHE_FAILURE_THRESHOLD", defaultVal: "3" },
+    { key: "HEALTH_PROBE_TIMEOUT_MS", defaultVal: "2000" },
+    { key: "REDIS_URL", defaultVal: "'' (disabled)" },
+    { key: "EXPIRY_CRON_SCHEDULE", defaultVal: "'' (interval mode)" },
     { key: "ACCESS_LOG_ENABLED", defaultVal: "true" },
     { key: "ACCESS_LOG_PATH", defaultVal: "'' (stdout only)" },
     { key: "ACCESS_LOG_MAX_BYTES", defaultVal: "10485760" },
