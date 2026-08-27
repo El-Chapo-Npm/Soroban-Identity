@@ -162,6 +162,8 @@ export {
   buildListReportersArgs,
   buildListHistoryArgs,
   buildGetRevocationsArgs,
+  buildCancelActivationArgs,
+  buildGetPendingActivationsArgs,
 } from './contract-args';
 
 // ── OpenAPI / v1 ──────────────────────────────────────────────────────────────

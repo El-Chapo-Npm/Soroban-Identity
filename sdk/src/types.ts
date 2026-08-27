@@ -82,8 +82,19 @@ export interface Credential {
   claimsHash: string;
   signature: string; // hex
   issuedAt: number;
+  /**
+   * Unix timestamp (seconds) before which this credential is inactive.
+   * `0` means the credential is active immediately (no time-lock). #731
+   */
+  activationTime: number;
   expiresAt: number; // 0 = no expiry
   revoked: boolean;
+  /**
+   * `true` when the issuer has cancelled a pending time-locked activation
+   * before the `activationTime` was reached. A cancelled credential is
+   * permanently inactive. #731
+   */
+  activationCancelled: boolean;
 }
 
 /**
@@ -110,11 +121,13 @@ export interface RevokedCredential extends Credential {
  * - `UNKNOWN_ISSUER` — no credential was found for the given ID, or the
  *   credential's issuer is no longer registered.
  * - `INACTIVE_SUBJECT` — the subject's DID has been deactivated.
+ * - `not_yet_active` — the credential's `activationTime` has not been reached yet. #731
  */
 export type VerifyFailReason =
   | 'not_found'
   | 'revoked'
   | 'expired'
+  | 'not_yet_active'
   | 'unknown'
   | 'EXPIRED'
   | 'REVOKED'

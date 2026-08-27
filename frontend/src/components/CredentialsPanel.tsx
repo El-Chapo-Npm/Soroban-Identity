@@ -17,6 +17,7 @@ type VerifyState =
   | "not_found"
   | "revoked"
   | "expired"
+  | "not_yet_active"
   | "invalid"
   | "unknown";
 
@@ -237,6 +238,13 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
 
   const [searchAddress, setSearchAddress] = useState("");
 
+  // ── #737: JSON credential import state ─────────────────────────────────
+  // File input ref used to reset the input value after each import attempt so
+  // the same file can be re-selected after an error without a full page reload.
+  const jsonImportRef = useRef<HTMLInputElement | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importedCount, setImportedCount] = useState<number | null>(null);
+
   // ── Pagination ──────────────────────────────────────────────────────────
   const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
   const readIntParam = (name: string, fallback: number): number => {
@@ -284,6 +292,101 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
     };
   }, []);
 
+  // ── #737: JSON credential import handler ───────────────────────────────
+  // Wraps JSON.parse in a try/catch so a malformed file shows a user-friendly
+  // validation error instead of crashing the component. The file input is
+  // reset after every attempt so the same file can be re-selected after fixing.
+  const handleJsonImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setImportError(null);
+    setImportedCount(null);
+
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Reset the file input so the same file can be picked again after an error
+    if (jsonImportRef.current) jsonImportRef.current.value = "";
+
+    if (!file.name.endsWith(".json") && file.type !== "application/json") {
+      const msg = "Invalid file type. Please select a .json file.";
+      setImportError(msg);
+      toast.error(msg);
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const raw = event.target?.result;
+      if (typeof raw !== "string") {
+        const msg = "Could not read the file. Please try again.";
+        setImportError(msg);
+        toast.error(msg);
+        return;
+      }
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        // #737: catch SyntaxError from malformed JSON instead of crashing
+        const msg = "Invalid JSON: the file contains a syntax error. Please fix it and try again.";
+        setImportError(msg);
+        toast.error(msg);
+        return;
+      }
+
+      // Normalise: accept either a single credential object or an array
+      const candidates = Array.isArray(parsed) ? parsed : [parsed];
+
+      const valid: Credential[] = [];
+      const errors: string[] = [];
+
+      candidates.forEach((item: unknown, idx) => {
+        if (
+          typeof item !== "object" ||
+          item === null ||
+          typeof (item as Record<string, unknown>).id !== "string" ||
+          typeof (item as Record<string, unknown>).subject !== "string" ||
+          typeof (item as Record<string, unknown>).issuer !== "string"
+        ) {
+          errors.push(`Item ${idx + 1} is missing required fields (id, subject, issuer).`);
+          return;
+        }
+        valid.push(item as Credential);
+      });
+
+      if (errors.length > 0) {
+        const msg = `Import failed: ${errors.join(" ")}`;
+        setImportError(msg);
+        toast.error(msg);
+        return;
+      }
+
+      if (valid.length === 0) {
+        const msg = "The file contains no valid credentials.";
+        setImportError(msg);
+        toast.error(msg);
+        return;
+      }
+
+      // Merge imported credentials into the current displayed list
+      dispatchCredential({
+        type: 'FETCH_SUCCESS',
+        credentials: valid,
+        searchedAddress: valid[0]?.subject ?? "",
+      });
+      setImportedCount(valid.length);
+      toast.success(`Imported ${valid.length} credential${valid.length > 1 ? "s" : ""} successfully.`);
+    };
+
+    reader.onerror = () => {
+      const msg = "Failed to read the file. Please try again.";
+      setImportError(msg);
+      toast.error(msg);
+    };
+
+    reader.readAsText(file);
+  };
+
   const handleVerify = async (credentialId?: string) => {
     if (verifying) return; // guard against duplicate submissions
     const id = (credentialId ?? credId).trim();
@@ -296,7 +399,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
       const result = await credentialClient.verifyCredential(caller, id);
       const reason = result.reason;
       const knownReason: VerifyState =
-        reason === "not_found" || reason === "revoked" || reason === "expired" || reason === "unknown"
+        reason === "not_found" || reason === "revoked" || reason === "expired" || reason === "not_yet_active" || reason === "unknown"
           ? reason
           : "invalid";
       setVerifyState(result.valid ? "valid" : knownReason);
@@ -313,7 +416,23 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
     }
   };
 
-  // Check if connected wallet is a registered issuer
+  // ── #736: Clear cached credential data immediately on wallet disconnect ─────
+  // When the wallet disconnects (publicKey becomes null), reset the credential
+  // list, issue result, and verify state so a subsequent user on a shared
+  // device never briefly sees the previous user's data.
+  useEffect(() => {
+    if (!wallet.connected) {
+      dispatchCredential({ type: 'RESET' });
+      setVerifyState("idle");
+      setCredId("");
+      setIssueResult(null);
+      setIssueErrors({});
+      setExpandedCredId(null);
+      setSearchAddress("");
+      setIsIssuer(false);
+    }
+  }, [wallet.connected]);
+
   useEffect(() => {
     if (!wallet.connected || !wallet.publicKey) {
       setIsIssuer(false);
@@ -447,6 +566,41 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeFilter, activeExpiryFilter]);
 
+  // ── #738: RPC rate-limit-aware transaction helper ─────────────────────────
+  // Wraps an async RPC call in an exponential-backoff retry loop so transient
+  // 429 / 503 errors do not permanently fail the transaction. Matches the same
+  // retry logic used by RequestQueue in the SDK.
+  const withRpcRetry = async <T,>(
+    fn: () => Promise<T>,
+    maxRetries = 4,
+    baseDelayMs = 1500,
+  ): Promise<T> => {
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await fn();
+      } catch (err: unknown) {
+        lastError = err;
+        const msg = String(err);
+        const isRetryable =
+          msg.includes("429") ||
+          msg.includes("Too Many Requests") ||
+          msg.includes("503") ||
+          msg.includes("ECONNRESET") ||
+          msg.includes("ETIMEDOUT");
+
+        if (!isRetryable || attempt >= maxRetries) break;
+
+        const delay = Math.min(baseDelayMs * Math.pow(2, attempt), 16000);
+        console.warn(
+          `[CredentialsPanel] RPC call failed (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms: ${msg}`,
+        );
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+    throw lastError;
+  };
+
   const handleIssue = async () => {
     if (issuing) return; // guard against duplicate submissions
     if (!wallet.connected || !wallet.publicKey) return;
@@ -457,15 +611,18 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
     setIssueResult(null);
     try {
       const networkConfig = getNetworkConfig();
-      const server = new SorobanRpc.Server(typeof networkConfig.rpcUrl === 'string' ? networkConfig.rpcUrl : networkConfig.rpcUrl[0]);
+      const rpcUrl = typeof networkConfig.rpcUrl === 'string' ? networkConfig.rpcUrl : networkConfig.rpcUrl[0];
+      const server = new SorobanRpc.Server(rpcUrl);
       const contract = new Contract(networkConfig.credentialManagerId);
-      const account = await server.getAccount(wallet.publicKey);
-      
+
+      // #738: wrap every RPC call so 429/503 responses are retried with backoff
+      const account = await withRpcRetry(() => server.getAccount(wallet.publicKey!));
+
       const claimsMap = claims.reduce((acc, { key, value }) => {
         if (key.trim() && value.trim()) acc[key.trim()] = value.trim();
         return acc;
       }, {} as Record<string, string>);
-      
+
       const claimsHashHex = "0000000000000000000000000000000000000000000000000000000000000000";
       const sigHex = Buffer.alloc(64, 0).toString("hex");
 
@@ -488,24 +645,27 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
         .setTimeout(30)
         .build();
 
-      const prepared = await server.prepareTransaction(tx);
+      const prepared = await withRpcRetry(() => server.prepareTransaction(tx));
       const estimatedFee = parseInt(prepared.fee, 10);
       const signedXdr = await wallet.signTransaction(prepared.toXDR());
       const signedTx = TransactionBuilder.fromXDR(signedXdr, networkConfig.networkPassphrase);
-      const result = await server.sendTransaction(signedTx as any);
-      
+
+      // sendTransaction itself is idempotent — retrying is safe
+      const result = await withRpcRetry(() => server.sendTransaction(signedTx as any));
+
       if (result.status !== "PENDING") throw new Error(`Transaction failed: ${result.status}`);
-      
-      let txStatus = await server.getTransaction(result.hash);
+
+      // Poll until the transaction is confirmed, with backoff on rate errors
+      let txStatus = await withRpcRetry(() => server.getTransaction(result.hash));
       while (txStatus.status === "NOT_FOUND") {
         await new Promise(r => setTimeout(r, 2000));
-        txStatus = await server.getTransaction(result.hash);
+        txStatus = await withRpcRetry(() => server.getTransaction(result.hash));
       }
       if (txStatus.status === "FAILED") throw new Error("Transaction failed on-chain");
-      
+
       const raw = scValToNative((txStatus as any).returnValue) as Uint8Array;
       const credentialId = Buffer.from(raw).toString("hex");
-      
+
       setIssueResult(`Credential issued successfully!\nID: ${credentialId}\nEstimated fee: ${(estimatedFee / 10_000_000).toFixed(7)} XLM`);
       toast.success("Credential issued successfully.");
     } catch (e: unknown) {
@@ -811,6 +971,66 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
         )}
       </div>
 
+      {/* #737: Import credentials from a local JSON file with full error handling */}
+      <div className="card">
+        <h2>Import Credentials (JSON)</h2>
+        <p style={{ color: "var(--text-muted)", fontSize: "0.85rem", marginBottom: "0.75rem" }}>
+          Import credentials from a previously exported <code>.json</code> file.
+          Malformed or invalid files will show an error — the app will not crash.
+        </p>
+        <label
+          htmlFor="credential-json-import"
+          style={{
+            display: "inline-block",
+            padding: "0.45rem 1rem",
+            borderRadius: "0.25rem",
+            background: "var(--accent-light)",
+            color: "white",
+            cursor: "pointer",
+            fontSize: "0.85rem",
+            fontWeight: 600,
+          }}
+        >
+          📂 Choose JSON file
+          <input
+            id="credential-json-import"
+            ref={jsonImportRef}
+            type="file"
+            accept=".json,application/json"
+            onChange={handleJsonImport}
+            style={{ display: "none" }}
+            aria-label="Import credentials from JSON file"
+          />
+        </label>
+        {importError && (
+          <p
+            role="alert"
+            style={{
+              color: "var(--error)",
+              marginTop: "0.5rem",
+              fontSize: "0.85rem",
+              padding: "0.4rem 0.75rem",
+              background: "var(--badge-red-bg, #fde8e8)",
+              borderRadius: "0.25rem",
+            }}
+          >
+            ⚠ {importError}
+          </p>
+        )}
+        {importedCount !== null && !importError && (
+          <p
+            role="status"
+            style={{
+              color: "var(--success-text, #155724)",
+              marginTop: "0.5rem",
+              fontSize: "0.85rem",
+            }}
+          >
+            ✓ {importedCount} credential{importedCount > 1 ? "s" : ""} imported.
+          </p>
+        )}
+      </div>
+
       <div className="card">
         <h2>Verify Credential</h2>
         <label htmlFor="verify-credential-id" className="visually-hidden">
@@ -839,6 +1059,9 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
             )}
             {verifyState === "not_found" && (
               <span className="badge badge-red">Invalid — credential not found</span>
+            )}
+            {verifyState === "not_yet_active" && (
+              <span className="badge badge-yellow">Pending — credential is not yet active (time-locked)</span>
             )}
             {(verifyState === "invalid" || verifyState === "unknown") && (
               <span className="badge badge-red">Invalid</span>

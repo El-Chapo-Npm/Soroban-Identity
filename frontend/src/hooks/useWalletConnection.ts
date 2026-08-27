@@ -130,6 +130,7 @@ export function useWalletConnection({
           networkPassphrase,
           connected: true,
           connecting: false,
+          reconnecting: false,
           txLoading: false,
           walletType: "freighter",
           error: null,
@@ -238,6 +239,7 @@ export function useWalletConnection({
           networkPassphrase: networkConfig.networkPassphrase,
           connected: true,
           connecting: false,
+          reconnecting: false,
           txLoading: false,
           walletType: "walletconnect",
           error: null,
@@ -380,11 +382,15 @@ export function useWalletConnection({
 
   const disconnect = useCallback(
     async (currentWalletType: WalletType | null) => {
+      // Cancel any in-flight retry timers immediately so they cannot fire
+      // after the disconnect and restore stale connected state (fixes #736).
       if (freighterTimeoutRef.current) {
         clearTimeout(freighterTimeoutRef.current);
+        freighterTimeoutRef.current = null;
       }
       if (walletConnectTimeoutRef.current) {
         clearTimeout(walletConnectTimeoutRef.current);
+        walletConnectTimeoutRef.current = null;
       }
 
       if (
@@ -404,12 +410,22 @@ export function useWalletConnection({
         wcTopicRef.current = null;
       }
 
+      // Clear persisted session so auto-reconnect does not restore a
+      // disconnected session on next page load (fixes #736).
       localStorage.removeItem("soroban-wallet-connected");
-      setState(DISCONNECTED_STATE);  // DISCONNECTED_STATE already has reconnecting: false
+
+      // Reset all local hook state synchronously before notifying consumers
+      // so any component that re-renders in response to DISCONNECTED_STATE
+      // sees a fully cleared wallet (fixes #736 — no stale publicKey flash).
+      retryCountRef.current = 0;
+      currentWalletTypeRef.current = null;
       setError(null);
       setRetryCount(0);
       setIsConnecting(false);
-      retryCountRef.current = 0;
+
+      // DISCONNECTED_STATE already has reconnecting: false; setting it last
+      // ensures a single React batch with all auth/data hooks clearing together.
+      setState(DISCONNECTED_STATE);
     },
     [setState],
   );

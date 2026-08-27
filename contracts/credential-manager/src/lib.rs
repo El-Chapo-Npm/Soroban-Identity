@@ -67,6 +67,15 @@ pub enum ContractError {
     BatchTooLarge = 17,
     InvalidSchemaHash = 18,
     ContractPaused = 19,
+    /// #731: credential activation_time is in the past or equal to now
+    ActivationTimeNotFuture = 21,
+    /// #731: credential has not reached its activation_time yet
+    CredentialNotYetActive = 22,
+    /// #731: activation cannot be cancelled because the credential is already
+    /// active (activation_time has passed) or was never time-locked
+    ActivationAlreadyEffective = 23,
+    /// #731: activation has already been cancelled
+    ActivationAlreadyCancelled = 24,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -113,9 +122,16 @@ pub struct Credential {
     pub claims_hash: BytesN<32>,
     pub signature: Bytes,
     pub issued_at: u64,
+    /// Unix timestamp after which the credential is considered active.
+    /// `0` means immediately active (no time-lock). Implements issue #731.
+    pub activation_time: u64,
     pub expires_at: u64,
     pub revoked: bool,
     pub schema_hash: Option<BytesN<32>>,
+    /// `true` when the issuer has explicitly cancelled a pending time-locked
+    /// activation before the activation_time was reached. Once cancelled the
+    /// credential is permanently inactive. Implements issue #731.
+    pub activation_cancelled: bool,
 }
 
 // ── Reentrancy guard (Issue #551) ──────────────────────────────────────────────
@@ -287,6 +303,9 @@ impl CredentialManager {
     /// * `claims_hash` - SHA-256 of off-chain claims (32 bytes).
     /// * `signature` - Issuer signature (64 bytes).
     /// * `expires_at` - Unix seconds; `0` means no expiry.
+    /// * `schema_hash` - Optional registered schema hash.
+    /// * `activation_time` - Unix seconds before which the credential is inactive.
+    ///   `0` means the credential is immediately active (no time-lock). #731
     ///
     /// # Returns
     /// The 32-byte credential ID.
@@ -294,6 +313,8 @@ impl CredentialManager {
     /// # Errors
     /// [`ContractError::CredentialAlreadyExists`] if an active credential with the same
     /// issuer + subject + type exists.
+    /// [`ContractError::ActivationTimeNotFuture`] if `activation_time` is non-zero and
+    /// not strictly in the future.
     ///
     /// # Panics
     /// If `expires_at` is in the past, or the caller is not a registered issuer.
@@ -307,6 +328,7 @@ impl CredentialManager {
         signature: Bytes,
         expires_at: u64,
         schema_hash: Option<BytesN<32>>,
+        activation_time: u64,
     ) -> Result<BytesN<32>, ContractError> {
         issuer.require_auth();
         Self::require_not_paused(&env)?;
@@ -317,6 +339,12 @@ impl CredentialManager {
             if !env.storage().persistent().has(&schema_key) {
                 return Err(ContractError::SchemaNotFound);
             }
+        }
+
+        // #731: activation_time must be strictly in the future when set
+        let now = env.ledger().timestamp();
+        if activation_time != 0 && activation_time <= now {
+            return Err(ContractError::ActivationTimeNotFuture);
         }
 
         // Issue #551: guard the cross-contract call into identity-registry.
@@ -340,7 +368,6 @@ impl CredentialManager {
             return Err(ContractError::SubjectHasNoDid);
         }
 
-        let now = env.ledger().timestamp();
         if expires_at != 0 && expires_at <= now {
             return Err(ContractError::CredentialExpired);
         }
@@ -374,9 +401,11 @@ impl CredentialManager {
             claims_hash,
             signature,
             issued_at: now,
+            activation_time,
             expires_at,
             revoked: false,
             schema_hash,
+            activation_cancelled: false,
         };
 
         env.storage().persistent().set(&key, &credential);
@@ -418,6 +447,15 @@ impl CredentialManager {
 
         let total_issued: u32 = env.storage().instance().get(&TOTAL_ISSUED_CNT).unwrap_or(0);
         env.storage().instance().set(&TOTAL_ISSUED_CNT, &(total_issued + 1));
+
+        // #731: emit a time-lock event when activation_time is set so
+        // off-chain indexers can schedule an "activated" notification.
+        if activation_time != 0 {
+            env.events().publish(
+                (CRED, symbol_short!("timelockd")),
+                (EVENT_VERSION, id.clone(), subject.clone(), issuer.clone(), activation_time),
+            );
+        }
 
         env.events().publish(
             (CRED, symbol_short!("issued")),
@@ -574,7 +612,15 @@ impl CredentialManager {
                 if cred.revoked {
                     return Err(ContractError::CredentialRevoked);
                 }
+                // #731: a cancelled time-locked activation is permanently inactive.
+                if cred.activation_cancelled {
+                    return Err(ContractError::CredentialRevoked);
+                }
                 let now = env.ledger().timestamp();
+                // #731: credential must have reached its activation_time.
+                if cred.activation_time != 0 && now < cred.activation_time {
+                    return Err(ContractError::CredentialNotYetActive);
+                }
                 if cred.expires_at > 0 && now > cred.expires_at {
                     return Err(ContractError::CredentialExpired);
                 }
@@ -583,6 +629,74 @@ impl CredentialManager {
                 Ok(())
             }
         }
+    }
+
+    /// Cancel the pending time-locked activation for a credential.
+    ///
+    /// Only the original issuer may call this. The activation must not yet have
+    /// taken effect (i.e. `activation_time` must be in the future, and the
+    /// credential must have been issued with a non-zero `activation_time`).
+    /// Once cancelled, verification will permanently fail for this credential.
+    ///
+    /// # Errors
+    /// - [`ContractError::CredentialNotFound`] — credential ID does not exist.
+    /// - [`ContractError::UnauthorizedIssuer`] — caller is not the original issuer.
+    /// - [`ContractError::CredentialRevoked`] — credential is already revoked.
+    /// - [`ContractError::ActivationAlreadyCancelled`] — already cancelled.
+    /// - [`ContractError::ActivationAlreadyEffective`] — activation_time has passed
+    ///   or the credential was never time-locked.
+    pub fn cancel_activation(env: Env, issuer: Address, credential_id: BytesN<32>) -> Result<(), ContractError> {
+        issuer.require_auth();
+        Self::require_not_paused(&env)?;
+        let key = Self::cred_key(&credential_id);
+        let mut cred: Credential = env.storage().persistent().get(&key).ok_or(ContractError::CredentialNotFound)?;
+        if cred.issuer != issuer {
+            return Err(ContractError::UnauthorizedIssuer);
+        }
+        if cred.revoked {
+            return Err(ContractError::CredentialRevoked);
+        }
+        if cred.activation_cancelled {
+            return Err(ContractError::ActivationAlreadyCancelled);
+        }
+        // Can only cancel a pending time-lock — activation_time must be non-zero
+        // and still in the future.
+        let now = env.ledger().timestamp();
+        if cred.activation_time == 0 || now >= cred.activation_time {
+            return Err(ContractError::ActivationAlreadyEffective);
+        }
+        cred.activation_cancelled = true;
+        env.storage().persistent().set(&key, &cred);
+        env.events().publish(
+            (CRED, symbol_short!("act_cxld")),
+            (EVENT_VERSION, credential_id, issuer),
+        );
+        Ok(())
+    }
+
+    /// Return the IDs of all pending time-locked credentials for a subject —
+    /// those whose `activation_time` is non-zero, in the future, and not yet
+    /// cancelled.
+    ///
+    /// This is a read-only query; the result is paginated using a simple
+    /// offset cursor over the subject's credential index.
+    pub fn get_pending_activations(env: Env, subject: Address) -> Vec<BytesN<32>> {
+        let all = Self::fetch_subject_creds(&env, &subject);
+        let now = env.ledger().timestamp();
+        let mut pending: Vec<BytesN<32>> = Vec::new(&env);
+        for id in all.iter() {
+            let key = Self::cred_key(&id);
+            if let Some(cred) = env.storage().persistent().get::<_, Credential>(&key) {
+                if cred.activation_time != 0
+                    && now < cred.activation_time
+                    && !cred.activation_cancelled
+                    && !cred.revoked
+                {
+                    pending.push_back(id);
+                }
+            }
+        }
+        pending
     }
 
     pub fn get_credential(env: Env, credential_id: BytesN<32>) -> Result<Credential, ContractError> {

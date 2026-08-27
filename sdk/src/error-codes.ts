@@ -65,6 +65,11 @@ export const CREDENTIAL_MANAGER_ERRORS: Record<number, string> = {
   8: 'Maximum number of issuers reached',
   9: 'Credential is expired',
   15: 'Batch size exceeds maximum of 50',
+  // #731: time-locked activation error codes
+  21: 'Activation time must be strictly in the future',
+  22: 'Credential has not reached its activation time yet',
+  23: 'Activation is already effective or credential was never time-locked',
+  24: 'Activation has already been cancelled',
 };
 
 export const REPUTATION_ERRORS: Record<number, string> = {
