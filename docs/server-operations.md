@@ -3,7 +3,8 @@
 The `server/` package exposes operational endpoints for deployed Soroban Identity contracts.
 
 For backing up and restoring server data and configuration, see
-[Backup and Restore](backup-restore.md).
+[Backup and Restore](backup-restore.md). For production secret storage, rotation,
+and Vault authentication, see [Secret Management](secret-management.md).
 
 ## Configuration
 

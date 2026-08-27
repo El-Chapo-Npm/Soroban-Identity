@@ -1,8 +1,15 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { lazy, Suspense, useState, useEffect, useCallback, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { SorobanRpc } from "@stellar/stellar-sdk";
-import IdentityPanel from "./components/IdentityPanel";
-import CredentialsPanel from "./components/CredentialsPanel";
+import LoadingFallback from "./components/LoadingFallback";
+
+// Tab panels are route-like application surfaces. Keep the initial identity
+// route small and fetch the credentials route only when it is needed.
+const IdentityPanel = lazy(() => import("./components/IdentityPanel"));
+const CredentialsPanel = lazy(() => import("./components/CredentialsPanel"));
+const preloadCredentialsPanel = () => {
+  void import("./components/CredentialsPanel");
+};
 import WalletButton from "./components/WalletButton";
 import ErrorBoundary from "./components/ErrorBoundary";
 import Toast from "./components/Toast";
@@ -360,6 +367,8 @@ export default function App() {
               tabRefs.current[name] = node;
             }}
             onClick={() => setTab(name)}
+            onMouseEnter={name === Tab.Credentials ? preloadCredentialsPanel : undefined}
+            onFocus={name === Tab.Credentials ? preloadCredentialsPanel : undefined}
           >
             {t(`tabs.${name}`)}
           </button>
@@ -368,6 +377,7 @@ export default function App() {
 
       <main id="main-content" tabIndex={-1}>
         <ErrorBoundary>
+          <Suspense fallback={<LoadingFallback />}>
           <div
             id={`panel-${Tab.Identity}`}
             role="tabpanel"
@@ -384,6 +394,7 @@ export default function App() {
           >
             {tab === Tab.Credentials && <CredentialsPanel verifyId={verifyId} />}
           </div>
+          </Suspense>
         </ErrorBoundary>
       </main>
     </div>

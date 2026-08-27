@@ -36,22 +36,38 @@ export function validateContentType(req, res) {
   return true;
 }
 
-export async function readJson(req, config) {
+/**
+ * Buffer the request body once, enforcing the configured size limit.
+ *
+ * The result is memoised on the request because the body has to be read
+ * twice: HMAC verification needs the exact bytes the client signed, and the
+ * route handler still needs to parse them as JSON. A request stream can only
+ * be consumed once, so the second reader would otherwise see an empty body.
+ *
+ * @param {import('node:http').IncomingMessage} req
+ * @param {object} config
+ * @returns {Promise<{tooLarge: boolean, buffer: Buffer}>}
+ */
+export async function readRawBody(req, config) {
+  if (req.__rawBody !== undefined) return req.__rawBody;
+
+  const remoteIp = () =>
+    req.headers["x-forwarded-for"]?.split(",")[0] ||
+    req.socket?.remoteAddress ||
+    "unknown";
+
   // Check Content-Length header first
   const contentLength = req.headers["content-length"];
   if (contentLength !== undefined) {
     const length = Number.parseInt(contentLength, 10);
     if (length > config.maxBodyBytes) {
-      const remoteIp =
-        req.headers["x-forwarded-for"]?.split(",")[0] ||
-        req.socket?.remoteAddress ||
-        "unknown";
       logger.warn({
-        remoteIp,
+        remoteIp: remoteIp(),
         contentLength: length,
         limit: config.maxBodyBytes
       }, 'Payload too large (Content-Length check)');
-      return { __payloadTooLarge: true };
+      req.__rawBody = { tooLarge: true, buffer: Buffer.alloc(0) };
+      return req.__rawBody;
     }
   }
 
@@ -61,24 +77,33 @@ export async function readJson(req, config) {
   for await (const chunk of req) {
     totalBytes += chunk.length;
     if (totalBytes > config.maxBodyBytes) {
-      const remoteIp =
-        req.headers["x-forwarded-for"]?.split(",")[0] ||
-        req.socket?.remoteAddress ||
-        "unknown";
       logger.warn({
-        remoteIp,
+        remoteIp: remoteIp(),
         totalBytes,
         limit: config.maxBodyBytes
       }, 'Payload too large (streaming check)');
-      return { __payloadTooLarge: true };
+      req.__rawBody = { tooLarge: true, buffer: Buffer.alloc(0) };
+      return req.__rawBody;
     }
     chunks.push(chunk);
   }
 
-  if (chunks.length === 0) return {};
-  const raw = Buffer.concat(chunks).toString("utf8");
+  req.__rawBody = { tooLarge: false, buffer: Buffer.concat(chunks) };
+  return req.__rawBody;
+}
+
+export async function readJson(req, config) {
+  const { tooLarge, buffer } = await readRawBody(req, config);
+  if (tooLarge) return { __payloadTooLarge: true };
+
+  if (buffer.length === 0) return {};
+  const raw = buffer.toString("utf8");
   if (!raw.trim()) return {};
-  return JSON.parse(raw);
+  const parsed = JSON.parse(raw);
+  // Stashed for the access log, which runs on response finish and would
+  // otherwise have no way to see a body that was already consumed here.
+  req.loggedBody = parsed;
+  return parsed;
 }
 
 export function sendJson(res, statusCode, body, headers = {}) {

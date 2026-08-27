@@ -1,0 +1,58 @@
+name: Deploy frontend to Cloudflare Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - "sdk/**"
+      - "infra/cloudflare/**"
+      - ".github/workflows/deploy-frontend.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Read deployment credentials from Vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ secrets.VAULT_ADDR }}
+          method: jwt
+          role: ${{ vars.VAULT_GITHUB_ROLE }}
+          jwtGithubAudience: https://github.com/${{ github.repository }}
+          secrets: |
+            secret/data/soroban-identity/production cloudflare_api_token | CLOUDFLARE_API_TOKEN ;
+            secret/data/soroban-identity/production cloudflare_account_id | CLOUDFLARE_ACCOUNT_ID ;
+            secret/data/soroban-identity/production pages_project | CLOUDFLARE_PAGES_PROJECT ;
+            secret/data/soroban-identity/production health_url | FRONTEND_HEALTH_URL
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+        env:
+          BUNDLE_MAX_INITIAL_KB: 750
+          BUNDLE_MAX_TOTAL_JS_KB: 5000
+          BUNDLE_MAX_TOTAL_ASSET_KB: 7000
+      - name: Publish to Cloudflare Pages
+        working-directory: frontend
+        run: npx --yes wrangler@latest pages deploy dist --project-name "$CLOUDFLARE_PAGES_PROJECT" --branch main --commit-dirty=true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+      - name: Verify deployed origin
+        run: curl --fail --retry 5 --retry-delay 5 --silent --show-error "$FRONTEND_HEALTH_URL"
+        env:
+          FRONTEND_HEALTH_URL: ${{ env.FRONTEND_HEALTH_URL }}

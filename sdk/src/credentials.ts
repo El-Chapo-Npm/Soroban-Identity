@@ -529,6 +529,9 @@ export class CredentialClient extends BaseClient {
 
   /**
    * Verify a credential and get a typed result describing any failure reason.
+   *
+   * Issue #666: Add retry logic to handle state propagation delays when immediately
+   * verifying a freshly issued credential.
    */
   async verifyCredential(
     callerAddress: string,
@@ -553,45 +556,81 @@ export class CredentialClient extends BaseClient {
       .setTimeout(timeout)
       .build();
 
-    const result = await retryWithBackoff(() => this.server.simulateTransaction(tx));
-    const isSimulationError = SorobanRpc.Api.isSimulationError(result);
-    this.debug('sdk.simulation_result', { operation: 'credentials.simulateTransaction', success: !isSimulationError });
+    let lastError: { error: string } | null = null;
+    let retries = 3;
 
-    if (isSimulationError) {
-      const error: string = (result as { error: string }).error ?? "";
-      const contractErr = ContractError.extract(error, CREDENTIAL_MANAGER_ERRORS);
-      if (contractErr) {
-        if (contractErr.code === CREDENTIAL_NOT_FOUND_CODE) return { valid: false, reason: 'not_found' };
-        if (contractErr.code === CREDENTIAL_REVOKED_CODE) return { valid: false, reason: 'revoked' };
-        if (contractErr.code === CREDENTIAL_EXPIRED_CODE) return { valid: false, reason: 'expired' };
+    // Retry logic for handling state propagation delays
+    while (retries > 0) {
+      const result = await retryWithBackoff(() => this.server.simulateTransaction(tx));
+      const isSimulationError = SorobanRpc.Api.isSimulationError(result);
+      this.debug('sdk.simulation_result', { operation: 'credentials.simulateTransaction', success: !isSimulationError });
+
+      if (isSimulationError) {
+        const error: string = (result as { error: string }).error ?? "";
+        lastError = result as { error: string };
+        const contractErr = ContractError.extract(error, CREDENTIAL_MANAGER_ERRORS);
+
+        if (contractErr) {
+          // Don't retry on these errors - they're definitive
+          if (contractErr.code === CREDENTIAL_NOT_FOUND_CODE && retries > 1) {
+            // Issue #666: Retry if credential not found, as it might not be indexed yet
+            retries--;
+            await new Promise(r => setTimeout(r, 500));
+            continue;
+          }
+          if (contractErr.code === CREDENTIAL_REVOKED_CODE) return { valid: false, reason: 'revoked' };
+          if (contractErr.code === CREDENTIAL_EXPIRED_CODE) return { valid: false, reason: 'expired' };
+          if (contractErr.code === CREDENTIAL_NOT_FOUND_CODE) return { valid: false, reason: 'not_found' };
+          return { valid: false, reason: 'unknown' };
+        }
+
+        const lowerError = error.toLowerCase();
+        if ((lowerError.includes('not found') || lowerError.includes('credentialnotfound')) && retries > 1) {
+          // Retry on not found errors due to state propagation delays
+          retries--;
+          await new Promise(r => setTimeout(r, 500));
+          continue;
+        }
+        if (lowerError.includes('not found') || lowerError.includes('credentialnotfound')) {
+          return { valid: false, reason: 'not_found' };
+        }
         return { valid: false, reason: 'unknown' };
       }
-      const lowerError = error.toLowerCase();
-      if (lowerError.includes('not found') || lowerError.includes('credentialnotfound')) {
+
+      const retval = scValToNative(
+        (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
+      );
+
+      if (retval !== false) {
+        return { valid: true };
+      }
+
+      // Contract returned false — fetch the credential to determine why
+      try {
+        const credential = await this.getCredential(callerAddress, credentialId, options);
+        if (credential.revoked) return { valid: false, reason: 'revoked' };
+        if (credential.expiresAt > 0 && credential.expiresAt < Math.floor(Date.now() / 1000)) {
+          return { valid: false, reason: 'expired' };
+        }
+        return { valid: false, reason: 'unknown' };
+      } catch (e) {
+        if (retries > 1) {
+          retries--;
+          await new Promise(r => setTimeout(r, 500));
+          continue;
+        }
+        return { valid: false, reason: 'unknown' };
+      }
+    }
+
+    // If all retries exhausted, return the last error
+    if (lastError) {
+      const error = lastError.error;
+      if (error.toLowerCase().includes('not found') || error.toLowerCase().includes('credentialnotfound')) {
         return { valid: false, reason: 'not_found' };
       }
-      return { valid: false, reason: 'unknown' };
     }
-
-    const retval = scValToNative(
-      (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
-    );
-
-    if (retval !== false) {
-      return { valid: true };
-    }
-
-    // Contract returned false — fetch the credential to determine why
-    try {
-      const credential = await this.getCredential(callerAddress, credentialId, options);
-      if (credential.revoked) return { valid: false, reason: 'revoked' };
-      if (credential.expiresAt > 0 && credential.expiresAt < Math.floor(Date.now() / 1000)) {
-        return { valid: false, reason: 'expired' };
-      }
-      return { valid: false, reason: 'unknown' };
-    } catch {
-      return { valid: false, reason: 'unknown' };
-    }
+    return { valid: false, reason: 'unknown' };
   }
 
   /**
@@ -610,14 +649,18 @@ export class CredentialClient extends BaseClient {
       throw new SorobanIdentityError("credentialIds cannot exceed 50 items", "INVALID_INPUT");
     }
     const concurrency = options?.concurrency ?? 5;
-    return runConcurrent(credentialIds, concurrency, async (id) => {
-      try {
-        const result = await this.verifyCredential(callerAddress, id, options);
-        return { id, ...result };
-      } catch {
-        return { id, valid: false, reason: "unknown" };
-      }
-    });
+    return runConcurrent(
+      credentialIds,
+      async (id) => {
+        try {
+          const result = await this.verifyCredential(callerAddress, id, options);
+          return { id, ...result };
+        } catch {
+          return { id, valid: false, reason: "unknown" };
+        }
+      },
+      concurrency
+    );
   }
 
   /**

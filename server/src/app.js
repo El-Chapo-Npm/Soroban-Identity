@@ -12,8 +12,7 @@ import {
   readWebhooks,
   WebhookDeliveryService,
 } from "./webhooks.js";
-import { collectHealth, collectReadiness } from "./health.js";
-import { readNotificationLog, summarizeNotificationLog } from "./notification-log.js";
+import { startAccessLog } from "./access-log.js";
 import { createDataLoaders } from "./dataloader.js";
 import { executeGraphQL, renderGraphiQLPlayground } from "./graphql.js";
 import {
@@ -26,6 +25,7 @@ import {
 import {
   notFound,
   readJson,
+  readRawBody,
   requireAdmin,
   requireAuth,
   sendJson,
@@ -33,6 +33,25 @@ import {
   setCorsHeaders,
   validateContentType,
 } from "./http-utils.js";
+import { KEY_ID_HEADER, NonceStore, verifySignedRequest } from "./request-signing.js";
+import { normalizeCspReports, setSecurityHeaders } from "./security-headers.js";
+import {
+  CREDENTIAL_STATUS_TYPE,
+  createVcSerializer,
+  credentialStatus,
+} from "./vc-jsonld.js";
+
+/**
+ * Whether the caller wants the W3C JSON-LD representation.
+ *
+ * Accept is the correct mechanism, but a browser address bar cannot set it,
+ * so `?format=jsonld` is honoured as well.
+ */
+function wantsJsonLd(req, url) {
+  if (url.searchParams.get("format") === "jsonld") return true;
+  const accept = String(req.headers.accept ?? "");
+  return accept.includes("application/ld+json");
+}
 import { schemas, validateRequest } from "./validation.js";
 import { routeLabel } from "./route-label.js";
 import { requestContextStore } from "./request-context.js";
@@ -50,22 +69,38 @@ const SERVER_FEATURES = [
   "api_versioning",
 ];
 
-export function createApp({ config, soroban, metrics, metricsAggregator, didCache = null, webhookService = new WebhookDeliveryService(config) }) {
 export function createApp({
   config,
   soroban,
   metrics,
   metricsAggregator,
+  didCache = null,
+  // Health and readiness probes only need something that can answer PING;
+  // the DID cache already owns a connected client, so reuse it unless a
+  // caller (or a test) supplies one explicitly.
+  redisClient = didCache?.client ?? null,
   webhookService = new WebhookDeliveryService(config),
   apiKeyService = new ApiKeyService(config),
-  rateLimiter = new TieredRateLimiter(),
+  rateLimiter = null,
+  accessLogSink = null,
   realtime = null,
+  nonceStore = new NonceStore({ ttlSeconds: config.requestSigningMaxAgeSeconds }),
+  vcSerializer = createVcSerializer(config, { logger }),
 }) {
   // Expose the key service on config so http-utils.requireAuth can validate
   // issued API keys instead of falling back to the single admin key.
   config.apiKeyService = apiKeyService;
 
-export function createApp({ config, soroban, metrics, metricsAggregator, redisClient = null, webhookService = new WebhookDeliveryService(config) }) {
+  // One limiter per app instance, so its buckets live as long as the server
+  // rather than being rebuilt per request.
+  const limiter =
+    rateLimiter ??
+    new TieredRateLimiter({
+      whitelist: config.rateLimitWhitelist ?? [],
+      trustProxy: config.trustProxy ?? false,
+      maxBuckets: config.rateLimitMaxBuckets ?? 10000,
+    });
+
   return async function app(req, res) {
     const url = new URL(
       req.url,
@@ -106,6 +141,22 @@ export function createApp({ config, soroban, metrics, metricsAggregator, redisCl
       res.setHeader("X-Request-ID", requestId);
     }
 
+    // CSP and companion security headers (#754). Set before any branch that
+    // can produce a response, so an early return still carries them. The
+    // nonce is stashed on the request for the one HTML page we render.
+    req.cspNonce = setSecurityHeaders(req, res, config);
+
+    // Access logging is attached before any routing so a request that is
+    // rejected by CORS, auth, or the rate limiter is still recorded.
+    if (config.accessLogEnabled && !isMetricsEndpoint) {
+      const finishAccessLog = startAccessLog(req, res, {
+        requestId,
+        config,
+        sink: accessLogSink,
+      });
+      res.on("finish", () => finishAccessLog({ requestBody: req.loggedBody ?? null }));
+    }
+
     // Apply CORS headers
     if (setCorsHeaders(req, res, config)) {
       // Preflight OPTIONS request
@@ -143,29 +194,110 @@ export function createApp({ config, soroban, metrics, metricsAggregator, redisCl
 
     // Rate limiting check (exempt /info, /health, /metrics)
     const isExempt = ["/info", "/health", "/ready", "/live", "/metrics"].includes(url.pathname);
+
+    // HMAC request signing (#752). Verified before routing so no handler can
+    // act on a request whose body was tampered with or replayed. Operational
+    // endpoints are exempt for the same reason they skip rate limiting: a
+    // probe has to work without client credentials.
+    // A CSP violation report is posted by the browser itself, which has no
+    // API key and no signing secret, so it can never carry a signature.
+    const isSigningExempt = isExempt || pathname === "/csp-report";
+
+    if (config.requestSigningEnabled && !isSigningExempt) {
+      const mustBeSigned =
+        config.requestSigningEnforce === "all" ||
+        !["GET", "HEAD", "OPTIONS"].includes(req.method);
+
+      if (mustBeSigned) {
+        // Buffered here and memoised on the request; the route handler's
+        // readJson call reuses these exact bytes.
+        const { tooLarge, buffer } = await readRawBody(req, config);
+        if (tooLarge) {
+          return sendJson(res, 413, {
+            code: "PAYLOAD_TOO_LARGE",
+            message: "Request body exceeds the size limit.",
+          });
+        }
+
+        // An explicit key id lets a caller sign with a key it is not also
+        // authenticating with; otherwise the authenticated key supplies it.
+        const signingKeyId = req.headers[KEY_ID_HEADER] ?? req.apiKeyId ?? null;
+        const signingSecret = signingKeyId
+          ? await apiKeyService.getSigningSecret(signingKeyId)
+          : null;
+
+        const verdict = verifySignedRequest({
+          headers: req.headers,
+          method: req.method,
+          path: req.url,
+          body: buffer,
+          secret: signingSecret,
+          nonceStore,
+          maxAgeSeconds: config.requestSigningMaxAgeSeconds,
+          scope: signingKeyId ?? "",
+        });
+
+        if (!verdict.ok) {
+          logger.warn(
+            { code: verdict.code, keyId: signingKeyId, route: routeLabel(pathname) },
+            "Rejected request signature",
+          );
+          return sendJson(res, verdict.status, {
+            error: "invalid_signature",
+            code: verdict.code,
+            message: verdict.message,
+          });
+        }
+      }
+    }
+
     if (!isExempt) {
-      const rateResult = rateLimiter.consume(req);
-      res.setHeader("X-RateLimit-Tier", rateResult.tier);
-      res.setHeader("X-RateLimit-Limit", String(rateResult.limit));
-      res.setHeader("X-RateLimit-Remaining", String(rateResult.remaining));
-      res.setHeader("X-RateLimit-Reset", String(rateResult.resetAt));
+      const rateResult = limiter.check(req, url.pathname);
+
+      if (rateResult.whitelisted) {
+        res.setHeader("X-RateLimit-Bypass", "whitelist");
+      } else {
+        // Report whichever budget is closest to exhaustion, so a client sees
+        // the limit that will actually stop it first.
+        const reported = rateResult.binding ?? rateResult;
+        res.setHeader("X-RateLimit-Tier", String(rateResult.tier ?? reported.rule ?? "free"));
+        res.setHeader("X-RateLimit-Limit", String(reported.limit));
+        res.setHeader("X-RateLimit-Remaining", String(reported.remaining));
+        res.setHeader("X-RateLimit-Reset", String(reported.resetAt));
+        if (rateResult.scope === "endpoint" || rateResult.endpoint?.rule) {
+          res.setHeader("X-RateLimit-Scope", rateResult.scope === "endpoint" ? "endpoint" : "tier");
+        }
+      }
 
       if (!rateResult.allowed) {
         res.setHeader("Retry-After", String(rateResult.retryAfter));
-        if (rateResult.tier === "free") {
+
+        // An endpoint denial is not a tier problem, so it must not be dressed
+        // up as one — upgrading would not raise a per-endpoint limit.
+        const isEndpointDenial = rateResult.scope === "endpoint";
+
+        if (!isEndpointDenial && rateResult.tier === "free") {
           res.setHeader(
             "X-Upgrade-Available",
             "Upgrade to Pro or Enterprise for higher limits: https://soroban-identity.org/pricing"
           );
         }
+
+        const windowMinutes = Math.round(
+          ((rateResult.resetAt * 1000) - Date.now()) / 60000
+        );
+
         return sendJson(res, 429, {
           error: "rate_limit_exceeded",
           code: "RATE_LIMIT_EXCEEDED",
-          message: rateResult.tier === "free"
-            ? `Free tier rate limit exceeded (${rateResult.limit} req/min). Upgrade to Pro (300 req/min) or Enterprise (1200 req/min) for higher limits.`
-            : `Rate limit exceeded for tier '${rateResult.tier}' (${rateResult.limit} req/min).`,
-          tier: rateResult.tier,
-          ...(rateResult.tier === "free"
+          scope: rateResult.scope,
+          message: isEndpointDenial
+            ? `Rate limit exceeded for '${rateResult.rule}' (${rateResult.limit} requests per window). Retry in ${rateResult.retryAfter}s.`
+            : rateResult.tier === "free"
+              ? `Free tier rate limit exceeded (${rateResult.limit} req/min). Upgrade to Pro (300 req/min) or Enterprise (1200 req/min) for higher limits.`
+              : `Rate limit exceeded for tier '${rateResult.tier}' (${rateResult.limit} req/min).`,
+          ...(isEndpointDenial ? { rule: rateResult.rule, windowMinutes } : { tier: rateResult.tier }),
+          ...(!isEndpointDenial && rateResult.tier === "free"
             ? {
                 upgrade: {
                   message: "Upgrade to Pro or Enterprise for increased rate limits.",
@@ -174,6 +306,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator, redisCl
                 },
               }
             : {}),
+          limit: rateResult.limit,
           retryAfter: rateResult.retryAfter,
         });
       }
@@ -189,6 +322,49 @@ export function createApp({ config, soroban, metrics, metricsAggregator, redisCl
             features: SERVER_FEATURES,
             minSdkVersion: MIN_SDK_VERSION,
           });
+        }
+
+        // CSP violation reports (#754). Unauthenticated by necessity — the
+        // browser posts these on its own behalf, with no credentials — so the
+        // handler only ever logs and counts, and never trusts the contents.
+        if (req.method === "POST" && pathname === "/csp-report") {
+          const { tooLarge, buffer } = await readRawBody(req, config);
+          if (tooLarge) {
+            return sendJson(res, 413, {
+              code: "PAYLOAD_TOO_LARGE",
+              message: "Request body exceeds the size limit.",
+            });
+          }
+
+          let reports = [];
+          try {
+            reports = normalizeCspReports(JSON.parse(buffer.toString("utf8") || "{}"));
+          } catch {
+            // A malformed report is the browser's problem, not something to
+            // surface as a server error; it is counted as unparseable and
+            // dropped.
+            logger.warn({ route: "/csp-report" }, "Discarded unparseable CSP report");
+            return res.writeHead(204).end();
+          }
+
+          for (const report of reports) {
+            logger.warn(
+              {
+                directive: report.directive,
+                blockedUri: report.blockedUri,
+                documentUri: report.documentUri,
+                sourceFile: report.sourceFile,
+                lineNumber: report.lineNumber,
+                enforced: !config.cspReportOnly,
+              },
+              "CSP violation reported",
+            );
+            metrics?.observeCspViolation?.(report.directive);
+          }
+
+          // 204: the browser discards the response body, and there is nothing
+          // useful to tell it.
+          return res.writeHead(204).end();
         }
 
         if (req.method === "GET" && pathname === "/health") {
@@ -270,7 +446,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator, redisCl
             if (!queryParam) {
               // Interactive GraphQL Playground in dev mode / browser requests
               res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-              return res.end(renderGraphiQLPlayground());
+              return res.end(renderGraphiQLPlayground(req.cspNonce));
             }
             let variables = {};
             try {
@@ -328,6 +504,19 @@ export function createApp({ config, soroban, metrics, metricsAggregator, redisCl
             limit: limitNum,
             cursor: validated.data.query.cursor ?? null,
           });
+
+          if (wantsJsonLd(req, url)) {
+            return sendJson(
+              res,
+              200,
+              {
+                items: items.map((item) => vcSerializer.serialize(item)),
+                nextCursor,
+              },
+              { "content-type": "application/ld+json; charset=utf-8" },
+            );
+          }
+
           if (version === "v2") {
             return sendJson(res, 200, {
               apiVersion: "v2",
@@ -357,6 +546,20 @@ export function createApp({ config, soroban, metrics, metricsAggregator, redisCl
           const credentials = await readCredentials(config);
           const credential = credentials.find((c) => c.id === credentialId);
           if (!credential) return notFound(res);
+
+          // W3C JSON-LD form (#753), opt-in so existing clients keep the
+          // compact internal shape they already parse. Requested either by
+          // Accept: application/ld+json or ?format=jsonld — the query
+          // parameter exists because a browser cannot easily set Accept.
+          if (wantsJsonLd(req, url)) {
+            return sendJson(
+              res,
+              200,
+              vcSerializer.serialize(credential),
+              { "content-type": "application/ld+json; charset=utf-8" },
+            );
+          }
+
           if (version === "v2") {
             return sendJson(res, 200, {
               apiVersion: "v2",
@@ -364,6 +567,29 @@ export function createApp({ config, soroban, metrics, metricsAggregator, redisCl
             });
           }
           return sendJson(res, 200, credential);
+        }
+
+        // Credential status (#753). Referenced by every credential's
+        // `credentialStatus` entry, so a verifier can check revocation
+        // against the issuer rather than trusting the copy it holds.
+        const credentialStatusMatch = pathname.match(/^\/credentials\/([^/]+)\/status$/);
+        if (req.method === "GET" && credentialStatusMatch) {
+          const credentialId = decodeURIComponent(credentialStatusMatch[1]);
+          if (!validateRequest(res, schemas.credentialByIdParams, { params: { credentialId } }).ok) {
+            return;
+          }
+          const credentials = await readCredentials(config);
+          const credential = credentials.find((c) => c.id === credentialId);
+          if (!credential) return notFound(res);
+
+          const status = credentialStatus(credential);
+          return sendJson(res, 200, {
+            id: `${pathname}`,
+            type: CREDENTIAL_STATUS_TYPE,
+            credentialId,
+            ...status,
+            checkedAt: new Date().toISOString(),
+          });
         }
 
         const verifyMatch = pathname.match(/^\/credentials\/([^/]+)\/verify$/);
@@ -432,6 +658,14 @@ export function createApp({ config, soroban, metrics, metricsAggregator, redisCl
             await appendAuditLog(config, { action: "issue_credential", credentialId: credential.id });
             webhookService.trigger("credential.issued", credential).catch(() => {});
             realtime?.emitCredentialEvent("issued", credential);
+            if (wantsJsonLd(req, url)) {
+              return sendJson(
+                res,
+                201,
+                vcSerializer.serialize(credential),
+                { "content-type": "application/ld+json; charset=utf-8" },
+              );
+            }
             return sendJson(res, 201, credential);
           } catch (err) {
             if (err instanceof DuplicateCredentialError) {
@@ -491,7 +725,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator, redisCl
         }
 
         if (req.method === "GET" && pathname === "/notifications/logs") {
-          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          if (!await requireAuth(req, res, config, ['admin:read'])) return;
           const limit = Number.parseInt(url.searchParams.get("limit") ?? "50", 10) || 50;
           if (limit > 200) {
             return sendJson(res, 400, { code: "INVALID_REQUEST", message: "limit must not exceed 200" });
@@ -505,24 +739,26 @@ export function createApp({ config, soroban, metrics, metricsAggregator, redisCl
         }
 
         if (req.method === "GET" && pathname === "/cache/stats") {
-          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          if (!await requireAuth(req, res, config, ['admin:read'])) return;
           return sendJson(res, 200, didCache ? didCache.getStats() : { enabled: false });
         }
 
         if (req.method === "DELETE" && pathname === "/cache/dids") {
-          if (!requireAuth(req, res, config, ['admin:write'])) return;
+          if (!await requireAuth(req, res, config, ['admin:write'])) return;
           const cleared = didCache ? await didCache.invalidateAll() : 0;
           return sendJson(res, 200, { cleared });
         }
 
         const cacheDidMatch = pathname.match(/^\/cache\/dids\/([^/]+)$/);
         if (req.method === "DELETE" && cacheDidMatch) {
-          if (!requireAuth(req, res, config, ['admin:write'])) return;
+          if (!await requireAuth(req, res, config, ['admin:write'])) return;
           const did = decodeURIComponent(cacheDidMatch[1]);
           const invalidated = didCache ? await didCache.invalidate(did) : false;
           return sendJson(res, 200, { did, invalidated });
+        }
+
         if (req.method === "GET" && pathname === "/notifications/summary") {
-          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          if (!await requireAuth(req, res, config, ['admin:read'])) return;
           const summary = await summarizeNotificationLog(config);
           return sendJson(res, 200, summary);
         }

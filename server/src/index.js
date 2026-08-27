@@ -10,6 +10,21 @@ import { WebhookDeliveryService } from './webhooks.js';
 import { ApiKeyService } from './api-keys.js';
 import { WebSocketHub } from './websocket.js';
 import { logger } from './logger.js';
+import { RotatingFileSink } from './access-log.js';
+import { VaultLeaseManager } from './vault.js';
+
+// Load secrets before validation so existing config consumers see the same
+// values as environment-backed deployments. Vault is opt-in and fails closed
+// when explicitly configured rather than silently falling back to plaintext.
+const vaultManager = new VaultLeaseManager();
+if (vaultManager.enabled) {
+  try {
+    await vaultManager.refresh();
+  } catch (error) {
+    logger.error({ error: error.message }, 'Vault initialization failed');
+    process.exit(1);
+  }
+}
 
 const validationResult = validateConfig();
 if (!validationResult.isValid) {
@@ -31,6 +46,12 @@ if (!validationResult.isValid) {
 logDefaultValues();
 
 const config = loadConfig();
+if (vaultManager.enabled) {
+  vaultManager.onSecrets = async () => {
+    Object.assign(config, loadConfig());
+    logger.info('Vault secrets applied to live configuration');
+  };
+}
 await ensureDataDir(config);
 const metrics = new MetricsService();
 const didCache = new DidCache(config, { metrics });
@@ -63,15 +84,39 @@ const realtime = config.wsEnabled
     })
   : null;
 
+let accessLogSink = null;
+if (config.accessLogEnabled && config.accessLogPath) {
+  accessLogSink = new RotatingFileSink({
+    filePath: config.accessLogPath,
+    maxBytes: config.accessLogMaxBytes,
+    maxFiles: config.accessLogMaxFiles,
+  });
+  // A file sink that cannot be opened falls back to stdout-only logging
+  // rather than preventing the server from starting.
+  await accessLogSink.open().catch((error) => {
+    logger.error({ error: error.message, path: config.accessLogPath }, 'Access log file unavailable; logging to stdout only');
+    accessLogSink = null;
+  });
+}
+
 const server = http.createServer(
-  createApp({ config, soroban, metrics, metricsAggregator, webhookService, apiKeyService, realtime }),
+  createApp({
+    config,
+    soroban,
+    metrics,
+    metricsAggregator,
+    didCache,
+    webhookService,
+    apiKeyService,
+    accessLogSink,
+    realtime,
+  }),
 );
 
 if (realtime) {
   realtime.attach(server);
   logger.info({ path: config.wsPath }, 'WebSocket endpoint enabled');
 }
-const server = http.createServer(createApp({ config, soroban, metrics, metricsAggregator, didCache, webhookService }));
 
 
 const connections = new Set();
@@ -96,6 +141,7 @@ function shutdown(signal) {
   if (process.env.DISABLE_EXPIRY_JOB !== 'true') {
     expiryJob.stop();
   }
+  vaultManager.stop();
 
   const timeoutMs = Number.parseInt(process.env.SHUTDOWN_TIMEOUT_MS ?? '10000', 10);
   const timer = setTimeout(() => {
@@ -113,7 +159,7 @@ function shutdown(signal) {
       if (realtime) await realtime.close();
       webhookService.drain();
       await soroban.drain();
-      await didCache.close();
+      if (accessLogSink) await accessLogSink.close();
     } catch (error) {
       logger.error({ error: error.message, stack: error.stack }, 'Error during drain');
     }

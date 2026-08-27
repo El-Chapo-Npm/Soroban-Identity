@@ -178,6 +178,46 @@ export function loadConfig(env = process.env) {
     ),
     corsMaxAge: parseInteger(env.CORS_MAX_AGE, DEFAULT_CORS_MAX_AGE, true),
     maxBodyBytes: parseInteger(env.MAX_BODY_BYTES, 64 * 1024),
+    // HMAC request signing (#752). Off by default: turning it on is a
+    // breaking change for existing clients, which must be given their signing
+    // secrets before their requests start being rejected.
+    requestSigningEnabled: parseBoolean(env.REQUEST_SIGNING_ENABLED, false),
+    // "mutations" signs POST/PUT/PATCH/DELETE only, which is where replay
+    // actually causes damage; "all" additionally covers reads.
+    requestSigningEnforce:
+      (env.REQUEST_SIGNING_ENFORCE ?? "mutations").toLowerCase() === "all" ? "all" : "mutations",
+    requestSigningMaxAgeSeconds: parseInteger(env.REQUEST_SIGNING_MAX_AGE_SECONDS, 300),
+    // Content Security Policy (#754). Report-only by default: an enforced
+    // policy that is even slightly too tight breaks the page, so a deployment
+    // should watch reports first and switch to enforcing once they are clean.
+    cspEnabled: parseBoolean(env.CSP_ENABLED, true),
+    cspReportOnly: parseBoolean(env.CSP_REPORT_ONLY, true),
+    cspReportUri: env.CSP_REPORT_URI ?? "/csp-report",
+    // Extra trusted sources merged into the baseline directives. Each is a
+    // comma-separated list of origins, e.g. "https://cdn.example.org".
+    cspScriptSrc: parseList(env.CSP_SCRIPT_SRC, []),
+    cspStyleSrc: parseList(env.CSP_STYLE_SRC, []),
+    cspConnectSrc: parseList(env.CSP_CONNECT_SRC, []),
+    cspImgSrc: parseList(env.CSP_IMG_SRC, []),
+    cspFontSrc: parseList(env.CSP_FONT_SRC, []),
+    cspFormAction: parseList(env.CSP_FORM_ACTION, []),
+    cspFrameAncestors: parseList(env.CSP_FRAME_ANCESTORS, []),
+    // W3C Verifiable Credentials JSON-LD (#753).
+    // Base context: the v1.1 data model by default; set to the v2 URI to emit
+    // v2 credentials (which renames issuanceDate/expirationDate).
+    vcBaseContext:
+      env.VC_BASE_CONTEXT ?? "https://www.w3.org/2018/credentials/v1",
+    // Additional contexts appended to every credential, for a deployment with
+    // its own vocabulary.
+    vcExtraContexts: parseList(env.VC_EXTRA_CONTEXTS, []),
+    // Public base URL. When set, credential and status ids are resolvable
+    // https URLs instead of urn: identifiers.
+    vcBaseUrl: env.VC_BASE_URL ?? "",
+    // 32-byte Ed25519 seed (hex or base64) used to sign credentials. Without
+    // it credentials are emitted unsigned rather than carrying a fake proof.
+    vcProofPrivateKey: env.VC_PROOF_PRIVATE_KEY ?? "",
+    // Defaults to "<issuer DID>#key-1" when unset.
+    vcProofVerificationMethod: env.VC_PROOF_VERIFICATION_METHOD ?? "",
     dataDir: env.DATA_DIR ? path.resolve(env.DATA_DIR) : DEFAULT_DATA_DIR,
     auditLogPath: env.AUDIT_LOG_PATH
       ? path.resolve(env.AUDIT_LOG_PATH)
@@ -186,6 +226,12 @@ export function loadConfig(env = process.env) {
     credentialStorePath: env.CREDENTIAL_STORE_PATH
       ? path.resolve(env.CREDENTIAL_STORE_PATH)
       : path.join(DEFAULT_DATA_DIR, "credentials.json"),
+    rateLimitWhitelist: (env.RATE_LIMIT_WHITELIST ?? "")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean),
+    rateLimitMaxBuckets: parseInteger(env.RATE_LIMIT_MAX_BUCKETS, 10000),
+    trustProxy: env.TRUST_PROXY === "true",
     redisUrl: env.REDIS_URL ?? "",
     didCacheTtlMs: parseInteger(env.DID_CACHE_TTL_MS, 60 * 1000),
     redisMaxRetries: parseInteger(env.REDIS_MAX_RETRIES, 5),
@@ -198,6 +244,14 @@ export function loadConfig(env = process.env) {
       .filter(Boolean),
     healthProbeTimeoutMs: parseInteger(env.HEALTH_PROBE_TIMEOUT_MS, 2000),
     redisUrl: env.REDIS_URL ?? "",
+    accessLogEnabled: env.ACCESS_LOG_ENABLED !== "false",
+    accessLogPath: env.ACCESS_LOG_PATH ?? "",
+    accessLogMaxBytes: parseInteger(env.ACCESS_LOG_MAX_BYTES, 10 * 1024 * 1024),
+    accessLogMaxFiles: parseInteger(env.ACCESS_LOG_MAX_FILES, 5),
+    logPayloads: env.LOG_PAYLOADS === "true",
+    logHeaders: env.LOG_HEADERS === "true",
+    logPayloadMaxBytes: parseInteger(env.LOG_PAYLOAD_MAX_BYTES, 2048),
+    trustProxy: env.TRUST_PROXY === "true",
     expiryWarningDays: parseInteger(env.EXPIRY_WARNING_DAYS, 7),
     expiryReminderThresholds: parseThresholds(
       env.EXPIRY_REMINDER_THRESHOLDS,
@@ -291,7 +345,11 @@ export function validateConfig(env = process.env) {
     { key: "RPC_RETRY_BASE_MS", desc: "must be a valid integer" },
     { key: "RPC_RETRY_BACKOFF", desc: "must be a valid integer" },
     { key: "EVENT_POLL_INTERVAL_MS", desc: "must be a valid integer" },
+    { key: "RATE_LIMIT_MAX_BUCKETS", desc: "must be a valid integer" },
     { key: "CORS_MAX_AGE", desc: "must be a valid integer" },
+    { key: "ACCESS_LOG_MAX_BYTES", desc: "must be a valid integer" },
+    { key: "ACCESS_LOG_MAX_FILES", desc: "must be a valid integer" },
+    { key: "LOG_PAYLOAD_MAX_BYTES", desc: "must be a valid integer" },
   ];
 
   for (const item of numericVars) {
@@ -412,6 +470,9 @@ export function logDefaultValues(env = process.env) {
     { key: "EXPIRY_WARNING_DAYS", defaultVal: "7" },
     { key: "EXPIRY_JOB_INTERVAL_MS", defaultVal: "3600000" },
     { key: "EXPIRY_CONCURRENCY", defaultVal: "8" },
+    { key: "RATE_LIMIT_WHITELIST", defaultVal: "'' (no exemptions)" },
+    { key: "RATE_LIMIT_MAX_BUCKETS", defaultVal: "10000" },
+    { key: "TRUST_PROXY", defaultVal: "false" },
     { key: "REDIS_URL", defaultVal: "'' (cache disabled)" },
     { key: "DID_CACHE_TTL_MS", defaultVal: "60000" },
     { key: "REDIS_MAX_RETRIES", defaultVal: "5" },
@@ -419,6 +480,13 @@ export function logDefaultValues(env = process.env) {
     { key: "HEALTH_PROBE_TIMEOUT_MS", defaultVal: "2000" },
     { key: "REDIS_URL", defaultVal: "'' (disabled)" },
     { key: "EXPIRY_CRON_SCHEDULE", defaultVal: "'' (interval mode)" },
+    { key: "ACCESS_LOG_ENABLED", defaultVal: "true" },
+    { key: "ACCESS_LOG_PATH", defaultVal: "'' (stdout only)" },
+    { key: "ACCESS_LOG_MAX_BYTES", defaultVal: "10485760" },
+    { key: "ACCESS_LOG_MAX_FILES", defaultVal: "5" },
+    { key: "LOG_PAYLOADS", defaultVal: "false" },
+    { key: "LOG_HEADERS", defaultVal: "false" },
+    { key: "TRUST_PROXY", defaultVal: "false" },
     { key: "NOTIFICATION_WEBHOOK_URL", defaultVal: "''" },
     { key: "EMAIL_API_URL", defaultVal: "''" },
     { key: "EMAIL_FROM", defaultVal: "''" },

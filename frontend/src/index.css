@@ -595,6 +595,32 @@ button:disabled { background: var(--btn-disabled-bg); color: var(--btn-disabled-
   }
 }
 
+.loading-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.65rem;
+  min-height: 12rem;
+  color: var(--text-muted);
+}
+
+.loading-fallback__spinner {
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: loading-fallback-spin 0.8s linear infinite;
+}
+
+@keyframes loading-fallback-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loading-fallback__spinner { animation: none; }
+}
+
 /* ── Focus rings ─────────────────────────────────────────────────────────────
    Visible focus indicator for all interactive elements.
    Uses :focus-visible so mouse users don't see the ring. */

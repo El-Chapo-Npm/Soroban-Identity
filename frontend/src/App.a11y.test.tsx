@@ -10,6 +10,9 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import axe from 'axe-core';
 import App from './App';
+import { WalletProvider } from './context/WalletContext';
+
+const renderApp = () => render(<WalletProvider><App /></WalletProvider>);
 
 // ─── Stub heavy SDK / network imports ──────────────────────────────────────
 
@@ -56,7 +59,7 @@ vi.mock('./hooks/useCredentialExpiryCheck', () => ({
 
 describe('App accessibility', () => {
   it('renders a skip link that targets the main landmark', () => {
-    render(<App />);
+    renderApp();
 
     const skipLink = screen.getByRole('link', { name: /skip to main content/i });
     expect(skipLink.getAttribute('href')).toBe('#main-content');
@@ -70,14 +73,14 @@ describe('App accessibility', () => {
 
   it('reaches the skip link with the very first Tab press', async () => {
     const user = userEvent.setup();
-    render(<App />);
+    renderApp();
 
     await user.tab();
     expect(document.activeElement).toBe(screen.getByRole('link', { name: /skip to main content/i }));
   });
 
   it('exposes the section switcher as a labelled tablist', () => {
-    render(<App />);
+    renderApp();
 
     const tablist = screen.getByRole('tablist');
     expect(tablist.getAttribute('aria-label')).toBeTruthy();
@@ -90,7 +93,7 @@ describe('App accessibility', () => {
   });
 
   it('marks exactly one tab selected and links it to its panel', () => {
-    render(<App />);
+    renderApp();
 
     const tabs = screen.getAllByRole('tab');
     const selected = tabs.filter((tab) => tab.getAttribute('aria-selected') === 'true');
@@ -102,7 +105,7 @@ describe('App accessibility', () => {
   });
 
   it('keeps only the selected tab in the tab order (roving tabindex)', () => {
-    render(<App />);
+    renderApp();
 
     const tabs = screen.getAllByRole('tab');
     const inOrder = tabs.filter((tab) => tab.getAttribute('tabindex') === '0');
@@ -112,7 +115,7 @@ describe('App accessibility', () => {
 
   it('moves between tabs with the arrow keys and wraps around', async () => {
     const user = userEvent.setup();
-    render(<App />);
+    renderApp();
 
     const [identityTab, credentialsTab] = screen.getAllByRole('tab');
     identityTab.focus();
@@ -136,7 +139,7 @@ describe('App accessibility', () => {
 
   it('jumps to the first and last tab with Home and End', async () => {
     const user = userEvent.setup();
-    render(<App />);
+    renderApp();
 
     const [identityTab, credentialsTab] = screen.getAllByRole('tab');
     identityTab.focus();
@@ -154,15 +157,15 @@ describe('App accessibility', () => {
 
   it('activates a tab on click and hides the other panel', async () => {
     const user = userEvent.setup();
-    render(<App />);
+    renderApp();
 
     const [, credentialsTab] = screen.getAllByRole('tab');
     await user.click(credentialsTab);
 
     await waitFor(() => {
-      expect(screen.getByTestId('credentials-panel')).toBeTruthy();
+      expect(screen.getByRole('heading', { name: /verify credential/i })).toBeTruthy();
     });
-    expect(screen.queryByTestId('identity-panel')).toBeNull();
+    expect(screen.queryByRole('heading', { name: /resolve did/i })).toBeNull();
 
     // The inactive panel stays in the DOM but hidden, so its labelling
     // relationship survives without being announced.
@@ -172,7 +175,7 @@ describe('App accessibility', () => {
   });
 
   it('hides decorative glyphs and status dots from screen readers', async () => {
-    render(<App />);
+    renderApp();
 
     await waitFor(() => {
       expect(screen.getByRole('status')).toBeTruthy();
@@ -183,7 +186,7 @@ describe('App accessibility', () => {
   });
 
   it('has no axe violations', async () => {
-    const { container } = render(<App />);
+    const { container } = renderApp();
 
     await waitFor(() => {
       expect(screen.getByRole('status')).toBeTruthy();

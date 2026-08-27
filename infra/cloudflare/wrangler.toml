@@ -1,0 +1,18 @@
+name = "soroban-identity-edge"
+main = "worker.js"
+compatibility_date = "2026-08-27"
+workers_dev = false
+
+[vars]
+CANARY_ENABLED = "false"
+CANARY_PERCENTAGE = "10"
+# Set these with `wrangler secret put` or the deployment workflow.
+# STABLE_ORIGIN and CANARY_ORIGIN must be complete https:// origins.
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[assets]
+directory = "../../frontend/dist"
+binding = "ASSETS"

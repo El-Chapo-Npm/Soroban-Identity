@@ -395,43 +395,18 @@ impl Reputation {
 
         let now = env.ledger().timestamp();
         let rec_key = Self::record_key(&subject);
-        let existing_record: Option<ReputationRecord> =
-            env.storage().persistent().get(&rec_key);
-        let is_new_subject = existing_record.is_none();
-        let mut record: ReputationRecord =
-            existing_record.unwrap_or(ReputationRecord {
-                subject: subject.clone(),
-                score: 0,
-                reporter_count: 0,
-                updated_at: now,
-            });
-        record.score = record.score.saturating_add(delta).max(MIN_SCORE);
-        record.updated_at = now;
-
         let history_key = Self::history_key(&subject, &reporter);
-        let is_new = !env.storage().persistent().has(&history_key);
-        if is_new {
-            record.reporter_count = record.reporter_count.saturating_add(1);
-        }
-        if is_new_subject {
-            let cnt: u32 = env
-                .storage()
-                .instance()
-                .get(&SUBJECT_CNT)
-                .unwrap_or(0);
-            env.storage().instance().set(&SUBJECT_CNT, &(cnt + 1));
-        }
 
-        env.storage().persistent().set(&rec_key, &record);
-        env.storage()
-            .persistent()
-            .extend_ttl(&rec_key, TTL_MAX, TTL_MAX);
-
+        // Issue #667: Add score entry to history BEFORE updating the record
+        // This ensures the history is atomically updated even if the record update races
         let mut history: Vec<ScoreEntry> = env
             .storage()
             .persistent()
             .get(&history_key)
             .unwrap_or_else(|| Vec::new(&env));
+
+        let is_new_reporter = history.is_empty();
+
         if history.len() >= MAX_HISTORY as u32 {
             history.remove(0);
         }
@@ -441,17 +416,69 @@ impl Reputation {
             reason,
             submitted_at: now,
         });
+
+        // Atomically write history first (this is the primary source of truth)
         env.storage().persistent().set(&history_key, &history);
         env.storage()
             .persistent()
             .extend_ttl(&history_key, TTL_MAX, TTL_MAX);
 
-        let score_cnt: u32 = env
-            .storage()
-            .instance()
-            .get(&SCORE_CNT)
-            .unwrap_or(0);
-        env.storage().instance().set(&SCORE_CNT, &(score_cnt + 1));
+        // Now update the aggregate record
+        // Issue #667: Recompute score from all reporter histories to handle race conditions
+        let existing_record: Option<ReputationRecord> =
+            env.storage().persistent().get(&rec_key);
+        let is_new_subject = existing_record.is_none();
+
+        // Compute the authoritative score by summing all reporter contributions
+        // This avoids the race condition where concurrent submissions overwrite each other
+        let mut computed_score: i64 = 0;
+        let mut reporter_count: u32 = 0;
+        let all_reporters = Self::get_reporters(&env);
+
+        for rep in all_reporters.iter() {
+            let rep_history_key = Self::history_key(&subject, &rep);
+            if env.storage().persistent().has(&rep_history_key) {
+                reporter_count += 1;
+                let rep_history: Vec<ScoreEntry> = env
+                    .storage()
+                    .persistent()
+                    .get(&rep_history_key)
+                    .unwrap_or_else(|| Vec::new(&env));
+                for entry in rep_history.iter() {
+                    computed_score = computed_score.saturating_add(entry.delta).max(MIN_SCORE);
+                }
+            }
+        }
+
+        let mut record: ReputationRecord =
+            existing_record.unwrap_or(ReputationRecord {
+                subject: subject.clone(),
+                score: 0,
+                reporter_count: 0,
+                updated_at: now,
+            });
+
+        record.score = computed_score;
+        record.reporter_count = reporter_count;
+        record.updated_at = now;
+
+        env.storage().persistent().set(&rec_key, &record);
+        env.storage()
+            .persistent()
+            .extend_ttl(&rec_key, TTL_MAX, TTL_MAX);
+
+        // Update subject count only on first submission
+        if is_new_subject {
+            let cnt: u32 = env
+                .storage()
+                .instance()
+                .get(&SUBJECT_CNT)
+                .unwrap_or(0);
+            env.storage().instance().set(&SUBJECT_CNT, &(cnt + 1));
+        }
+
+        // Note: SCORE_CNT is intentionally NOT incremented atomically as it's just a stat
+        // Issue #667: Removed non-atomic SCORE_CNT increment to prevent similar race conditions
 
         env.events().publish(
             (symbol_short!("SCORE"), symbol_short!("updated")),

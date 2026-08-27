@@ -12,6 +12,7 @@ import ReputationChart from './ReputationChart';
 import { formatTimestamp } from '../utils/formatDate';
 import { handleError, isNetworkError } from '../utils/handleError';
 import { useWalletContext } from '../context/WalletContext';
+import { useToast } from '../context/ToastContext';
 import { exportDidDocumentAsJsonLd } from '../../../sdk/src/serializers';
 import { SorobanRpc, TransactionBuilder, BASE_FEE, nativeToScVal, Contract } from '@stellar/stellar-sdk';
 import { IdentityClient, ReputationClient } from '../../../sdk/src';
@@ -38,8 +39,52 @@ function identityReducer(_state: IdentityState, action: IdentityAction): Identit
   }
 }
 
+const MAX_METADATA_KEY_LEN = 64;
+const MAX_METADATA_VALUE_LEN = 500;
+
+interface MetadataValidationResult {
+  valid: boolean;
+  message: string | null;
+  fieldErrors: Record<number, string>;
+}
+
+/** Validates DID metadata key/value entries: non-empty keys, length limits, no duplicates. */
+function validateMetadataFields(
+  entries: Array<{ key: string; value: string }>,
+): MetadataValidationResult {
+  const fieldErrors: Record<number, string> = {};
+  const seenKeys = new Map<string, number>();
+
+  entries.forEach((entry, idx) => {
+    const key = entry.key.trim();
+    const value = entry.value.trim();
+    if (!key && !value) return; // fully blank row — ignored on submit
+
+    if (!key) {
+      fieldErrors[idx] = 'Key is required when a value is provided';
+    } else if (key.length > MAX_METADATA_KEY_LEN) {
+      fieldErrors[idx] = `Key must be ${MAX_METADATA_KEY_LEN} characters or fewer`;
+    } else if (value.length > MAX_METADATA_VALUE_LEN) {
+      fieldErrors[idx] = `Value must be ${MAX_METADATA_VALUE_LEN} characters or fewer`;
+    } else if (seenKeys.has(key)) {
+      fieldErrors[idx] = 'Duplicate metadata key';
+      fieldErrors[seenKeys.get(key)!] = 'Duplicate metadata key';
+    } else {
+      seenKeys.set(key, idx);
+    }
+  });
+
+  const valid = Object.keys(fieldErrors).length === 0;
+  return {
+    valid,
+    message: valid ? null : 'Please fix the highlighted metadata fields.',
+    fieldErrors,
+  };
+}
+
 export default function IdentityPanel() {
   const wallet = useWalletContext();
+  const toast = useToast();
   const [identityState, dispatch] = useReducer(identityReducer, { status: 'idle' });
   const resolving = identityState.status === 'loading';
   const networkError = identityState.status === 'error'
@@ -54,6 +99,18 @@ export default function IdentityPanel() {
   const [resolveAddress, setResolveAddress] = useState('');
   const [showHistory, setShowHistory] = useState(false);
   const { history, addAddress, clearHistory } = useAddressHistory();
+
+  // ── Recent DID search/filter (#641) ────────────────────────────────────
+  const [historyQuery, setHistoryQuery] = useState('');
+  const [debouncedHistoryQuery, setDebouncedHistoryQuery] = useState('');
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedHistoryQuery(historyQuery.trim()), 250);
+    return () => clearTimeout(timer);
+  }, [historyQuery]);
+  const filteredHistory = debouncedHistoryQuery
+    ? history.filter((addr) => addr.toLowerCase().includes(debouncedHistoryQuery.toLowerCase()))
+    : history;
+  const clearHistoryFilter = () => setHistoryQuery('');
 
   const prevConnected = useRef(wallet.connected);
   useEffect(() => {
@@ -82,20 +139,19 @@ export default function IdentityPanel() {
   const [showQr, setShowQr] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  const handleResolve = async () => {
-    const address = resolveAddress.trim();
+  const handleResolve = async (addressOverride?: string) => {
+    if (resolving) return; // guard against duplicate submissions
+    const address = (addressOverride ?? resolveAddress).trim();
     if (!address) return;
-    
+
     // Validate Stellar address format
     if (!StrKey.isValidEd25519PublicKey(address)) {
-      dispatch({ 
-        type: 'FETCH_ERROR', 
-        message: 'Invalid Stellar address format. Address must start with "G" and be 56 characters long.',
-        errorType: 'contract'
-      });
+      const message = 'Invalid Stellar address format. Address must start with "G" and be 56 characters long.';
+      dispatch({ type: 'FETCH_ERROR', message, errorType: 'contract' });
+      toast.error(message);
       return;
     }
-    
+
     addAddress(address);
     dispatch({ type: 'FETCH_START' });
     setSybilResult(null);
@@ -115,12 +171,15 @@ export default function IdentityPanel() {
       }
 
       dispatch({ type: 'FETCH_SUCCESS', did: didDoc, reputation: resolvedRep, scoreHistory: resolvedHistory });
+      toast.success('DID resolved.');
     } catch (e: unknown) {
+      const message = handleError(e);
       dispatch({
         type: 'FETCH_ERROR',
-        message: handleError(e),
+        message,
         errorType: isNetworkError(e) ? 'network' : 'contract',
       });
+      toast.error(message);
     }
   };
 
@@ -174,6 +233,7 @@ export default function IdentityPanel() {
   };
 
   const handleCreate = async () => {
+    if (creating) return; // guard against duplicate submissions
     if (!wallet.connected || !wallet.publicKey) return;
     setCreating(true);
     setCreateResult(null);
@@ -219,24 +279,27 @@ export default function IdentityPanel() {
       setCreateResult(
         `DID created: did:stellar:${wallet.publicKey}\nEstimated fee: ${estimatedFee} stroops (${(estimatedFee / 10_000_000).toFixed(7)} XLM)`
       );
+      toast.success('DID created successfully.');
     } catch (e: unknown) {
-      setCreateResult(`Error: ${handleError(e)}`);
+      const message = handleError(e);
+      setCreateResult(`Error: ${message}`);
+      toast.error(message);
     } finally {
       setCreating(false);
     }
   };
 
   const handleUpdate = async () => {
+    if (updating) return; // guard against duplicate submissions
     if (!wallet.connected || !wallet.publicKey) return;
-    
-    // Validate no duplicate keys
-    const keys = metadataEntries.map(e => e.key.trim()).filter(k => k);
-    const uniqueKeys = new Set(keys);
-    if (keys.length !== uniqueKeys.size) {
-      setMetadataError('Duplicate metadata keys are not allowed');
+
+    const validation = validateMetadataFields(metadataEntries);
+    if (!validation.valid) {
+      setMetadataError(validation.message);
+      toast.error(validation.message ?? 'Invalid metadata.');
       return;
     }
-    
+
     setMetadataError(null);
     setUpdating(true);
     setUpdateSuccess(false);
@@ -285,21 +348,62 @@ export default function IdentityPanel() {
       if (txStatus.status === "FAILED") {
         throw new Error("Transaction failed on-chain");
       }
-      
+
+      // Wait for metadata to be indexed after transaction confirmation
+      // Issue #665: Add small delay to ensure metadata is persisted on-chain
+      await new Promise(r => setTimeout(r, 1000));
+
       const identityClient = new IdentityClient(networkConfig);
-      const updatedDid = await identityClient.resolveDid(wallet.publicKey);
-      
+      let updatedDid;
+      let retries = 3;
+      let lastError: Error | null = null;
+
+      // Retry logic to handle state propagation delays
+      while (retries > 0) {
+        try {
+          updatedDid = await identityClient.resolveDid(wallet.publicKey);
+          // Verify metadata was actually updated by checking if it contains expected keys
+          const expectedKeys = metadataEntries
+            .map(e => e.key.trim())
+            .filter(k => k);
+          const updatedKeys = Object.keys(updatedDid.metadata || {});
+          const allKeysPresent = expectedKeys.every(key => updatedKeys.includes(key));
+
+          if (allKeysPresent || retries === 1) {
+            break;
+          }
+          retries--;
+          if (retries > 0) {
+            await new Promise(r => setTimeout(r, 500));
+          }
+        } catch (e) {
+          lastError = e as Error;
+          retries--;
+          if (retries > 0) {
+            await new Promise(r => setTimeout(r, 500));
+          }
+        }
+      }
+
+      if (!updatedDid) {
+        throw lastError || new Error("Failed to fetch updated DID");
+      }
+
       dispatch({ type: 'FETCH_SUCCESS', did: updatedDid, reputation: null, scoreHistory: [] });
       setUpdateSuccess(true);
+      toast.success('DID metadata updated.');
       setTimeout(() => setUpdateSuccess(false), 3000);
     } catch (e: unknown) {
-      setCreateResult(`Error: ${handleError(e)}`);
+      const message = handleError(e);
+      setMetadataError(message);
+      toast.error(message);
     } finally {
       setUpdating(false);
     }
   };
 
   const handleSybilCheck = async () => {
+    if (checkingsSybil) return; // guard against duplicate submissions
     if (!resolvedAddress) return;
     setCheckingSybil(true);
     setSybilResult(null);
@@ -315,6 +419,7 @@ export default function IdentityPanel() {
       setSybilResult(passes);
     } catch (e: unknown) {
       setSybilResult(null);
+      toast.error(handleError(e));
     } finally {
       setCheckingSybil(false);
     }
@@ -353,13 +458,14 @@ export default function IdentityPanel() {
   }, [isEditingMetadata]);
 
   const handleSaveMetadata = async () => {
+    if (updating) return; // guard against duplicate submissions
     if (!wallet.connected || !wallet.publicKey) return;
 
-    // Validate no duplicate keys
-    const keys = editingMetadata.map(e => e.key.trim()).filter(k => k);
-    const uniqueKeys = new Set(keys);
-    if (keys.length !== uniqueKeys.size) {
-      setMetadataError('Duplicate metadata keys are not allowed');
+    const validation = validateMetadataFields(editingMetadata);
+    setEditingFieldErrors(validation.fieldErrors);
+    if (!validation.valid) {
+      setMetadataError(validation.message);
+      toast.error(validation.message ?? 'Invalid metadata.');
       return;
     }
 
@@ -419,9 +525,12 @@ export default function IdentityPanel() {
       setUpdateSuccess(true);
       setIsEditingMetadata(false);
       setEditingMetadata([]);
+      toast.success('DID metadata updated.');
       setTimeout(() => setUpdateSuccess(false), 3000);
     } catch (e: unknown) {
-      setMetadataError(`Error: ${handleError(e)}`);
+      const message = handleError(e);
+      setMetadataError(message);
+      toast.error(message);
     } finally {
       setUpdating(false);
     }
@@ -480,10 +589,104 @@ export default function IdentityPanel() {
           value={resolveAddress}
           onChange={(e) => setResolveAddress(e.target.value)}
         />
-        <button onClick={handleResolve} disabled={resolving || !resolveAddress}>
+        <button onClick={() => void handleResolve()} disabled={resolving || !resolveAddress}>
           {resolving ? 'Resolving…' : 'Resolve'}
         </button>
         {resolving && <SkeletonCard variant="identity" />}
+
+        {history.length > 0 && (
+          <div style={{ marginTop: '0.75rem' }}>
+            <button
+              type="button"
+              onClick={() => setShowHistory((v) => !v)}
+              aria-expanded={showHistory}
+              style={{ fontSize: '0.8rem', padding: '0.3rem 0.6rem' }}
+            >
+              {showHistory ? 'Hide' : 'Show'} Recent DIDs ({history.length})
+            </button>
+
+            {showHistory && (
+              <div
+                style={{
+                  marginTop: '0.5rem',
+                  padding: '0.75rem',
+                  background: 'var(--card-bg-accent)',
+                  borderRadius: '0.5rem',
+                  border: '1px solid var(--border-input)',
+                }}
+              >
+                <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                  <label htmlFor="did-history-search" className="visually-hidden">
+                    Search recent DIDs by address
+                  </label>
+                  <input
+                    id="did-history-search"
+                    type="search"
+                    placeholder="Filter recent DIDs by address…"
+                    value={historyQuery}
+                    onChange={(e) => setHistoryQuery(e.target.value)}
+                    style={{ flex: 1, fontSize: '0.85rem' }}
+                  />
+                  {historyQuery && (
+                    <button
+                      type="button"
+                      onClick={clearHistoryFilter}
+                      style={{ fontSize: '0.8rem', padding: '0.3rem 0.6rem' }}
+                    >
+                      Clear filter
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={clearHistory}
+                    style={{ fontSize: '0.8rem', padding: '0.3rem 0.6rem' }}
+                  >
+                    Clear history
+                  </button>
+                </div>
+
+                <p style={{ margin: '0 0 0.5rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                  {filteredHistory.length} of {history.length} address{history.length === 1 ? '' : 'es'}
+                </p>
+
+                {filteredHistory.length === 0 ? (
+                  <p style={{ margin: 0, fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                    No recent DIDs match "{debouncedHistoryQuery}".
+                  </p>
+                ) : (
+                  <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
+                    {filteredHistory.map((addr) => (
+                      <li key={addr}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setResolveAddress(addr);
+                            void handleResolve(addr);
+                          }}
+                          style={{
+                            width: '100%',
+                            textAlign: 'left',
+                            fontFamily: 'monospace',
+                            fontSize: '0.8rem',
+                            padding: '0.3rem 0.5rem',
+                            background: 'transparent',
+                            border: '1px solid var(--border-input)',
+                            borderRadius: '0.25rem',
+                            cursor: 'pointer',
+                          }}
+                          title={addr}
+                        >
+                          {addr.slice(0, 10)}…{addr.slice(-6)}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         {!resolving && resolvedAddress && (
           <>
             <div style={{ 
