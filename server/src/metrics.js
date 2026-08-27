@@ -124,6 +124,13 @@ export class MetricsService {
       registers: [this.registry],
     });
 
+    this.cspViolations = new client.Counter({
+      name: 'csp_violations_total',
+      help: 'Total number of Content Security Policy violation reports received, by directive',
+      labelNames: ['directive'],
+      registers: [this.registry],
+    });
+
     if (collectDefaultMetrics) {
       client.collectDefaultMetrics({ register: this.registry });
     }
@@ -186,6 +193,19 @@ export class MetricsService {
    */
   observeCredentialVerification(result) {
     this.credentialsVerified.inc({ result: result ?? 'unknown' });
+  }
+
+  /**
+   * Record a CSP violation report.
+   *
+   * Labelled by directive so a dashboard shows *what* is being blocked: a
+   * spike in `script-src` is a possible injection, whereas a steady trickle
+   * from `img-src` is usually a policy that needs widening.
+   *
+   * @param {string} directive
+   */
+  observeCspViolation(directive) {
+    this.cspViolations.inc({ directive: directive || 'unknown' });
   }
 
   /**

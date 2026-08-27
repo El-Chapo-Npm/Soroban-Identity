@@ -187,6 +187,21 @@ export function loadConfig(env = process.env) {
     requestSigningEnforce:
       (env.REQUEST_SIGNING_ENFORCE ?? "mutations").toLowerCase() === "all" ? "all" : "mutations",
     requestSigningMaxAgeSeconds: parseInteger(env.REQUEST_SIGNING_MAX_AGE_SECONDS, 300),
+    // Content Security Policy (#754). Report-only by default: an enforced
+    // policy that is even slightly too tight breaks the page, so a deployment
+    // should watch reports first and switch to enforcing once they are clean.
+    cspEnabled: parseBoolean(env.CSP_ENABLED, true),
+    cspReportOnly: parseBoolean(env.CSP_REPORT_ONLY, true),
+    cspReportUri: env.CSP_REPORT_URI ?? "/csp-report",
+    // Extra trusted sources merged into the baseline directives. Each is a
+    // comma-separated list of origins, e.g. "https://cdn.example.org".
+    cspScriptSrc: parseList(env.CSP_SCRIPT_SRC, []),
+    cspStyleSrc: parseList(env.CSP_STYLE_SRC, []),
+    cspConnectSrc: parseList(env.CSP_CONNECT_SRC, []),
+    cspImgSrc: parseList(env.CSP_IMG_SRC, []),
+    cspFontSrc: parseList(env.CSP_FONT_SRC, []),
+    cspFormAction: parseList(env.CSP_FORM_ACTION, []),
+    cspFrameAncestors: parseList(env.CSP_FRAME_ANCESTORS, []),
     dataDir: env.DATA_DIR ? path.resolve(env.DATA_DIR) : DEFAULT_DATA_DIR,
     auditLogPath: env.AUDIT_LOG_PATH
       ? path.resolve(env.AUDIT_LOG_PATH)

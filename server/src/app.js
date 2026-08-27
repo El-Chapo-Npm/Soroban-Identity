@@ -35,6 +35,7 @@ import {
   validateContentType,
 } from "./http-utils.js";
 import { KEY_ID_HEADER, NonceStore, verifySignedRequest } from "./request-signing.js";
+import { normalizeCspReports, setSecurityHeaders } from "./security-headers.js";
 import { schemas, validateRequest } from "./validation.js";
 import { routeLabel } from "./route-label.js";
 import { requestContextStore } from "./request-context.js";
@@ -112,6 +113,11 @@ export function createApp({
       res.setHeader("X-Request-ID", requestId);
     }
 
+    // CSP and companion security headers (#754). Set before any branch that
+    // can produce a response, so an early return still carries them. The
+    // nonce is stashed on the request for the one HTML page we render.
+    req.cspNonce = setSecurityHeaders(req, res, config);
+
     // Apply CORS headers
     if (setCorsHeaders(req, res, config)) {
       // Preflight OPTIONS request
@@ -154,7 +160,11 @@ export function createApp({
     // act on a request whose body was tampered with or replayed. Operational
     // endpoints are exempt for the same reason they skip rate limiting: a
     // probe has to work without client credentials.
-    if (config.requestSigningEnabled && !isExempt) {
+    // A CSP violation report is posted by the browser itself, which has no
+    // API key and no signing secret, so it can never carry a signature.
+    const isSigningExempt = isExempt || pathname === "/csp-report";
+
+    if (config.requestSigningEnabled && !isSigningExempt) {
       const mustBeSigned =
         config.requestSigningEnforce === "all" ||
         !["GET", "HEAD", "OPTIONS"].includes(req.method);
@@ -250,6 +260,49 @@ export function createApp({
           });
         }
 
+        // CSP violation reports (#754). Unauthenticated by necessity — the
+        // browser posts these on its own behalf, with no credentials — so the
+        // handler only ever logs and counts, and never trusts the contents.
+        if (req.method === "POST" && pathname === "/csp-report") {
+          const { tooLarge, buffer } = await readRawBody(req, config);
+          if (tooLarge) {
+            return sendJson(res, 413, {
+              code: "PAYLOAD_TOO_LARGE",
+              message: "Request body exceeds the size limit.",
+            });
+          }
+
+          let reports = [];
+          try {
+            reports = normalizeCspReports(JSON.parse(buffer.toString("utf8") || "{}"));
+          } catch {
+            // A malformed report is the browser's problem, not something to
+            // surface as a server error; it is counted as unparseable and
+            // dropped.
+            logger.warn({ route: "/csp-report" }, "Discarded unparseable CSP report");
+            return res.writeHead(204).end();
+          }
+
+          for (const report of reports) {
+            logger.warn(
+              {
+                directive: report.directive,
+                blockedUri: report.blockedUri,
+                documentUri: report.documentUri,
+                sourceFile: report.sourceFile,
+                lineNumber: report.lineNumber,
+                enforced: !config.cspReportOnly,
+              },
+              "CSP violation reported",
+            );
+            metrics?.observeCspViolation?.(report.directive);
+          }
+
+          // 204: the browser discards the response body, and there is nothing
+          // useful to tell it.
+          return res.writeHead(204).end();
+        }
+
         if (req.method === "GET" && pathname === "/health") {
           const health = await collectHealth({
             config,
@@ -329,7 +382,7 @@ export function createApp({
             if (!queryParam) {
               // Interactive GraphQL Playground in dev mode / browser requests
               res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-              return res.end(renderGraphiQLPlayground());
+              return res.end(renderGraphiQLPlayground(req.cspNonce));
             }
             let variables = {};
             try {

@@ -423,6 +423,31 @@ their signing secrets first.
 For the canonical string, client examples and rollout steps, see
 [Request Signing](../docs/request-signing.md).
 
+## Content Security Policy
+
+Every response carries a CSP header plus the usual companion security headers
+(`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`,
+`Permissions-Policy`, and HSTS in production). The policy uses a fresh
+per-response nonce rather than `'unsafe-inline'`, so the GraphQL playground's
+inline `<style>` and `<script>` run under a policy strict enough to be worth
+enforcing.
+
+Violation reports are collected at `POST /csp-report` — unauthenticated and
+exempt from request signing, because the browser posts them with no
+credentials — and counted as `csp_violations_total{directive="..."}`.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CSP_ENABLED` | `true` | Master switch |
+| `CSP_REPORT_ONLY` | `true` | Report violations without blocking them |
+| `CSP_REPORT_URI` | `/csp-report` | Where the browser posts reports |
+| `CSP_SCRIPT_SRC` etc. | — | Extra trusted origins, comma-separated |
+
+Defaults to report-only: an enforced policy that is even slightly too tight
+breaks the page for everyone at once. See
+[Content Security Policy](../docs/content-security-policy.md) for the rollout
+and the frontend's half of the setup.
+
 ## Audit Log Naming & Rotation
 
 The system generates a new, separate audit log file for each day. The log files are stored in Newline Delimited JSON (NDJSON) format.
