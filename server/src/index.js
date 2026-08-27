@@ -64,14 +64,22 @@ const realtime = config.wsEnabled
   : null;
 
 const server = http.createServer(
-  createApp({ config, soroban, metrics, metricsAggregator, webhookService, apiKeyService, realtime }),
+  createApp({
+    config,
+    soroban,
+    metrics,
+    metricsAggregator,
+    didCache,
+    webhookService,
+    apiKeyService,
+    realtime,
+  }),
 );
 
 if (realtime) {
   realtime.attach(server);
   logger.info({ path: config.wsPath }, 'WebSocket endpoint enabled');
 }
-const server = http.createServer(createApp({ config, soroban, metrics, metricsAggregator, didCache, webhookService }));
 
 
 const connections = new Set();

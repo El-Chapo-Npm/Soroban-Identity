@@ -50,12 +50,16 @@ const SERVER_FEATURES = [
   "api_versioning",
 ];
 
-export function createApp({ config, soroban, metrics, metricsAggregator, didCache = null, webhookService = new WebhookDeliveryService(config) }) {
 export function createApp({
   config,
   soroban,
   metrics,
   metricsAggregator,
+  didCache = null,
+  // Health and readiness probes only need something that can answer PING;
+  // the DID cache already owns a connected client, so reuse it unless a
+  // caller (or a test) supplies one explicitly.
+  redisClient = didCache?.client ?? null,
   webhookService = new WebhookDeliveryService(config),
   apiKeyService = new ApiKeyService(config),
   rateLimiter = new TieredRateLimiter(),
@@ -65,7 +69,6 @@ export function createApp({
   // issued API keys instead of falling back to the single admin key.
   config.apiKeyService = apiKeyService;
 
-export function createApp({ config, soroban, metrics, metricsAggregator, redisClient = null, webhookService = new WebhookDeliveryService(config) }) {
   return async function app(req, res) {
     const url = new URL(
       req.url,
@@ -491,7 +494,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator, redisCl
         }
 
         if (req.method === "GET" && pathname === "/notifications/logs") {
-          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          if (!await requireAuth(req, res, config, ['admin:read'])) return;
           const limit = Number.parseInt(url.searchParams.get("limit") ?? "50", 10) || 50;
           if (limit > 200) {
             return sendJson(res, 400, { code: "INVALID_REQUEST", message: "limit must not exceed 200" });
@@ -505,24 +508,26 @@ export function createApp({ config, soroban, metrics, metricsAggregator, redisCl
         }
 
         if (req.method === "GET" && pathname === "/cache/stats") {
-          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          if (!await requireAuth(req, res, config, ['admin:read'])) return;
           return sendJson(res, 200, didCache ? didCache.getStats() : { enabled: false });
         }
 
         if (req.method === "DELETE" && pathname === "/cache/dids") {
-          if (!requireAuth(req, res, config, ['admin:write'])) return;
+          if (!await requireAuth(req, res, config, ['admin:write'])) return;
           const cleared = didCache ? await didCache.invalidateAll() : 0;
           return sendJson(res, 200, { cleared });
         }
 
         const cacheDidMatch = pathname.match(/^\/cache\/dids\/([^/]+)$/);
         if (req.method === "DELETE" && cacheDidMatch) {
-          if (!requireAuth(req, res, config, ['admin:write'])) return;
+          if (!await requireAuth(req, res, config, ['admin:write'])) return;
           const did = decodeURIComponent(cacheDidMatch[1]);
           const invalidated = didCache ? await didCache.invalidate(did) : false;
           return sendJson(res, 200, { did, invalidated });
+        }
+
         if (req.method === "GET" && pathname === "/notifications/summary") {
-          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          if (!await requireAuth(req, res, config, ['admin:read'])) return;
           const summary = await summarizeNotificationLog(config);
           return sendJson(res, 200, summary);
         }
