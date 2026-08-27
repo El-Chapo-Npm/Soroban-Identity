@@ -45,11 +45,28 @@ export interface DidDocument {
   services: ServiceEndpoint[];
 }
 
+const VALID_CREDENTIAL_TYPES = ["Kyc", "Reputation", "Achievement", "Custom"] as const;
+
 /**
  * Credential category recognised by the credential-manager contract.
  * `Custom` is the catch-all for application-defined types.
  */
-export type CredentialType = "Kyc" | "Reputation" | "Achievement" | "Custom";
+export type CredentialType = (typeof VALID_CREDENTIAL_TYPES)[number];
+
+export class UnknownCredentialTypeError extends Error {
+  constructor(value: unknown) {
+    super(`UnknownCredentialTypeError: unexpected credential type "${String(value)}"`);
+    this.name = "UnknownCredentialTypeError";
+  }
+}
+
+export function assertCredentialType(value: unknown): CredentialType {
+  if (typeof value === "string" && VALID_CREDENTIAL_TYPES.includes(value as CredentialType)) {
+    return value as CredentialType;
+  }
+
+  throw new UnknownCredentialTypeError(value);
+}
 
 /**
  * On-chain credential record returned by
@@ -121,6 +138,20 @@ export interface SorobanIdentityLogger {
   error?(message: string, meta?: Record<string, unknown>): void;
 }
 
+export interface ReputationRecord {
+  subject: string;
+  score: number;
+  reporterCount: number;
+  updatedAt: number;
+}
+
+export interface ScoreHistoryEntry {
+  reporter: string;
+  delta: number;
+  reason: string;
+  submittedAt: number;
+}
+
 export interface SorobanIdentityConfig {
   rpcUrl: string | string[];
   networkPassphrase: string;
@@ -142,19 +173,26 @@ export interface SorobanIdentityConfig {
   /** Request retry delay in ms. Defaults to 1000. */
   retryDelay?: number;
   /**
-   * Maximum number of retries for transient RPC failures in `resolveDid`.
-   * Defaults to 3. Set to 0 to disable retries.
+   * Maximum retry/attempt count. For transient RPC retry loops this defaults to
+   * 3; for transaction-status polling it defaults to 15 attempts. With the
+   * default `retryIntervalMs` of 2000ms, polling preserves the previous
+   * effective 30s confirmation window. Set to 0 to disable retries/attempts.
    */
   maxRetries?: number;
   /** Base delay in ms between `resolveDid` retries. Defaults to 500. */
   baseDelayMs?: number;
   /** Multiplier applied to the delay on each successive retry. Defaults to 2. */
   backoffFactor?: number;
-  /** Maximum polling attempts when waiting for transaction confirmation. */
+  /**
+   * Fixed delay in milliseconds between transaction-status polling attempts.
+   * Defaults to 2000ms; `maxRetries * retryIntervalMs` is the maximum wait.
+   */
+  retryIntervalMs?: number;
+  /** @deprecated Use `maxRetries` instead. */
   pollingRetries?: number;
-  /** Interval in ms between polling attempts. */
+  /** @deprecated Use `retryIntervalMs` instead. */
   pollingIntervalMs?: number;
-  /** Whether to use exponential backoff between polling attempts. */
+  /** Whether to use exponential backoff between polling attempts. Defaults to false. */
   pollingExponentialBackoff?: boolean;
   /** Optional pluggable logger for RPC simulation/submission traces. */
   logger?: SorobanIdentityLogger;
@@ -292,4 +330,39 @@ export function validateConfig(
   if (!StrKey.isValidContract(contractId)) {
     throw new Error(`${options.contractIdField} is not a valid contract ID`);
   }
+}
+
+export interface FeeEstimate {
+  /** Base network fee in stroops. */
+  baseFee: number;
+  /** Soroban resource fee in stroops. */
+  resourceFee: number;
+  /** Total fee (baseFee + resourceFee) in stroops. */
+  totalFee: number;
+}
+
+export class SimulationError extends Error {
+  constructor(message: string, public readonly raw?: unknown) {
+    super(message);
+    this.name = 'SimulationError';
+  }
+}
+
+/**
+ * Minimal account information required to build an offline transaction.
+ *
+ * Obtain `sequence` from Horizon or Soroban RPC before disconnecting from the
+ * network, then pass both fields to
+ * {@link BaseClient.buildUnsignedTransaction}.
+ */
+export interface AccountInfo {
+  /** Stellar public key (G-address) of the signing account. */
+  publicKey: string;
+  /**
+   * Current account sequence number as a decimal string.
+   *
+   * Fetch this value once while online (e.g. via `server.getAccount(publicKey)`)
+   * and cache it for offline transaction assembly.
+   */
+  sequence: string;
 }

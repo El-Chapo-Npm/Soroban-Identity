@@ -1,35 +1,337 @@
-export async function readJson(req) {
+import crypto from 'node:crypto';
+import { logger } from './logger.js';
+
+/**
+ * Constant-time string comparison using crypto.timingSafeEqual.
+ *
+ * Always runs in O(n) time relative to the expected value's length,
+ * regardless of whether the supplied value matches or where it first
+ * differs — preventing character-by-character timing oracle attacks.
+ *
+ * @param {string} supplied  - Value provided by the caller
+ * @param {string} expected  - Trusted reference value
+ * @returns {boolean}
+ */
+function timingSafeCompare(supplied, expected) {
+  const expectedBuf = Buffer.from(expected, 'utf8');
+  // Always allocate a buffer of the correct length and run the comparison
+  // so the timing does not reveal whether lengths matched.
+  const suppliedBuf = Buffer.alloc(expectedBuf.length);
+  Buffer.from(supplied, 'utf8').copy(suppliedBuf);
+  // Length mismatch means they cannot be equal, but we still run the
+  // constant-time comparison to avoid leaking the expected length via timing.
+  const lengthMatch = Buffer.from(supplied, 'utf8').length === expectedBuf.length;
+  return crypto.timingSafeEqual(suppliedBuf, expectedBuf) && lengthMatch;
+}
+
+/**
+ * Returns true and sends 415 when the request is a non-GET/DELETE method
+ * and the Content-Type is not application/json.
+ */
+export function validateContentType(req, res) {
+  if (req.method === "GET" || req.method === "DELETE" || req.method === "OPTIONS") return false;
+  const ct = req.headers["content-type"] ?? "";
+  if (ct.toLowerCase().startsWith("application/json")) return false;
+  sendJson(res, 415, { code: "UNSUPPORTED_MEDIA_TYPE", message: "Content-Type must be application/json" });
+  return true;
+}
+
+export async function readJson(req, config) {
+  // Check Content-Length header first
+  const contentLength = req.headers["content-length"];
+  if (contentLength !== undefined) {
+    const length = Number.parseInt(contentLength, 10);
+    if (length > config.maxBodyBytes) {
+      const remoteIp =
+        req.headers["x-forwarded-for"]?.split(",")[0] ||
+        req.socket?.remoteAddress ||
+        "unknown";
+      logger.warn({
+        remoteIp,
+        contentLength: length,
+        limit: config.maxBodyBytes
+      }, 'Payload too large (Content-Length check)');
+      return { __payloadTooLarge: true };
+    }
+  }
+
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+  let totalBytes = 0;
+
+  for await (const chunk of req) {
+    totalBytes += chunk.length;
+    if (totalBytes > config.maxBodyBytes) {
+      const remoteIp =
+        req.headers["x-forwarded-for"]?.split(",")[0] ||
+        req.socket?.remoteAddress ||
+        "unknown";
+      logger.warn({
+        remoteIp,
+        totalBytes,
+        limit: config.maxBodyBytes
+      }, 'Payload too large (streaming check)');
+      return { __payloadTooLarge: true };
+    }
+    chunks.push(chunk);
+  }
+
   if (chunks.length === 0) return {};
-  const raw = Buffer.concat(chunks).toString('utf8');
+  const raw = Buffer.concat(chunks).toString("utf8");
   if (!raw.trim()) return {};
   return JSON.parse(raw);
 }
 
 export function sendJson(res, statusCode, body, headers = {}) {
-  res.writeHead(statusCode, { 'content-type': 'application/json; charset=utf-8', ...headers });
+  res.writeHead(statusCode, {
+    "content-type": "application/json; charset=utf-8",
+    ...headers,
+  });
   res.end(JSON.stringify(body));
 }
 
 export function sendText(res, statusCode, body, headers = {}) {
-  res.writeHead(statusCode, { 'content-type': 'text/plain; version=0.0.4; charset=utf-8', ...headers });
+  res.writeHead(statusCode, {
+    "content-type": "text/plain; version=0.0.4; charset=utf-8",
+    ...headers,
+  });
   res.end(body);
 }
 
 export function notFound(res) {
-  sendJson(res, 404, { error: 'not_found' });
+  sendJson(res, 404, { error: "not_found" });
 }
 
-export function requireAdmin(req, res, config) {
+/**
+ * Authenticate and authorize a request with optional scope requirements.
+ * 
+ * @param {object} req - HTTP request object
+ * @param {object} res - HTTP response object
+ * @param {object} config - Server configuration
+ * @param {string[]} requiredScopes - Array of required scopes (e.g., ['credentials:write'])
+ * @returns {boolean} True if authenticated and authorized, false otherwise
+ */
+export async function requireAuth(req, res, config, requiredScopes = []) {
+  const token =
+    req.headers["x-api-key"] ||
+    req.headers.authorization?.replace(/^Bearer\s+/i, "");
+    
+  if (!token) {
+    sendJson(res, 401, { 
+      error: "unauthorized",
+      code: "UNAUTHORIZED",
+      message: "Missing API key"
+    });
+    return false;
+  }
+
+  // 1. Try validating with ApiKeyService if available
+  if (config.apiKeyService) {
+    const keyRecord = await config.apiKeyService.validateKey(token);
+    if (keyRecord) {
+      req.apiKeyId = keyRecord.id;
+      req.apiKeyScopes = keyRecord.scopes || ['*'];
+      req.userTier = keyRecord.tier || 'free';
+      req.auth = { apiKey: keyRecord };
+
+      if (requiredScopes.length > 0) {
+        const hasWildcard = req.apiKeyScopes.includes('*');
+        const hasAllScopes = requiredScopes.every(required => 
+          hasWildcard || req.apiKeyScopes.includes(required)
+        );
+        
+        if (!hasAllScopes) {
+          const missingScopes = requiredScopes.filter(s => !req.apiKeyScopes.includes(s));
+          sendJson(res, 403, { 
+            error: "forbidden",
+            code: "INSUFFICIENT_SCOPE",
+            message: "API key does not have required permissions",
+            requiredScopes,
+            missingScopes
+          });
+          return false;
+        }
+      }
+      return true;
+    }
+  }
+
   if (!config.adminApiKey) {
-    sendJson(res, 503, { error: 'admin_api_key_not_configured' });
+    sendJson(res, 503, { 
+      error: "admin_api_key_not_configured",
+      code: "SERVICE_UNAVAILABLE",
+      message: "API key authentication is not configured"
+    });
     return false;
   }
-  const token = req.headers['x-api-key'] || req.headers.authorization?.replace(/^Bearer\s+/i, '');
-  if (token !== config.adminApiKey) {
-    sendJson(res, 401, { error: 'unauthorized' });
+  
+  // Parse API key record if it contains scope and/or tier information
+  // Format: apiKey:scope1,scope2 or apiKey:tier:scope1,scope2 or just apiKey
+  const parts = token.split(':');
+  const keyPart = parts[0];
+  let keyScopes = [];
+  let userTier = req.headers['x-user-tier']?.toLowerCase() || 'free';
+
+  if (parts.length === 2) {
+    if (['free', 'pro', 'enterprise'].includes(parts[1].toLowerCase())) {
+      userTier = parts[1].toLowerCase();
+    } else {
+      keyScopes = parts[1].split(',');
+    }
+  } else if (parts.length >= 3) {
+    userTier = parts[1].toLowerCase();
+    keyScopes = parts[2].split(',');
+  }
+
+  req.userTier = userTier;
+  
+  // Constant-time API key comparison to prevent timing side-channel attacks.
+  // crypto.timingSafeEqual requires equal-length buffers — if lengths differ
+  // we still run the comparison against a dummy buffer of the correct length
+  // so the branch is not observable from timing alone.
+  if (!timingSafeCompare(keyPart, config.adminApiKey)) {
+    sendJson(res, 401, { 
+      error: "unauthorized",
+      code: "UNAUTHORIZED",
+      message: "Invalid API key"
+    });
     return false;
   }
+  
+  // If this is the admin key without scopes, grant full access
+  if (parts.length === 1 || (parts.length === 2 && ['free', 'pro', 'enterprise'].includes(parts[1].toLowerCase()))) {
+    req.apiKeyScopes = ['*'];
+    return true;
+  }
+  
+  // Check if required scopes are present
+  if (requiredScopes.length > 0) {
+    const hasWildcard = keyScopes.includes('*');
+    const hasAllScopes = requiredScopes.every(required => 
+      hasWildcard || keyScopes.includes(required)
+    );
+    
+    if (!hasAllScopes) {
+      const missingScopes = requiredScopes.filter(s => !keyScopes.includes(s));
+      sendJson(res, 403, { 
+        error: "forbidden",
+        code: "INSUFFICIENT_SCOPE",
+        message: "API key does not have required permissions",
+        requiredScopes,
+        missingScopes
+      });
+      return false;
+    }
+  }
+  
+  req.apiKeyScopes = keyScopes;
   return true;
+}
+
+/**
+ * Legacy admin check - maintains backward compatibility
+ */
+export function requireAdmin(req, res, config) {
+  return requireAuth(req, res, config, []);
+}
+
+/**
+ * Determine the value for Access-Control-Allow-Origin.
+ *
+ * Returns `null` when the request must not receive CORS headers at all —
+ * either nothing is allowed, or the request's origin is not on the list.
+ *
+ * @param {string|undefined} requestOrigin  - The request's Origin header
+ * @param {string[]} allowedOrigins         - config.corsAllowedOrigins
+ * @param {boolean} [credentials=false]     - config.corsCredentials
+ * @returns {string|null}
+ */
+export function getAllowedOrigin(requestOrigin, allowedOrigins, credentials = false) {
+  if (!allowedOrigins || allowedOrigins.length === 0) {
+    return null;
+  }
+  if (allowedOrigins.includes("*")) {
+    // With credentials enabled a wildcard is rejected by every browser, so the
+    // request's own origin is reflected instead. Without credentials the
+    // wildcard is returned as-is so responses stay cacheable across origins.
+    if (!credentials) return "*";
+    return requestOrigin ?? null;
+  }
+  if (requestOrigin && allowedOrigins.includes(requestOrigin)) {
+    return requestOrigin;
+  }
+  return null;
+}
+
+/**
+ * Set CORS headers on the response and detect preflight requests.
+ *
+ * Every value is driven by configuration: allowed origins, whether credentials
+ * are permitted, the allowed methods and request headers, the headers exposed
+ * to the client, and how long a browser may cache the preflight result.
+ *
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {object} config
+ * @returns {boolean} True when this is a preflight the caller should answer
+ *   with 204.
+ */
+export function setCorsHeaders(req, res, config) {
+  const requestOrigin = req.headers.origin;
+  const credentials = config.corsCredentials === true;
+  const allowedOrigin = getAllowedOrigin(
+    requestOrigin,
+    config.corsAllowedOrigins,
+    credentials,
+  );
+
+  if (allowedOrigin) {
+    res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+    // Per the CORS spec, credentials cannot be used with a wildcard origin.
+    // Only send the header when a specific (non-wildcard) origin is reflected.
+    if (credentials && allowedOrigin !== "*") {
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+    }
+  }
+
+  // Any response whose Allow-Origin depends on the request's Origin must not
+  // be served from a shared cache to a different origin.
+  if (!config.corsAllowedOrigins?.includes("*") || credentials) {
+    res.setHeader("Vary", "Origin");
+  }
+
+  const exposedHeaders = config.corsExposedHeaders ?? [
+    "X-Request-ID",
+    "Content-Type",
+  ];
+  if (exposedHeaders.length > 0) {
+    res.setHeader("Access-Control-Expose-Headers", exposedHeaders.join(", "));
+  }
+
+  // Handle preflight OPTIONS
+  if (req.method === "OPTIONS") {
+    const methods = config.corsMethods ?? [
+      "GET",
+      "POST",
+      "PUT",
+      "PATCH",
+      "DELETE",
+      "OPTIONS",
+    ];
+    const allowedHeaders = config.corsAllowedHeaders ?? [
+      "Content-Type",
+      "Authorization",
+      "X-API-Key",
+      "X-Request-ID",
+      "X-Actor",
+    ];
+    res.setHeader("Access-Control-Allow-Methods", methods.join(", "));
+    res.setHeader("Access-Control-Allow-Headers", allowedHeaders.join(", "));
+    res.setHeader(
+      "Access-Control-Max-Age",
+      String(config.corsMaxAge ?? 86400),
+    );
+    return true; // Handled, respond with 204
+  }
+
+  return false; // Not a preflight, continue with actual request
 }

@@ -1,11 +1,11 @@
 import {
-  Contract,
+  Account,
   SorobanRpc,
   TransactionBuilder,
   BASE_FEE,
   Keypair,
+  nativeToScVal,
   scValToNative,
-  Account,
 } from "@stellar/stellar-sdk";
 import type { CallOptions, DidDocument, IdentityStorageStats, SorobanIdentityConfig, SorobanResponse, WriteResult } from "./types";
 import { validateConfig } from "./types";
@@ -19,9 +19,9 @@ import {
   buildResolveDidArgs,
   buildHasActiveDidArgs,
   buildDeactivateDidArgs,
+  buildDidExistsArgs,
 } from "./contract-args";
 
-// Dummy address used for lightweight initialization probes
 const PROBE_ADDRESS = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
 
 function isTransientRpcError(err: unknown): boolean {
@@ -40,16 +40,28 @@ function isTransientRpcError(err: unknown): boolean {
   );
 }
 
+/** `IDENTITY_REGISTRY_ERRORS` code for "DID not found". */
+const DID_NOT_FOUND_CODE = 1;
+
+/**
+ * A DID resolved immediately after `createDid` can briefly appear "not found"
+ * if the RPC node that serves the read hasn't caught up with the node the
+ * write landed on. Treat NOT_FOUND as retryable here (unlike other reads) so
+ * that window resolves itself instead of surfacing a false negative.
+ */
+function isRetryableResolveError(err: unknown): boolean {
+  if (isTransientRpcError(err)) return true;
+  if (err instanceof ContractError) return err.code === DID_NOT_FOUND_CODE;
+  if (err instanceof SorobanIdentityError) return err.code === "NOT_FOUND";
+  return false;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
  * Client for the identity-registry contract.
- *
- * Manages decentralised identifiers (DIDs) on Soroban: creation, metadata
- * updates, resolution, and deactivation. All methods accept an optional
- * {@link CallOptions} for per-call overrides (e.g. transaction timeout).
  *
  * @example
  * ```ts
@@ -59,34 +71,27 @@ function sleep(ms: number): Promise<void> {
  * ```
  */
 export class IdentityClient extends BaseClient {
-  /**
-   * @param config SDK config including the deployed identity-registry contract ID.
-   */
   constructor(config: SorobanIdentityConfig) {
     validateConfig(config, { contractIdField: "identityRegistryId" });
     super(config, config.identityRegistryId);
   }
 
-  /**
-   * Returns true if the identity-registry contract has been initialized.
-   * Uses a lightweight read call; returns false on any contract-level error.
-   */
   async isInitialized(): Promise<boolean> {
     try {
       return await this.executeWithFailover(async (server) => {
         const account = new Account(PROBE_ADDRESS, "0");
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: this.config.networkPassphrase,
-      })
-        .addOperation(
-          this.contract.call(
-            "has_active_did",
-            ...buildHasActiveDidArgs({ controller: PROBE_ADDRESS })
+        const tx = new TransactionBuilder(account, {
+          fee: BASE_FEE,
+          networkPassphrase: this.config.networkPassphrase,
+        })
+          .addOperation(
+            this.contract.call(
+              "has_active_did",
+              ...buildHasActiveDidArgs({ controller: PROBE_ADDRESS })
+            )
           )
-        )
-        .setTimeout(10)
-        .build();
+          .setTimeout(10)
+          .build();
         const result = await server.simulateTransaction(tx);
         if (SorobanRpc.Api.isSimulationError(result)) {
           const err: string = (result as { error: string }).error ?? "";
@@ -104,24 +109,11 @@ export class IdentityClient extends BaseClient {
   /**
    * Create a new DID for the given keypair.
    *
-   * Submits a `create_did` call to the identity-registry contract, signed by
-   * `keypair`, and polls until the transaction is final. The on-chain ID is
-   * derived from the keypair's public key.
-   *
    * @param keypair  The Stellar keypair whose public key will own the DID.
-   *                 Must be funded on the active network.
    * @param metadata Arbitrary `string → string` map embedded in the DID document.
-   *                 Defaults to `{}`.
-   * @param options  Per-call overrides (currently `timeoutSeconds`).
+   * @param options  Per-call overrides.
    * @returns The resolved DID and the estimated transaction fee.
-   * @throws {SorobanIdentityError} with code `VALIDATION_ERROR` if a DID already
-   *   exists for this address, or `CONTRACT_ERROR` for any other submission failure.
-   *
-   * @example
-   * ```ts
-   * const { did, estimatedFeeXlm } = await identity.createDid(keypair, { email: 'a@b.c' });
-   * console.log(`Issued ${did} for ~${estimatedFeeXlm} XLM`);
-   * ```
+   * @throws {SorobanIdentityError} with code `VALIDATION_ERROR` if a DID already exists.
    */
   async createDid(
     keypair: Keypair,
@@ -129,7 +121,6 @@ export class IdentityClient extends BaseClient {
     options?: CallOptions
   ): Promise<SorobanResponse<{ did: string } & WriteResult>> {
     const account = await this.server.getAccount(keypair.publicKey());
-
     const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
 
     const tx = new TransactionBuilder(account, {
@@ -159,8 +150,8 @@ export class IdentityClient extends BaseClient {
     const txHash = result.hash;
     try {
       await pollTransactionStatus(this.server, txHash, {
-        maxAttempts: this.config.pollingRetries,
-        intervalMs: this.config.pollingIntervalMs,
+        maxRetries: this.config.maxRetries ?? this.config.pollingRetries,
+        retryIntervalMs: this.config.retryIntervalMs ?? this.config.pollingIntervalMs,
         exponentialBackoff: this.config.pollingExponentialBackoff,
       });
       const confirmed = await this.server.getTransaction(txHash) as SorobanRpc.Api.GetSuccessfulTransactionResponse;
@@ -182,16 +173,10 @@ export class IdentityClient extends BaseClient {
   /**
    * Update metadata on an existing DID.
    *
-   * Replaces the DID document's metadata map. The caller must control the DID
-   * being modified — the contract calls `require_auth` on the keypair's address.
-   *
-   * @param keypair  Controller of the DID being updated. Must sign the transaction.
+   * @param keypair  Controller of the DID being updated.
    * @param metadata Replacement metadata map.
-   * @param options  Per-call overrides (currently `timeoutSeconds`).
-   * @returns Resolves once the transaction is final on-chain.
-   * @throws {SorobanIdentityError} with code `NOT_FOUND` if no DID exists for
-   *   `keypair`, `UNAUTHORIZED` if `keypair` is not the DID controller, or
-   *   `CONTRACT_ERROR` for any other submission failure.
+   * @param options  Per-call overrides.
+   * @throws {SorobanIdentityError} with code `NOT_FOUND` or `UNAUTHORIZED`.
    */
   async updateDid(
     keypair: Keypair,
@@ -226,8 +211,8 @@ export class IdentityClient extends BaseClient {
     const txHash = result.hash;
     try {
       await pollTransactionStatus(this.server, txHash, {
-        maxAttempts: this.config.pollingRetries,
-        intervalMs: this.config.pollingIntervalMs,
+        maxRetries: this.config.maxRetries ?? this.config.pollingRetries,
+        retryIntervalMs: this.config.retryIntervalMs ?? this.config.pollingIntervalMs,
         exponentialBackoff: this.config.pollingExponentialBackoff,
       });
     } catch (e: unknown) {
@@ -253,13 +238,9 @@ export class IdentityClient extends BaseClient {
   /**
    * Resolve a DID document by controller address.
    *
-   * Read-only simulation; no transaction is submitted.
-   *
    * @param controllerAddress The Stellar address that controls the DID.
-   * @param options           Per-call overrides (currently `timeoutSeconds`).
-   * @returns The {@link DidDocument} for `controllerAddress`.
-   * @throws {SorobanIdentityError} with code `NOT_FOUND` if no DID exists or
-   *   `CONTRACT_ERROR` on simulation failure.
+   * @param options           Per-call overrides.
+   * @throws {SorobanIdentityError} with code `NOT_FOUND` if no DID exists.
    */
   async resolveDid(controllerAddress: string, options?: CallOptions): Promise<DidDocument> {
     validateStellarAddress(controllerAddress);
@@ -279,7 +260,7 @@ export class IdentityClient extends BaseClient {
       .setTimeout(timeout)
       .build();
 
-    const maxRetries = options?.maxRetries ?? this.config.maxRetries ?? 3;
+    const maxRetries = options?.maxRetries ?? this.config.maxRetries ?? 5;
     const baseDelayMs = options?.baseDelayMs ?? this.config.baseDelayMs ?? 500;
     const backoffFactor = options?.backoffFactor ?? this.config.backoffFactor ?? 2;
 
@@ -297,16 +278,17 @@ export class IdentityClient extends BaseClient {
             throw new SorobanIdentityError(`DID for address ${controllerAddress} has been deactivated.`, "VALIDATION_ERROR");
           }
           if (errMsg.includes("DidNotFound")) {
-            throw new SorobanIdentityError(`No DID found for address ${controllerAddress}.`, "NOT_FOUND");
+            throw new SorobanIdentityError(`NOT_FOUND: No DID found for address ${controllerAddress}.`, "NOT_FOUND");
           }
           throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, "CONTRACT_ERROR");
         }
-        return scValToNative(
-          (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
-            .result!.retval
-        ) as DidDocument;
+        const retval = (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval;
+        if (retval && typeof retval === "object" && "id" in (retval as unknown as Record<string, unknown>)) {
+          return retval as unknown as DidDocument;
+        }
+        return scValToNative(retval) as DidDocument;
       } catch (err) {
-        if (attempt === maxRetries || !isTransientRpcError(err)) throw err;
+        if (attempt === maxRetries || !isRetryableResolveError(err)) throw err;
         lastError = err;
         const delayMs = Math.floor(baseDelayMs * Math.pow(backoffFactor, attempt) + Math.random() * 100);
         this.debug(`[identity] resolveDID retry ${attempt + 1}/${maxRetries} after ${delayMs}ms`, {});
@@ -318,11 +300,6 @@ export class IdentityClient extends BaseClient {
 
   /**
    * Check if an address has an active (non-deactivated) DID.
-   *
-   * @param controllerAddress The Stellar address to check.
-   * @param options           Per-call overrides (currently `timeoutSeconds`).
-   * @returns `true` if a non-deactivated DID exists, `false` otherwise.
-   * @throws {SorobanIdentityError} on simulation failure.
    */
   async hasActiveDid(controllerAddress: string, options?: CallOptions): Promise<boolean> {
     validateStellarAddress(controllerAddress);
@@ -355,13 +332,6 @@ export class IdentityClient extends BaseClient {
 
   /**
    * Get the total count of active DIDs registered.
-   *
-   * Uses {@link PROBE_ADDRESS} for the read simulation so no specific caller
-   * account is required.
-   *
-   * @param options Per-call overrides (currently `timeoutSeconds`).
-   * @returns Total active DIDs across the registry.
-   * @throws {SorobanIdentityError} on simulation failure.
    */
   async getDidCount(options?: CallOptions): Promise<number> {
     const account = new Account(this.config.identityRegistryId, "0");
@@ -371,9 +341,7 @@ export class IdentityClient extends BaseClient {
       fee: BASE_FEE,
       networkPassphrase: this.config.networkPassphrase,
     })
-      .addOperation(
-        this.contract.call("get_did_count")
-      )
+      .addOperation(this.contract.call("get_did_count"))
       .setTimeout(timeout)
       .build();
 
@@ -394,17 +362,7 @@ export class IdentityClient extends BaseClient {
   }
 
   /**
-   * Deactivate the DID associated with the given keypair.
-   * Deactivate the DID owned by `keypair`.
-   *
-   * Marks the DID inactive on-chain; subsequent `hasActiveDid` returns `false`.
-   * Deactivation is irreversible.
-   *
-   * @param keypair Controller of the DID being deactivated.
-   * @returns Resolves once the transaction is final on-chain.
-   * @throws {SorobanIdentityError} with code `NOT_FOUND` if the DID does not
-   *   exist or is already inactive, or `CONTRACT_ERROR` for other submission
-   *   failures.
+   * Deactivate the DID owned by `keypair`. Deactivation is irreversible.
    */
   async deactivateDid(keypair: Keypair): Promise<SorobanResponse<void>> {
     const isActive = await this.hasActiveDid(keypair.publicKey());
@@ -441,31 +399,15 @@ export class IdentityClient extends BaseClient {
 
     const txHash = result.hash;
     await pollTransactionStatus(this.server, txHash, {
-      maxAttempts: this.config.pollingRetries,
-      intervalMs: this.config.pollingIntervalMs,
+      maxRetries: this.config.maxRetries ?? this.config.pollingRetries,
+      retryIntervalMs: this.config.retryIntervalMs ?? this.config.pollingIntervalMs,
       exponentialBackoff: this.config.pollingExponentialBackoff,
     });
     return { data: undefined, txHash };
   }
 
   /**
-   * Get storage usage statistics for the identity registry.
-   *
-   * @param callerAddress Stellar address used to build the read simulation.
-   * @param options       Per-call overrides (currently `timeoutSeconds`).
-   * @returns The current {@link IdentityStorageStats}.
-   * @throws {SorobanIdentityError} on simulation failure.
-   */
-  /**
    * List DID documents with offset-based pagination.
-   *
-   * @param callerAddress Stellar address used to build the read simulation.
-   * @param page          1-based page number. Defaults to `1`.
-   * @param pageSize      Number of records per page. Defaults to `20`, capped
-   *                      to `100` server-side.
-   * @param options       Per-call overrides (currently `timeoutSeconds`).
-   * @returns Array of {@link DidDocument} for the requested page.
-   * @throws {SorobanIdentityError} on simulation failure.
    */
   async listDIDs(
     callerAddress: string,
@@ -507,6 +449,9 @@ export class IdentityClient extends BaseClient {
     ) as DidDocument[];
   }
 
+  /**
+   * Get storage usage statistics for the identity registry.
+   */
   async getStorageStats(callerAddress: string, options?: CallOptions): Promise<IdentityStorageStats> {
     validateStellarAddress(callerAddress);
     const account = new Account(callerAddress, "0");
@@ -537,15 +482,6 @@ export class IdentityClient extends BaseClient {
 
   /**
    * Resolve multiple DID documents in parallel.
-   *
-   * Runs up to `concurrency` (default: `config.maxConcurrentRequests ?? 5`)
-   * simulate calls simultaneously. Results are returned in the same order as
-   * `addresses`.
-   *
-   * @param addresses   Controller addresses to resolve.
-   * @param options     Per-call overrides; `concurrency` caps parallel RPC calls.
-   * @returns Array of {@link DidDocument} in input order.
-   * @throws {SorobanIdentityError} if any individual resolution fails.
    */
   async resolveMany(
     addresses: string[],
@@ -561,14 +497,6 @@ export class IdentityClient extends BaseClient {
 
   /**
    * Liveness probe — calls the on-chain `ping()` function.
-   *
-   * Returns the contract's `CONTRACT_VERSION` constant. Throws if the contract
-   * is not deployed or not responding.
-   *
-   * @param options Per-call overrides (currently `timeoutSeconds`).
-   * @returns The contract version number (currently `1`).
-   * @throws {SorobanIdentityError} with code `CONTRACT_ERROR` if the contract
-   *   does not respond.
    */
   async ping(options?: CallOptions): Promise<number> {
     const account = new Account(PROBE_ADDRESS, "0");

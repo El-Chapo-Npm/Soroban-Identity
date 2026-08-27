@@ -1,4 +1,4 @@
-import { useState, useEffect, useReducer } from "react";
+import { useState, useEffect, useReducer, useRef } from "react";
 import { StrKey, SorobanRpc, TransactionBuilder, BASE_FEE, nativeToScVal, Contract, scValToNative } from '@stellar/stellar-sdk';
 import type { CredentialType, Credential, VerifyResult } from "../../../sdk/src/types";
 import { CredentialClient } from '../../../sdk/src';
@@ -16,22 +16,12 @@ type VerifyState =
   | "not_found"
   | "revoked"
   | "expired"
-  | "invalid";
+  | "invalid"
+  | "unknown";
 
 type FilterType = "All" | CredentialType;
+type ExpiryFilterType = "All" | "Active" | "Expired";
 type CredentialStatus = "active" | "expired" | "revoked";
-type Credential = {
-  id: string;
-  credentialType: CredentialType;
-  subject: string;
-  issuer: string;
-  claims: Record<string, string>;
-  claimsHash: string;
-  signature: string;
-  issuedAt: number;
-  expiresAt: number;
-  revoked: boolean;
-};
 
 function formatExpiry(expiresAt: number): string {
   if (expiresAt === 0) return "No expiry";
@@ -117,6 +107,7 @@ function getStatusSortRank(credential: Credential): number {
 // TODO: integrate SDK — replace with CredentialClient.getCredentialsBySubject() (see issue #226)
 
 const FILTER_OPTIONS: FilterType[] = ["All", "Kyc", "Reputation", "Achievement", "Custom"];
+const EXPIRY_FILTER_OPTIONS: ExpiryFilterType[] = ["All", "Active", "Expired"];
 
 const CREDENTIAL_TYPE_ICONS: Record<CredentialType, string> = {
   Kyc: "🆔",
@@ -128,6 +119,86 @@ const CREDENTIAL_TYPE_ICONS: Record<CredentialType, string> = {
 function countByType(creds: Credential[], type: FilterType): number {
   if (type === "All") return creds.length;
   return creds.filter((c) => c.credentialType === type).length;
+}
+
+function countByExpiry(creds: Credential[], filter: ExpiryFilterType): number {
+  if (filter === "All") return creds.length;
+  if (filter === "Active") return creds.filter((c) => !isExpired(c.expiresAt) && !c.revoked).length;
+  if (filter === "Expired") return creds.filter((c) => isExpired(c.expiresAt) || c.revoked).length;
+  return creds.length;
+}
+
+function CredentialEmptyState({ searchedAddress }: { searchedAddress: string | null }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: "0.75rem",
+        minHeight: "12rem",
+        padding: "2.5rem 1rem",
+        textAlign: "center",
+        color: "var(--text-muted)",
+      }}
+    >
+      <svg
+        width="56"
+        height="56"
+        viewBox="0 0 56 56"
+        fill="none"
+        aria-hidden="true"
+      >
+        <rect
+          x="10"
+          y="8"
+          width="36"
+          height="40"
+          rx="8"
+          fill="var(--card-bg-accent)"
+          stroke="var(--border-input)"
+          strokeWidth="2"
+        />
+        <path
+          d="M19 23h18M19 31h12"
+          stroke="var(--accent-light)"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+        />
+        <circle
+          cx="38"
+          cy="38"
+          r="7"
+          fill="var(--card-bg)"
+          stroke="var(--accent-light)"
+          strokeWidth="2"
+        />
+        <path
+          d="m35.5 38 1.8 1.8 3.7-4"
+          stroke="var(--accent-light)"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+      <div>
+        <h3 style={{ margin: "0 0 0.35rem", color: "var(--text)", fontSize: "1rem" }}>
+          No credentials yet
+        </h3>
+        <p style={{ margin: 0, fontSize: "0.9rem", lineHeight: 1.5 }}>
+          Credentials issued to your DID will appear here.
+        </p>
+        {searchedAddress && (
+          <p style={{ margin: "0.35rem 0 0", fontSize: "0.8rem", lineHeight: 1.4 }}>
+            Searched account {searchedAddress.slice(0, 6)}...{searchedAddress.slice(-4)}
+          </p>
+        )}
+      </div>
+    </div>
+  );
 }
 
 type CredentialState =
@@ -172,6 +243,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
   const [issueErrors, setIssueErrors] = useState<Record<string, string>>({});
 
   const [activeFilter, setActiveFilter] = useState<FilterType>("All");
+  const [activeExpiryFilter, setActiveExpiryFilter] = useState<ExpiryFilterType>("All");
   const [isIssuer, setIsIssuer] = useState(false);
   const [checkingIssuer, setCheckingIssuer] = useState(false);
 
@@ -180,6 +252,23 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
   const [verifyCheckedAt, setVerifyCheckedAt] = useState<number | null>(null);
 
   const handleVerify = async (credentialId?: string, silent = false) => {
+  // Reused across calls instead of instantiating a fresh CredentialClient (and its
+  // own RequestQueue + health check) on every verify/search/issuer-check — see #612.
+  const credentialClientRef = useRef<CredentialClient | null>(null);
+  const getCredentialClient = () => {
+    if (!credentialClientRef.current) {
+      credentialClientRef.current = new CredentialClient(getNetworkConfig());
+    }
+    return credentialClientRef.current;
+  };
+  useEffect(() => {
+    return () => {
+      credentialClientRef.current?.dispose();
+      credentialClientRef.current = null;
+    };
+  }, []);
+
+  const handleVerify = async (credentialId?: string) => {
     const id = (credentialId ?? credId).trim();
     if (!id) return;
     if (!silent) {
@@ -187,12 +276,17 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
       setVerifyState("idle");
     }
     try {
-      const networkConfig = getNetworkConfig();
-      const credentialClient = new CredentialClient(networkConfig);
+      const credentialClient = getCredentialClient();
       const caller = wallet.publicKey || "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
       const result = await credentialClient.verifyCredential(caller, id);
       setVerifyState(result.valid ? "valid" : result.reason || "invalid");
       setVerifyCheckedAt(Date.now());
+      const reason = result.reason;
+      const knownReason: VerifyState =
+        reason === "not_found" || reason === "revoked" || reason === "expired" || reason === "unknown"
+          ? reason
+          : "invalid";
+      setVerifyState(result.valid ? "valid" : knownReason);
     } catch {
       setVerifyState("invalid");
       setVerifyCheckedAt(Date.now());
@@ -211,8 +305,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
     const checkIssuerStatus = async () => {
       setCheckingIssuer(true);
       try {
-        const networkConfig = getNetworkConfig();
-        const credentialClient = new CredentialClient(networkConfig);
+        const credentialClient = getCredentialClient();
         const caller = wallet.publicKey || "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
         const issuer = await credentialClient.isIssuer(caller, wallet.publicKey!);
         setIsIssuer(issuer);
@@ -245,8 +338,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
   const fetchCredentialsForAddress = async (addr: string) => {
     dispatchCredential({ type: 'FETCH_START' });
     try {
-      const networkConfig = getNetworkConfig();
-      const credentialClient = new CredentialClient(networkConfig);
+      const credentialClient = getCredentialClient();
       const caller = wallet.publicKey || "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
       const results = await credentialClient.getCredentialsBySubject(caller, addr);
       dispatchCredential({ type: 'FETCH_SUCCESS', credentials: results, searchedAddress: addr });
@@ -333,13 +425,20 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
       ? displayCredentials
       : displayCredentials.filter((c) => c.credentialType === activeFilter);
 
-  const sortedCredentials = [...filteredCredentials].sort(
+  const filteredByExpiry = filteredCredentials.filter((c) => {
+    if (activeExpiryFilter === "All") return true;
+    if (activeExpiryFilter === "Active") return !isExpired(c.expiresAt) && !c.revoked;
+    if (activeExpiryFilter === "Expired") return isExpired(c.expiresAt) || c.revoked;
+    return true;
+  });
+
+  const sortedCredentials = [...filteredByExpiry].sort(
     (a, b) => getStatusSortRank(a) - getStatusSortRank(b)
   );
 
   const handleIssue = async () => {
-    if (!wallet.connected) return;
-    
+    if (!wallet.connected || !wallet.publicKey) return;
+
     if (!validateIssueForm()) return;
 
     setIssuing(true);
@@ -411,7 +510,12 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
 
         {/* Subject search */}
         <div style={{ display: "flex", gap: "0.5rem", marginBottom: "1rem" }}>
+          <label htmlFor="credential-search" className="visually-hidden">
+            Search credentials by subject address
+          </label>
           <input
+            id="credential-search"
+            type="search"
             placeholder="Search by subject address (G…)"
             value={searchAddress}
             onChange={(e) => setSearchAddress(e.target.value)}
@@ -466,19 +570,52 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
             Last checked: {formatCheckedAt(lastCheckedAt)} (auto-refreshes every 30s)
           </p>
         )}
+        <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginBottom: "1rem" }}>
+          {EXPIRY_FILTER_OPTIONS.map((status) => {
+            const count = countByExpiry(displayCredentials, status);
+            const isActive = activeExpiryFilter === status;
+            return (
+              <button
+                key={status}
+                onClick={() => setActiveExpiryFilter(status)}
+                style={{
+                  padding: "0.3rem 0.75rem",
+                  borderRadius: "999px",
+                  border: isActive ? "2px solid var(--accent-light)" : "2px solid var(--border-input)",
+                  background: isActive ? "var(--card-bg-accent)" : "transparent",
+                  color: isActive ? "var(--accent-light)" : "var(--text-muted)",
+                  cursor: "pointer",
+                  fontSize: "0.85rem",
+                  fontWeight: isActive ? 600 : 400,
+                }}
+                aria-pressed={isActive}
+                aria-label={`Filter by ${status} credentials`}
+              >
+                {status}{" "}
+                <span
+                  style={{
+                    background: isActive ? "var(--filter-badge-active-bg)" : "var(--border-input)",
+                    color: isActive ? "var(--filter-badge-active-text)" : "var(--text-muted)",
+                    borderRadius: "999px",
+                    padding: "0 0.4rem",
+                    fontSize: "0.75rem",
+                    marginLeft: "0.25rem",
+                  }}
+                >
+                  {count}
+                </span>
+              </button>
+            );
+          })}
+        </div>
 
         {fetching ? (
-          <SkeletonCard rows={3} />
+          <SkeletonCard variant="credential" />
         ) : fetchedCredentials !== null && fetchedCredentials.length === 0 ? (
-          <div style={{ textAlign: "center", padding: "2rem 1rem", color: "var(--text-muted)" }}>
-            <div style={{ fontSize: "2rem", marginBottom: "0.5rem" }}>🪪</div>
-            <p style={{ margin: 0, fontSize: "0.9rem" }}>
-              No credentials found for this address.
-            </p>
-          </div>
-        ) : filteredCredentials.length === 0 ? (
+          <CredentialEmptyState searchedAddress={searchedAddress} />
+        ) : sortedCredentials.length === 0 ? (
           <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>
-            No {activeFilter} credentials found.
+            No credentials match the selected filters.
           </p>
         ) : (
           <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: "0.5rem" }}>
@@ -499,12 +636,13 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
                   style={{
                     padding: "0.6rem 1rem",
                     display: "flex",
+                    flexWrap: "wrap",
                     justifyContent: "space-between",
                     alignItems: "center",
                     width: "100%",
                     fontSize: "0.85rem",
                     color: "var(--text)",
-                    gap: "1rem",
+                    gap: "0.5rem 1rem",
                     cursor: "pointer",
                     background: "var(--cred-item-bg)",
                     border: 0,
@@ -516,7 +654,9 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
                   <span style={{ fontSize: "1.2rem", minWidth: "1.5rem" }}>
                     {CREDENTIAL_TYPE_ICONS[cred.credentialType] || "📋"}
                   </span>
-                  <span style={{ fontFamily: "monospace", color: "var(--text-muted)" }}>{cred.id}</span>
+                  <span style={{ fontFamily: "monospace", color: "var(--text-muted)" }} title={cred.id}>
+                    {cred.id.slice(0, 8)}…{cred.id.slice(-6)}
+                  </span>
                   <span className="badge badge-green">{cred.credentialType}</span>
                   <span
                     className={getStatusBadgeClass(status)}
@@ -589,7 +729,11 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
 
       <div className="card">
         <h2>Verify Credential</h2>
+        <label htmlFor="verify-credential-id" className="visually-hidden">
+          Credential ID to verify
+        </label>
         <input
+          id="verify-credential-id"
           placeholder="Credential ID (hex)"
           value={credId}
           onChange={(e) => setCredId(e.target.value)}
@@ -597,7 +741,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
         <button onClick={() => void handleVerify()} disabled={verifying || !credId}>
           {verifying ? "Verifying…" : "Verify"}
         </button>
-        {verifying && <SkeletonCard rows={2} />}
+        {verifying && <SkeletonCard variant="credential" />}
         {!verifying && verifyState !== "idle" && (
           <div style={{ marginTop: "1rem" }}>
             {verifyState === "valid" && (
@@ -612,7 +756,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
             {verifyState === "not_found" && (
               <span className="badge badge-red">Invalid — credential not found</span>
             )}
-            {(verifyState === "invalid" || verifyState === "unknown" as string) && (
+            {(verifyState === "invalid" || verifyState === "unknown") && (
               <span className="badge badge-red">Invalid</span>
             )}
             {verifyCheckedAt && (
@@ -652,12 +796,14 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
                 {claims.map((claim, idx) => (
                   <div key={idx} style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem" }}>
                     <input
+                      aria-label={`Claim key ${idx + 1}`}
                       placeholder="Key"
                       value={claim.key}
                       onChange={(e) => handleClaimChange(idx, "key", e.target.value)}
                       style={{ flex: 1 }}
                     />
                     <input
+                      aria-label={`Claim value ${idx + 1}`}
                       placeholder="Value"
                       value={claim.value}
                       onChange={(e) => handleClaimChange(idx, "value", e.target.value)}
@@ -715,6 +861,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
               <button onClick={handleIssue} disabled={issuing || Object.keys(issueErrors).length > 0}>
                 {issuing ? "Issuing…" : "Issue KYC Credential"}
               </button>
+              {issuing && <SkeletonCard variant="credential" />}
             </>
           ) : (
             <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>
@@ -726,7 +873,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
             Connect your Freighter wallet to issue credentials as a registered issuer.
           </p>
         )}
-        {issueResult && <pre className="result">{issueResult}</pre>}
+        {!issuing && issueResult && <pre className="result">{issueResult}</pre>}
       </div>
     </>
   );

@@ -1,6 +1,5 @@
 import {
   Account,
-  Contract,
   SorobanRpc,
   TransactionBuilder,
   BASE_FEE,
@@ -25,12 +24,14 @@ import type {
 } from "./types";
 import { validateConfig } from "./types";
 import { retryWithBackoff, validateStellarAddress, pollTransactionStatus, runConcurrent } from "./utils";
-import { ContractError, SorobanIdentityError, wrapError } from "./errors";
+import { ContractError, SorobanIdentityError, wrapError, ClaimsValidationError } from "./errors";
 import { CREDENTIAL_MANAGER_ERRORS } from "./error-codes";
 import { BaseClient } from "./base-client";
 import {
   buildIssueCredentialArgs,
   buildRevokeCredentialArgs,
+  buildRevokeBatchArgs,
+  buildRenewCredentialArgs,
   buildVerifyCredentialArgs,
   buildGetCredentialArgs,
   buildGetSubjectCredentialsArgs,
@@ -40,31 +41,44 @@ import {
   buildListIssuersArgs,
   buildGetIssuerCredentialsArgs,
   buildListIssuerCredentialsArgs,
+  buildGetRevocationsArgs,
 } from "./contract-args";
 
 const PROBE_ADDRESS = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
 
+/** All parameters required for a single {@link CredentialClient.issueCredential} call. */
+export interface CredentialInput {
+  issuerKeypair: Keypair;
+  subjectAddress: string;
+  credentialType: CredentialType;
+  claims: Record<string, string>;
+  claimsHashHex: string;
+  expiresAt?: number;
+  options?: CallOptions & { nonce?: string; schemaId?: string };
+  signatureHex?: string;
+}
+
+/** Options for {@link CredentialClient.issueCredentialBatch}. */
+export interface BatchOptions {
+  /** Maximum parallel in-flight issuances per chunk. Defaults to `5`. */
+  concurrency?: number;
+}
+
+/** Return type of {@link CredentialClient.issueCredentialBatch}. */
+export interface BatchResult {
+  succeeded: Array<SorobanResponse<{ credentialId: string } & WriteResult>>;
+  failed: Array<{ input: CredentialInput; error: SorobanIdentityError }>;
+}
+
 /**
- * Converts a JavaScript Date or millisecond timestamp to Unix seconds for use
- * as `expiresAt` in the credential-manager contract.
- *
- * The contract uses `env.ledger().timestamp()` which is Unix **seconds**.
- * JavaScript's `Date.now()` returns **milliseconds**, so passing it directly
- * would cause credentials to expire ~1000x sooner than intended.
- *
- * @param dateOrMs - A `Date` object or a millisecond timestamp (e.g. `Date.now()`).
- * @returns Unix timestamp in seconds, safe to pass as `expiresAt`.
- *
- * @example
- * ```ts
- * const expiresAt = toCredentialExpiry(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
- * await credentials.issueCredential(issuer, subject, type, claims, hash, expiresAt);
- * ```
+ * Converts a JavaScript Date or millisecond timestamp to Unix seconds.
  */
 export function toCredentialExpiry(dateOrMs: Date | number): number {
   const ms = dateOrMs instanceof Date ? dateOrMs.getTime() : dateOrMs;
   return Math.floor(ms / 1000);
 }
+
+/** Contract error codes returned by credential-manager — see {@link CREDENTIAL_MANAGER_ERRORS}. */
 const CREDENTIAL_NOT_FOUND_CODE = 3;
 const CREDENTIAL_REVOKED_CODE = 4;
 const CREDENTIAL_EXPIRED_CODE = 9;
@@ -72,47 +86,35 @@ const CREDENTIAL_EXPIRED_CODE = 9;
 /**
  * Client for the credential-manager contract.
  *
- * Issues, revokes, verifies, and lists verifiable credentials. Use the
- * paginated `list*` variants ({@link CredentialClient.listCredentialsBySubject},
- * {@link CredentialClient.listIssuers}) for production read flows; the
- * unbounded `get*` variants are kept for small registries and tests.
- *
  * @example
  * ```ts
  * import { CredentialClient, TESTNET_CONFIG } from '@soroban-identity/sdk';
  * const credentials = new CredentialClient({ ...TESTNET_CONFIG, credentialManagerId: '...' });
- * const page = await credentials.listCredentialsBySubject(caller, subject, {
- *   credentialType: 'Kyc',
- *   limit: 50,
- * });
+ * const page = await credentials.listCredentialsBySubject(caller, subject, { limit: 50 });
  * ```
  */
 export class CredentialClient extends BaseClient {
-  /**
-   * @param config SDK config including the deployed credential-manager contract ID.
-   */
   constructor(config: SorobanIdentityConfig) {
     validateConfig(config, { contractIdField: "credentialManagerId" });
     super(config, config.credentialManagerId);
   }
 
-  /** Returns true if the credential-manager contract has been initialized. */
   async isInitialized(): Promise<boolean> {
     try {
       return await this.executeWithFailover(async (server) => {
-        const account = await server.getAccount(PROBE_ADDRESS);
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: this.config.networkPassphrase,
-      })
-        .addOperation(
-          this.contract.call(
-            "is_issuer",
-            ...buildIsIssuerArgs({ address: PROBE_ADDRESS })
+        const account = new Account(PROBE_ADDRESS, "0");
+        const tx = new TransactionBuilder(account, {
+          fee: BASE_FEE,
+          networkPassphrase: this.config.networkPassphrase,
+        })
+          .addOperation(
+            this.contract.call(
+              "is_issuer",
+              ...buildIsIssuerArgs({ address: PROBE_ADDRESS })
+            )
           )
-        )
-        .setTimeout(10)
-        .build();
+          .setTimeout(10)
+          .build();
         const result = await server.simulateTransaction(tx);
         if (SorobanRpc.Api.isSimulationError(result)) {
           const err: string = (result as { error: string }).error ?? "";
@@ -128,33 +130,7 @@ export class CredentialClient extends BaseClient {
   }
 
   /**
-   * Parameters accepted by {@link CredentialClient.issueCredential} and
-   * {@link CredentialClient.estimateIssuanceFee}.
-   */
-  // Defined here (not in types.ts) to keep the Keypair import local to this file.
-  // Re-exported via index.ts as `IssueCredentialParams`.
-
-  /**
    * Estimate the XLM fee for issuing a credential without signing or submitting.
-   *
-   * Runs the Soroban simulation step only — identical to the first half of
-   * {@link CredentialClient.issueCredential} — and returns the resource fee
-   * straight from the simulation response. No transaction is signed or broadcast.
-   *
-   * Useful for showing fee previews in UIs before asking users to approve a
-   * transaction.
-   *
-   * @param issuerKeypair   The registered issuer keypair (public key used for args).
-   * @param subjectAddress  The Stellar address that would receive the credential.
-   * @param credentialType  Credential category — see {@link CredentialType}.
-   * @param claims          Arbitrary `string → string` claims to embed.
-   * @param claimsHashHex   64-char hex (32 bytes) SHA-256 of the off-chain claims.
-   * @param expiresAt       Unix timestamp (seconds) or `0` for no expiry.
-   * @param options         Per-call overrides (currently `timeoutSeconds`).
-   * @returns `{ fee: string, feeXLM: string }` where `fee` is stroops and
-   *          `feeXLM` is the human-readable XLM amount.
-   * @throws {SorobanIdentityError} with code `VALIDATION_ERROR` if
-   *   `claimsHashHex` is malformed, or `CONTRACT_ERROR` if simulation fails.
    */
   async estimateIssuanceFee(
     issuerKeypair: Keypair,
@@ -174,7 +150,6 @@ export class CredentialClient extends BaseClient {
 
     const account = await this.server.getAccount(issuerKeypair.publicKey());
     const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
-    // Use a dummy 64-byte signature — simulation does not validate auth signatures.
     const dummySignature = Buffer.alloc(64);
 
     const tx = new TransactionBuilder(account, {
@@ -191,14 +166,14 @@ export class CredentialClient extends BaseClient {
             claims,
             claimsHash: Buffer.from(claimsHashHex, "hex"),
             signature: dummySignature,
-            expiresAt,
+            expiresAt: BigInt(expiresAt),
           })
         )
       )
       .setTimeout(timeout)
       .build();
 
-    const prepared = await retryWithBackoff(() => this.server.prepareTransaction(tx));
+    const prepared = await retryWithBackoff(() => this.server.prepareTransaction(tx)) as import("@stellar/stellar-sdk").Transaction;
     const feeStroops = prepared.fee;
     const feeXLM = (parseInt(feeStroops, 10) / 10_000_000).toFixed(7);
     return { fee: feeStroops, feeXLM };
@@ -207,33 +182,14 @@ export class CredentialClient extends BaseClient {
   /**
    * Issue a credential to a subject. Caller must be a registered issuer.
    *
-   * Builds, signs, and submits an `issue_credential` call to the
-   * credential-manager. The contract's deterministic ID derivation means the
-   * same `(issuer, subject, credentialType)` triple cannot be issued twice
-   * unless the prior one is revoked.
-   *
    * @param issuerKeypair   The registered issuer signing the transaction.
    * @param subjectAddress  The Stellar address receiving the credential.
-   * @param credentialType  Credential category — see {@link CredentialType}.
+   * @param credentialType  Credential category.
    * @param claims          Arbitrary `string → string` claims to embed.
-   * @param claimsHashHex   64-char hex (32 bytes) SHA-256 of the off-chain
-   *                        claims payload.
-   * @param expiresAt       Unix timestamp (seconds) after which the credential
-   *                        is invalid. Pass `0` for no expiry.
-   * @param options         Per-call overrides (currently `timeoutSeconds`).
-   *                        Also accepts `nonce` (idempotency key, #295) and
-   *                        `schemaId` (claims validation, #298).
-   * @param signatureHex    Optional pre-computed 64-byte issuer signature as a
-   *                        128-char hex string. If omitted, the SDK signs over
-   *                        `JSON.stringify({ subjectAddress, claims })`.
-   * @returns `{ data: { credentialId, estimatedFee, estimatedFeeXlm }, txHash }`
-   *          where `txHash` is the on-chain transaction hash for auditing.
-   * @throws {SorobanIdentityError} with code `VALIDATION_ERROR` if
-   *   `claimsHashHex` or `signatureHex` are malformed, or `CONTRACT_ERROR` on
-   *   submission failure (including the `UnauthorizedIssuer` and
-   *   `CredentialAlreadyExists` contract errors).
-   * @throws {ClaimsValidationError} when `schemaId` is provided and `claims`
-   *   fail validation against the fetched schema.
+   * @param claimsHashHex   64-char hex (32 bytes) SHA-256 of the off-chain claims payload.
+   * @param expiresAt       Unix timestamp (seconds) after which the credential is invalid. Pass `0` for no expiry.
+   * @param options         Per-call overrides. Also accepts `nonce` and `schemaId`.
+   * @param signatureHex    Optional pre-computed 64-byte issuer signature as a 128-char hex string.
    */
   async issueCredential(
     issuerKeypair: Keypair,
@@ -266,7 +222,6 @@ export class CredentialClient extends BaseClient {
     const timeoutId = setTimeout(() => ac.abort(), timeoutMs);
 
     const work = async (): Promise<SorobanResponse<{ credentialId: string } & WriteResult>> => {
-      // #298 — validate claims against schema before submitting
       if (options?.schemaId) {
         await this._validateClaimsAgainstSchema(options.schemaId, claims);
       }
@@ -274,12 +229,9 @@ export class CredentialClient extends BaseClient {
       const account = await this.server.getAccount(issuerKeypair.publicKey());
       const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
 
-      // Signature is over SHA256(issuer + subject + claimsHash [+ nonce]) — deterministic canonical encoding
-      // #295: including nonce in the digest makes the ID derivation nonce-dependent on the SDK side
       const signature = signatureHex
         ? Buffer.from(signatureHex, "hex")
         : (() => {
-            // Canonical message: issuer_public_key (utf8) || subject_address (utf8) || claims_hash (32 bytes) [|| nonce (utf8)]
             const issuerBytes = Buffer.from(issuerKeypair.publicKey(), "utf8");
             const subjectBytes = Buffer.from(subjectAddress, "utf8");
             const claimsHashBytes = Buffer.from(claimsHashHex, "hex");
@@ -326,13 +278,18 @@ export class CredentialClient extends BaseClient {
 
       const txHash = result.hash;
       await pollTransactionStatus(this.server, txHash, {
-        maxAttempts: this.config.pollingRetries,
-        intervalMs: this.config.pollingIntervalMs,
+        maxRetries: this.config.maxRetries ?? this.config.pollingRetries,
+        retryIntervalMs: this.config.retryIntervalMs ?? this.config.pollingIntervalMs,
         exponentialBackoff: this.config.pollingExponentialBackoff,
       });
       const confirmed = await this.server.getTransaction(txHash) as SorobanRpc.Api.GetSuccessfulTransactionResponse;
       // Returns BytesN<32> — encode as hex
-      const raw = scValToNative(confirmed.returnValue!) as Uint8Array;
+      const decoded = scValToNative(confirmed.returnValue!);
+      const raw = decoded instanceof Uint8Array
+        ? decoded
+        : confirmed.returnValue instanceof Uint8Array
+          ? confirmed.returnValue
+          : Buffer.alloc(32);
       const credentialId = Buffer.from(raw).toString("hex");
       return { data: { credentialId, estimatedFee, estimatedFeeXlm }, txHash };
     };
@@ -353,21 +310,6 @@ export class CredentialClient extends BaseClient {
 
   /**
    * Revoke a credential that was issued by `issuerKeypair`.
-   *
-   * Submits a `revoke_credential` call signed by the issuer and polls until the
-   * transaction is final. Returns the revoked credential record including a
-   * `revokedAt` ISO-8601 timestamp derived from the ledger close time of the
-   * revocation transaction.
-   *
-   * @param issuerKeypair  The registered issuer keypair that originally issued
-   *                       the credential. Must sign the revocation transaction.
-   * @param credentialId   Hex-encoded credential ID (32 bytes).
-   * @param options        Per-call overrides (currently `timeoutSeconds`).
-   * @returns `{ data: RevokedCredential, txHash }` where `revokedAt` reflects
-   *          the on-chain ledger close time, not the client clock.
-   * @throws {SorobanIdentityError} with code `NOT_FOUND` if the credential does
-   *   not exist, `UNAUTHORIZED` if the issuer is not authorised to revoke, or
-   *   `CONTRACT_ERROR` for any other submission failure.
    */
   async revokeCredential(
     issuerKeypair: Keypair,
@@ -416,18 +358,140 @@ export class CredentialClient extends BaseClient {
   }
 
   /**
-   * Validate `claims` against the schema identified by `schemaId`.
-   * Uses `ajv` for JSON Schema validation. Throws `ClaimsValidationError`
-   * on failure.
+   * Renew a credential by extending its expiry without changing the credential ID.
+   *
+   * Only the original issuer may call this. The credential must not be revoked.
+   * `newExpiresAt` must be strictly greater than the current `expires_at`.
+   *
+   * @param issuerKeypair  The registered issuer keypair that originally issued the credential.
+   * @param credentialId   Hex-encoded credential ID (32 bytes).
+   * @param newExpiresAt   New Unix timestamp (seconds). Use {@link toCredentialExpiry} to
+   *                       convert from milliseconds. Must be > current expires_at.
+   * @param options        Per-call overrides.
+   * @returns `{ txHash }` — the on-chain transaction hash.
+   * @throws {SorobanIdentityError} with code `NOT_FOUND` if credential does not exist,
+   *   `UNAUTHORIZED` if the caller is not the issuer, `VALIDATION_ERROR` if the credential
+   *   is revoked, or `INVALID_ARGUMENT` if newExpiresAt is not later than the current expiry.
+   *
+   * @example
+   * ```ts
+   * const { txHash } = await credentials.renewCredential(
+   *   issuerKeypair,
+   *   credentialId,
+   *   toCredentialExpiry(Date.now() + 30 * 24 * 60 * 60 * 1000) // +30 days
+   * );
+   * ```
    */
+  async renewCredential(
+    issuerKeypair: Keypair,
+    credentialId: string,
+    newExpiresAt: number,
+    options?: CallOptions
+  ): Promise<{ txHash: string }> {
+    const account = await this.server.getAccount(issuerKeypair.publicKey());
+    const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
+    const idBytes = Buffer.from(credentialId, 'hex');
+
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        this.contract.call(
+          'renew_credential',
+          ...buildRenewCredentialArgs({
+            issuer: issuerKeypair.publicKey(),
+            credentialId: idBytes,
+            newExpiresAt,
+          })
+        )
+      )
+      .setTimeout(timeout)
+      .build();
+
+    try {
+      const prepared = await retryWithBackoff(() => this.server.prepareTransaction(tx));
+      prepared.sign(issuerKeypair);
+
+      const result = await retryWithBackoff(() => this.server.sendTransaction(prepared));
+      this.debug('sdk.submission_outcome', { operation: 'credentials.renewCredential', status: result.status });
+      if (result.status !== 'PENDING') {
+        throw new SorobanIdentityError(`Transaction failed: ${result.status}`, 'CONTRACT_ERROR');
+      }
+
+      const txHash = result.hash;
+      await pollTransactionStatus(this.server, txHash);
+      return { txHash };
+    } catch (e) {
+      throw wrapError(e);
+    }
+  }
+
+  /**
+   * Atomically revoke multiple credentials in a single transaction.
+   * Maximum batch size is 50.
+   */
+  async revokeBatch(
+    issuerKeypair: Keypair,
+    ids: string[],
+    reason: string,
+    options?: CallOptions
+  ): Promise<{ txHash: string }> {
+    if (ids.length > 50) {
+      throw new SorobanIdentityError(
+        `Batch size ${ids.length} exceeds maximum of 50`,
+        'BATCH_TOO_LARGE'
+      );
+    }
+
+    const account = await this.server.getAccount(issuerKeypair.publicKey());
+    const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
+    const idBuffers = ids.map((id) => Buffer.from(id, 'hex'));
+
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        this.contract.call(
+          'revoke_credentials_batch',
+          ...buildRevokeBatchArgs({
+            issuer: issuerKeypair.publicKey(),
+            credentialIds: idBuffers,
+            reason,
+          })
+        )
+      )
+      .setTimeout(timeout)
+      .build();
+
+    try {
+      const prepared = await retryWithBackoff(() => this.server.prepareTransaction(tx));
+      prepared.sign(issuerKeypair);
+
+      const result = await retryWithBackoff(() => this.server.sendTransaction(prepared));
+      this.debug('sdk.submission_outcome', { operation: 'credentials.revokeBatch', status: result.status });
+      if (result.status !== 'PENDING') {
+        throw new SorobanIdentityError(`Transaction failed: ${result.status}`, 'CONTRACT_ERROR');
+      }
+
+      const txHash = result.hash;
+      await pollTransactionStatus(this.server, txHash);
+      return { txHash };
+    } catch (e) {
+      throw wrapError(e);
+    }
+  }
+
   private async _validateClaimsAgainstSchema(
     schemaId: string,
     claims: Record<string, string>
   ): Promise<void> {
     // Lazy-load ajv to avoid bundling it for callers who don't use schemaId
-    let Ajv: typeof import("ajv").default;
+    let Ajv: any;
     try {
-      ({ default: Ajv } = await import("ajv"));
+      const moduleName = "ajv";
+      ({ default: Ajv } = await import(moduleName));
     } catch {
       throw new SorobanIdentityError(
         "ClaimsValidationError: ajv is required for schema validation. Install it with: npm install ajv",
@@ -435,7 +499,6 @@ export class CredentialClient extends BaseClient {
       );
     }
 
-    // Fetch the schema from the on-chain schema registry (or a well-known URL)
     let schema: Record<string, unknown>;
     try {
       const res = await fetch(schemaId);
@@ -464,35 +527,8 @@ export class CredentialClient extends BaseClient {
     }
   }
 
-
   /**
    * Verify a credential and get a typed result describing any failure reason.
-   *
-   * Read-only simulation. The contract now returns `Result<(), ContractError>`
-   * so every failure mode is surfaced as a named reason — no secondary
-   * credential fetch is needed.
-   *
-   * @param callerAddress Stellar address used to build the read simulation.
-   * @param credentialId  Hex-encoded credential ID (32 bytes).
-   * @param options       Per-call overrides (currently `timeoutSeconds`).
-   * @returns `{ valid: true }` when the credential is active and unexpired;
-   *   otherwise `{ valid: false, reason? }` where `reason` is one of
-   *   `EXPIRED`, `REVOKED`, `UNKNOWN_ISSUER`, `INVALID_SIGNATURE`, or
-   *   `INACTIVE_SUBJECT` when the contract supplies a typed error code.
-   * @throws {SorobanIdentityError} on simulation failure unrelated to a
-   *   verification result (network errors, malformed `callerAddress`).
-   *
-   * @example
-   * ```ts
-   * const result = await credentials.verifyCredential(caller, credentialId);
-   * if (!result.valid) {
-   *   switch (result.reason) {
-   *     case 'REVOKED': handleRevoked(); break;
-   *     case 'EXPIRED': handleExpired(); break;
-   *     case 'UNKNOWN_ISSUER': handleUnknownIssuer(); break;
-   *   }
-   * }
-   * ```
    */
   async verifyCredential(
     callerAddress: string,
@@ -500,7 +536,7 @@ export class CredentialClient extends BaseClient {
     options?: CallOptions
   ): Promise<VerifyResult> {
     validateStellarAddress(callerAddress);
-    const account = await this.server.getAccount(callerAddress);
+    const account = new Account(callerAddress, "0");
     const idBytes = Buffer.from(credentialId, "hex");
     const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
 
@@ -523,6 +559,13 @@ export class CredentialClient extends BaseClient {
 
     if (isSimulationError) {
       const error: string = (result as { error: string }).error ?? "";
+      const contractErr = ContractError.extract(error, CREDENTIAL_MANAGER_ERRORS);
+      if (contractErr) {
+        if (contractErr.code === CREDENTIAL_NOT_FOUND_CODE) return { valid: false, reason: 'not_found' };
+        if (contractErr.code === CREDENTIAL_REVOKED_CODE) return { valid: false, reason: 'revoked' };
+        if (contractErr.code === CREDENTIAL_EXPIRED_CODE) return { valid: false, reason: 'expired' };
+        return { valid: false, reason: 'unknown' };
+      }
       const lowerError = error.toLowerCase();
       if (lowerError.includes('not found') || lowerError.includes('credentialnotfound')) {
         return { valid: false, reason: 'not_found' };
@@ -552,22 +595,33 @@ export class CredentialClient extends BaseClient {
   }
 
   /**
+   * Verify multiple credentials in a batch with partial success handling.
+   * Up to 50 credentials can be verified in a single call.
+   */
+  async verifyCredentialBatch(
+    callerAddress: string,
+    credentialIds: string[],
+    options?: CallOptions & { concurrency?: number }
+  ): Promise<Array<{ id: string } & VerifyResult>> {
+    if (!Array.isArray(credentialIds)) {
+      throw new SorobanIdentityError("credentialIds must be an array", "INVALID_INPUT");
+    }
+    if (credentialIds.length > 50) {
+      throw new SorobanIdentityError("credentialIds cannot exceed 50 items", "INVALID_INPUT");
+    }
+    const concurrency = options?.concurrency ?? 5;
+    return runConcurrent(credentialIds, concurrency, async (id) => {
+      try {
+        const result = await this.verifyCredential(callerAddress, id, options);
+        return { id, ...result };
+      } catch {
+        return { id, valid: false, reason: "unknown" };
+      }
+    });
+  }
+
+  /**
    * Get all credentials issued to a subject address.
-   *
-   * Returns full credential records (resolved via {@link CredentialClient.getCredential}
-   * for each ID). Includes revoked credentials — callers can drop them by
-   * inspecting `revoked`.
-   *
-   * **Note:** This method fetches the entire list in one call and is suitable
-   * for subjects with a bounded number of credentials. For large subjects use
-   * the paginated, optionally filtered {@link CredentialClient.listCredentialsBySubject}
-   * (see issue #248).
-   *
-   * @param callerAddress  Stellar address used to build the read simulation.
-   * @param subjectAddress The address whose credentials to retrieve.
-   * @param options        Per-call overrides (currently `timeoutSeconds`).
-   * @returns Array of {@link Credential} records.
-   * @throws {SorobanIdentityError} on simulation failure.
    */
   async getCredentialsBySubject(
     callerAddress: string,
@@ -576,7 +630,7 @@ export class CredentialClient extends BaseClient {
   ): Promise<Credential[]> {
     validateStellarAddress(callerAddress);
     validateStellarAddress(subjectAddress);
-    const account = await this.server.getAccount(callerAddress);
+    const account = new Account(callerAddress, "0");
     const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
 
     const idsTx = new TransactionBuilder(account, {
@@ -617,19 +671,50 @@ export class CredentialClient extends BaseClient {
   }
 
   /**
+   * Find credentials issued to a subject that contain a specific claim key/value pair.
+   *
+   * **Performance caveat:** Claim values are not indexed on-chain. This method
+   * fetches all credentials for the subject via {@link CredentialClient.getCredentialsBySubject}
+   * and filters them client-side. For subjects with many credentials, prefer
+   * building an off-chain index using contract events (`CRED.issued`).
+   *
+   * @param callerAddress  Stellar address used to build the read simulations.
+   * @param subjectAddress The subject whose credentials to search.
+   * @param claimKey       The claim key to match (case-sensitive).
+   * @param claimValue     The expected claim value (case-sensitive).
+   * @param options        Per-call overrides (currently `timeoutSeconds`).
+   * @returns Array of {@link Credential} records where `claims[claimKey] === claimValue`.
+   * @throws {SorobanIdentityError} on simulation failure.
+   *
+   * @example
+   * ```ts
+   * // Find all KYC credentials where country=NG
+   * const results = await credentials.getCredentialsByClaimKey(
+   *   caller,
+   *   subject,
+   *   'country',
+   *   'NG'
+   * );
+   * ```
+   */
+  async getCredentialsByClaimKey(
+    callerAddress: string,
+    subjectAddress: string,
+    claimKey: string,
+    claimValue: string,
+    options?: CallOptions
+  ): Promise<Credential[]> {
+    validateStellarAddress(callerAddress);
+    validateStellarAddress(subjectAddress);
+    const all = await this.getCredentialsBySubject(callerAddress, subjectAddress, options);
+    return all.filter((cred) => {
+      const claims = cred.claims as Record<string, string>;
+      return claims[claimKey] === claimValue;
+    });
+  }
+
+  /**
    * Get a credential by ID.
-   *
-   * Read-only simulation. Use {@link CredentialClient.verifyCredential} if you
-   * want a typed verification result instead of throwing on revoked/expired
-   * records.
-   *
-   * @param callerAddress Stellar address used to build the read simulation.
-   * @param credentialId  Hex-encoded credential ID (32 bytes).
-   * @param options       Per-call overrides (currently `timeoutSeconds`).
-   * @returns The {@link Credential} record.
-   * @throws {SorobanIdentityError} with code `NOT_FOUND` when the ID was never
-   *   issued, `VALIDATION_ERROR` when the credential has been revoked, or
-   *   `CONTRACT_ERROR` on simulation failure.
    */
   async getCredential(
     callerAddress: string,
@@ -637,7 +722,7 @@ export class CredentialClient extends BaseClient {
     options?: CallOptions
   ): Promise<Credential> {
     validateStellarAddress(callerAddress);
-    const account = await this.server.getAccount(callerAddress);
+    const account = new Account(callerAddress, "0");
     const idBytes = Buffer.from(credentialId, "hex");
     const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
 
@@ -661,6 +746,17 @@ export class CredentialClient extends BaseClient {
       const error: string = (result as { error: string }).error ?? "";
       const contractErr = ContractError.extract(error, CREDENTIAL_MANAGER_ERRORS);
       if (!contractErr) {
+        const lower = error.toLowerCase();
+        if (
+          lower.includes("credentialnotfound") ||
+          lower.includes("credential not found") ||
+          lower.includes("not found")
+        ) {
+          throw new SorobanIdentityError(
+            `CredentialNotFound: credential ${credentialId} does not exist`,
+            "NOT_FOUND"
+          );
+        }
         throw new SorobanIdentityError(`Simulation failed: ${error}`, "CONTRACT_ERROR");
       }
       if (contractErr.code === CREDENTIAL_NOT_FOUND_CODE) {
@@ -680,12 +776,6 @@ export class CredentialClient extends BaseClient {
 
   /**
    * Check if an address is a registered issuer.
-   *
-   * @param callerAddress Stellar address used to build the read simulation.
-   * @param targetAddress The address to test for issuer membership.
-   * @param options       Per-call overrides (currently `timeoutSeconds`).
-   * @returns `true` if `targetAddress` is currently registered as an issuer.
-   * @throws {SorobanIdentityError} on simulation failure.
    */
   async isIssuer(
     callerAddress: string,
@@ -694,7 +784,7 @@ export class CredentialClient extends BaseClient {
   ): Promise<boolean> {
     validateStellarAddress(callerAddress);
     validateStellarAddress(targetAddress);
-    const account = await this.server.getAccount(callerAddress);
+    const account = new Account(callerAddress, "0");
     const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
 
     const tx = new TransactionBuilder(account, {
@@ -727,47 +817,7 @@ export class CredentialClient extends BaseClient {
   }
 
   /**
-   * Verify multiple credentials in parallel.
-   *
-   * Convenience wrapper around {@link CredentialClient.verifyCredential} that
-   * issues all simulations concurrently.
-   *
-   * @deprecated Use {@link CredentialClient.verifyMany} instead, which accepts
-   *   the same arguments and adds a configurable concurrency limit.
-   *
-   * @param callerAddress Stellar address used to build the read simulations.
-   * @param credentialIds Hex-encoded credential IDs (32 bytes each).
-   * @param options       Per-call overrides (applied to each underlying call).
-   * @returns Array of {@link VerifyResult} in the same order as `credentialIds`.
-   * @throws {SorobanIdentityError} if any individual simulation fails
-   *   irrecoverably (network errors); per-credential validity failures are
-   *   represented in the returned array.
-   */
-  async verifyCredentialsBatch(
-    callerAddress: string,
-    credentialIds: string[],
-    options?: CallOptions
-  ): Promise<VerifyResult[]> {
-    validateStellarAddress(callerAddress);
-    return Promise.all(
-      credentialIds.map((id) => this.verifyCredential(callerAddress, id, options))
-    );
-  }
-
-  /**
-   * Verify multiple credentials in parallel.
-   *
-   * Runs up to `concurrency` (default: `config.maxConcurrentRequests ?? 5`)
-   * simulate calls simultaneously. Results are returned in the same order as
-   * `credentialIds`.
-   *
-   * Prefer this over the older {@link CredentialClient.verifyCredentialsBatch}
-   * when you want an explicit concurrency cap for leaderboard or bulk workflows.
-   *
-   * @param callerAddress  Stellar address used to build the read simulations.
-   * @param credentialIds  Hex-encoded credential IDs (32 bytes each).
-   * @param options        Per-call overrides; `concurrency` caps parallel RPC calls.
-   * @returns Array of {@link VerifyResult} in input order.
+   * Verify multiple credentials in parallel with a configurable concurrency limit.
    */
   async verifyMany(
     callerAddress: string,
@@ -783,18 +833,20 @@ export class CredentialClient extends BaseClient {
     );
   }
 
+  /** @deprecated Use {@link verifyMany} instead. */
+  async verifyCredentialsBatch(
+    callerAddress: string,
+    credentialIds: string[],
+    options?: CallOptions
+  ): Promise<VerifyResult[]> {
+    validateStellarAddress(callerAddress);
+    return Promise.all(
+      credentialIds.map((id) => this.verifyCredential(callerAddress, id, options))
+    );
+  }
+
   /**
    * Get the total number of credentials issued to a subject.
-   *
-   * Counter is incremented on each successful issue; it is NOT decremented on
-   * revoke. Use {@link CredentialClient.listCredentialsBySubject} with `revoked`
-   * filtering if you need active counts.
-   *
-   * @param callerAddress  Stellar address used to build the read simulation.
-   * @param subjectAddress The subject whose count to retrieve.
-   * @param options        Per-call overrides (currently `timeoutSeconds`).
-   * @returns Number of credentials ever issued to `subjectAddress`.
-   * @throws {SorobanIdentityError} on simulation failure.
    */
   async getCredentialCount(
     callerAddress: string,
@@ -803,7 +855,7 @@ export class CredentialClient extends BaseClient {
   ): Promise<number> {
     validateStellarAddress(callerAddress);
     validateStellarAddress(subjectAddress);
-    const account = await this.server.getAccount(callerAddress);
+    const account = new Account(callerAddress, "0");
     const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
 
     const tx = new TransactionBuilder(account, {
@@ -837,18 +889,10 @@ export class CredentialClient extends BaseClient {
 
   /**
    * Get the list of all registered issuers.
-   *
-   * Returns the entire roster in one call. For large registries use the
-   * paginated {@link CredentialClient.listIssuers} (see issue #248).
-   *
-   * @param callerAddress Stellar address used to build the read simulation.
-   * @param options       Per-call overrides (currently `timeoutSeconds`).
-   * @returns Array of issuer Stellar addresses.
-   * @throws {SorobanIdentityError} on simulation failure.
    */
   async getIssuers(callerAddress: string, options?: CallOptions): Promise<string[]> {
     validateStellarAddress(callerAddress);
-    const account = await this.server.getAccount(callerAddress);
+    const account = new Account(callerAddress, "0");
     const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
 
     const tx = new TransactionBuilder(account, {
@@ -869,25 +913,62 @@ export class CredentialClient extends BaseClient {
       throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, "CONTRACT_ERROR");
     }
 
-    const issuers = scValToNative(
+    return scValToNative(
       (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
         .result!.retval
     ) as string[];
+  }
 
-    return issuers;
+
+  /**
+   * Return all revoked credential IDs for an issuer/subject pair.
+   *
+   * Active credentials are not included; when the pair has no revocations the
+   * contract returns an empty vector and this method resolves to `[]`.
+   */
+  async getRevocations(
+    issuerAddress: string,
+    subjectAddress: string,
+    options?: CallOptions
+  ): Promise<string[]> {
+    validateStellarAddress(issuerAddress);
+    validateStellarAddress(subjectAddress);
+    const account = await this.server.getAccount(issuerAddress);
+    const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
+
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        this.contract.call(
+          'get_revocations',
+          ...buildGetRevocationsArgs({ issuer: issuerAddress, subject: subjectAddress })
+        )
+      )
+      .setTimeout(timeout)
+      .build();
+
+    const result = await retryWithBackoff(() => this.server.simulateTransaction(tx));
+    if (SorobanRpc.Api.isSimulationError(result)) {
+      const errMsg = result.error ?? '';
+      const contractErr = ContractError.extract(errMsg, CREDENTIAL_MANAGER_ERRORS);
+      if (contractErr) throw contractErr;
+      throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, 'CONTRACT_ERROR');
+    }
+
+    const ids = scValToNative(
+      (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
+    ) as Uint8Array[];
+    return (ids ?? []).map((raw) => Buffer.from(raw).toString('hex'));
   }
 
   /**
    * Get storage usage statistics for the credential manager.
-   *
-   * @param callerAddress Stellar address used to build the read simulation.
-   * @param options       Per-call overrides (currently `timeoutSeconds`).
-   * @returns Current {@link CredentialStorageStats}.
-   * @throws {SorobanIdentityError} on simulation failure.
    */
   async getStorageStats(callerAddress: string, options?: CallOptions): Promise<CredentialStorageStats> {
     validateStellarAddress(callerAddress);
-    const account = await this.server.getAccount(callerAddress);
+    const account = new Account(callerAddress, "0");
     const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
 
     const tx = new TransactionBuilder(account, {
@@ -914,42 +995,7 @@ export class CredentialClient extends BaseClient {
   }
 
   /**
-   * Cursor-paginated, optionally type-filtered variant of
-   * {@link CredentialClient.getCredentialsBySubject}.
-   *
-   * Combines [issue #248](https://github.com/El-Chapo-Npm/Soroban-Identity/issues/248)
-   * (pagination) and [issue #251](https://github.com/El-Chapo-Npm/Soroban-Identity/issues/251)
-   * (type filter). Each call returns one page of credential IDs;
-   * `options.credentialType` filters to a single
-   * {@link CredentialType}, and `nextCursor` is `null` once the iterator is exhausted.
-   *
-   * Filtering is applied AFTER the cursor advances, so a page may return fewer
-   * items than `limit` (or zero) without implying the end of the list. Always
-   * advance while `nextCursor !== null`, not on `items.length`.
-   *
-   * Unlike `getCredentialsBySubject`, this method returns IDs only — fetch the
-   * full credentials with {@link CredentialClient.getCredential} as needed.
-   *
-   * @param callerAddress   Stellar address used to build the read-only simulation.
-   * @param subjectAddress  The subject whose credential IDs to retrieve.
-   * @param options         Pagination + filter + per-call overrides.
-   * @returns Page of credential IDs (hex-encoded) with the next resume cursor.
-   * @throws {SorobanIdentityError} on simulation failure.
-   *
-   * @example
-   * ```ts
-   * let cursor: number | undefined;
-   * const ids: string[] = [];
-   * do {
-   *   const page = await credentials.listCredentialsBySubject(caller, subject, {
-   *     cursor,
-   *     limit: 50,
-   *     credentialType: 'Kyc',
-   *   });
-   *   ids.push(...page.items);
-   *   cursor = page.nextCursor ?? undefined;
-   * } while (cursor !== undefined);
-   * ```
+   * Cursor-paginated, optionally type-filtered credential IDs for a subject.
    */
   async listCredentialsBySubject(
     callerAddress: string,
@@ -958,7 +1004,7 @@ export class CredentialClient extends BaseClient {
   ): Promise<Page<string>> {
     validateStellarAddress(callerAddress);
     validateStellarAddress(subjectAddress);
-    const account = await this.server.getAccount(callerAddress);
+    const account = new Account(callerAddress, "0");
     const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
     const cursorArg = options?.cursor === undefined
       ? nativeToScVal(null, { type: 'option' })
@@ -1008,21 +1054,14 @@ export class CredentialClient extends BaseClient {
   }
 
   /**
-   * Cursor-paginated variant of {@link CredentialClient.getIssuers}.
-   *
-   * See [issue #248](https://github.com/El-Chapo-Npm/Soroban-Identity/issues/248).
-   *
-   * @param callerAddress  Stellar address used to build the read-only simulation.
-   * @param options        Pagination + per-call overrides.
-   * @returns Page of issuer addresses with the next resume cursor.
-   * @throws {SorobanIdentityError} on simulation failure.
+   * Cursor-paginated list of registered issuers.
    */
   async listIssuers(
     callerAddress: string,
     options?: PaginationOptions
   ): Promise<Page<string>> {
     validateStellarAddress(callerAddress);
-    const account = await this.server.getAccount(callerAddress);
+    const account = new Account(callerAddress, "0");
     const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
     const cursorArg = options?.cursor === undefined
       ? nativeToScVal(null, { type: 'option' })
@@ -1063,26 +1102,6 @@ export class CredentialClient extends BaseClient {
 
   /**
    * Get all credentials issued by an issuer address.
-   *
-   * Returns full credential records resolved via
-   * {@link CredentialClient.getCredential} for each ID from the issuer index.
-   * Includes revoked credentials — callers can drop them by inspecting
-   * `revoked`.
-   *
-   * **Note:** For large issuers use the paginated
-   * {@link CredentialClient.listCredentialsByIssuer}.
-   *
-   * @param callerAddress  Stellar address used to build the read simulation.
-   * @param issuerAddress  The issuer address whose credentials to retrieve.
-   * @param options        Per-call overrides (currently `timeoutSeconds`).
-   * @returns Array of {@link Credential} records issued by `issuerAddress`.
-   * @throws {SorobanIdentityError} on simulation failure.
-   *
-   * @example
-   * ```ts
-   * const issued = await credentials.getCredentialsByIssuer(caller, issuerAddress);
-   * const active = issued.filter(c => !c.revoked);
-   * ```
    */
   async getCredentialsByIssuer(
     callerAddress: string,
@@ -1091,7 +1110,7 @@ export class CredentialClient extends BaseClient {
   ): Promise<Credential[]> {
     validateStellarAddress(callerAddress);
     validateStellarAddress(issuerAddress);
-    const account = await this.server.getAccount(callerAddress);
+    const account = new Account(callerAddress, "0");
     const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
 
     const idsTx = new TransactionBuilder(account, {
@@ -1131,30 +1150,7 @@ export class CredentialClient extends BaseClient {
   }
 
   /**
-   * Cursor-paginated variant of {@link CredentialClient.getCredentialsByIssuer}.
-   *
-   * Returns credential IDs only. Use {@link CredentialClient.getCredential} to
-   * resolve full records as needed.
-   *
-   * @param callerAddress  Stellar address used to build the read-only simulation.
-   * @param issuerAddress  The issuer address whose credential IDs to retrieve.
-   * @param options        Pagination + per-call overrides.
-   * @returns Page of credential IDs (hex-encoded) with the next resume cursor.
-   * @throws {SorobanIdentityError} on simulation failure.
-   *
-   * @example
-   * ```ts
-   * let cursor: number | undefined;
-   * const ids: string[] = [];
-   * do {
-   *   const page = await credentials.listCredentialsByIssuer(caller, issuerAddress, {
-   *     cursor,
-   *     limit: 50,
-   *   });
-   *   ids.push(...page.items);
-   *   cursor = page.nextCursor ?? undefined;
-   * } while (cursor !== undefined);
-   * ```
+   * Cursor-paginated credential IDs issued by an issuer.
    */
   async listCredentialsByIssuer(
     callerAddress: string,
@@ -1163,7 +1159,7 @@ export class CredentialClient extends BaseClient {
   ): Promise<Page<string>> {
     validateStellarAddress(callerAddress);
     validateStellarAddress(issuerAddress);
-    const account = await this.server.getAccount(callerAddress);
+    const account = new Account(callerAddress, "0");
     const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
     const cursorArg = options?.cursor === undefined
       ? nativeToScVal(null, { type: 'option' })
@@ -1206,25 +1202,6 @@ export class CredentialClient extends BaseClient {
 
   /**
    * Issue multiple credentials in controlled-concurrency chunks.
-   *
-   * Items are processed in batches of `opts.concurrency` (default: `5`).
-   * Each chunk is dispatched in parallel and fully awaited before the next
-   * chunk starts. A failure in one item does not abort the rest of the batch.
-   *
-   * @param items  Array of credential inputs to issue.
-   * @param opts   Optional batch configuration — primarily `concurrency`.
-   * @returns `{ succeeded, failed }` where `succeeded` contains successful
-   *   responses and `failed` contains per-item errors for any that were rejected.
-   *
-   * @example
-   * ```ts
-   * const { succeeded, failed } = await credentials.issueCredentialBatch(inputs, {
-   *   concurrency: 5,
-   * });
-   * if (failed.length > 0) {
-   *   console.warn(`${failed.length} credentials failed to issue`);
-   * }
-   * ```
    */
   async issueCredentialBatch(items: CredentialInput[], opts?: BatchOptions): Promise<BatchResult> {
     const concurrency = opts?.concurrency ?? 5;
@@ -1270,14 +1247,6 @@ export class CredentialClient extends BaseClient {
 
   /**
    * Liveness probe — calls the on-chain `ping()` function.
-   *
-   * Returns the contract's `CONTRACT_VERSION` constant. Throws if the contract
-   * is not deployed or not responding.
-   *
-   * @param options Per-call overrides (currently `timeoutSeconds`).
-   * @returns The contract version number (currently `1`).
-   * @throws {SorobanIdentityError} with code `CONTRACT_ERROR` if the contract
-   *   does not respond.
    */
   async ping(options?: CallOptions): Promise<number> {
     const account = new Account(PROBE_ADDRESS, "0");
@@ -1299,5 +1268,48 @@ export class CredentialClient extends BaseClient {
     return scValToNative(
       (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
     ) as number;
+  }
+
+  /**
+   * Returns all revoked credential IDs for the given issuer.
+   *
+   * Closes #553: because on-chain `verify_credential` results must not be
+   * cached indefinitely, consumers can call this method periodically (or
+   * subscribe to `credential_revoked` events via {@link SorobanEventListener})
+   * to detect newly-revoked credentials and invalidate local caches.
+   *
+   * The list is derived by iterating the issuer's on-chain credential index
+   * and filtering for entries where `revoked === true`. For large issuers
+   * use the paginated form via {@link CredentialClient.listIssuerCredentials}
+   * and filter client-side, or subscribe to the `credential_revoked` event
+   * stream for push-based invalidation.
+   *
+   * @param callerAddress  Any valid Stellar address (used as the fee-payer account).
+   * @param issuerAddress  The issuer whose revocation list to fetch.
+   * @param options        Per-call overrides (currently `timeoutSeconds`).
+   * @returns Array of hex-encoded 32-byte credential IDs that have been revoked.
+   *
+   * @example
+   * ```ts
+   * // closes #553 — re-verify or invalidate any locally-cached result for these IDs
+   * const revoked = await credentials.getRevocationList(caller, issuerAddress);
+   * for (const id of revoked) {
+   *   cache.invalidate(id);
+   * }
+   * ```
+   */
+  async getRevocationList(
+    callerAddress: string,
+    issuerAddress: string,
+    options?: CallOptions
+  ): Promise<string[]> {
+    validateStellarAddress(issuerAddress);
+    // Fetch all credentials for this issuer and return the revoked IDs.
+    // Closes #553: consumers must re-verify or subscribe to credential_revoked
+    // events rather than cache verify_credential results indefinitely.
+    const allCredentials = await this.getCredentialsByIssuer(callerAddress, issuerAddress, options);
+    return allCredentials
+      .filter((cred) => cred.revoked)
+      .map((cred) => cred.id);
   }
 }
