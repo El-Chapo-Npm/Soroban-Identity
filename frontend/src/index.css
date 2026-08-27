@@ -618,3 +618,34 @@ main:focus {
   white-space: nowrap;
   border: 0;
 }
+
+/* ── Issue #735: Dark mode image contrast ────────────────────────────────────
+   Images and credential badges can appear washed-out in dark mode because
+   they were designed for a light background. The brightness+contrast filter
+   slightly compensates; the :hover rule removes it so full fidelity is
+   preserved when the user deliberately inspects an image.
+   Applied only under dark-mode selectors so light mode is unaffected. */
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.light):not(.dark) img:not([data-no-dark-filter]),
+  :root:not(.light):not(.dark) .credential-badge img {
+    filter: brightness(0.9) contrast(1.1);
+    transition: filter 0.2s;
+  }
+
+  :root:not(.light):not(.dark) img:not([data-no-dark-filter]):hover,
+  :root:not(.light):not(.dark) .credential-badge img:hover {
+    filter: none;
+  }
+}
+
+html.dark img:not([data-no-dark-filter]),
+html.dark .credential-badge img {
+  filter: brightness(0.9) contrast(1.1);
+  transition: filter 0.2s;
+}
+
+html.dark img:not([data-no-dark-filter]):hover,
+html.dark .credential-badge img:hover {
+  filter: none;
+}
