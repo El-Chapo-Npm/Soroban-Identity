@@ -348,10 +348,47 @@ export default function IdentityPanel() {
       if (txStatus.status === "FAILED") {
         throw new Error("Transaction failed on-chain");
       }
-      
+
+      // Wait for metadata to be indexed after transaction confirmation
+      // Issue #665: Add small delay to ensure metadata is persisted on-chain
+      await new Promise(r => setTimeout(r, 1000));
+
       const identityClient = new IdentityClient(networkConfig);
-      const updatedDid = await identityClient.resolveDid(wallet.publicKey);
-      
+      let updatedDid;
+      let retries = 3;
+      let lastError: Error | null = null;
+
+      // Retry logic to handle state propagation delays
+      while (retries > 0) {
+        try {
+          updatedDid = await identityClient.resolveDid(wallet.publicKey);
+          // Verify metadata was actually updated by checking if it contains expected keys
+          const expectedKeys = metadataEntries
+            .map(e => e.key.trim())
+            .filter(k => k);
+          const updatedKeys = Object.keys(updatedDid.metadata || {});
+          const allKeysPresent = expectedKeys.every(key => updatedKeys.includes(key));
+
+          if (allKeysPresent || retries === 1) {
+            break;
+          }
+          retries--;
+          if (retries > 0) {
+            await new Promise(r => setTimeout(r, 500));
+          }
+        } catch (e) {
+          lastError = e as Error;
+          retries--;
+          if (retries > 0) {
+            await new Promise(r => setTimeout(r, 500));
+          }
+        }
+      }
+
+      if (!updatedDid) {
+        throw lastError || new Error("Failed to fetch updated DID");
+      }
+
       dispatch({ type: 'FETCH_SUCCESS', did: updatedDid, reputation: null, scoreHistory: [] });
       setUpdateSuccess(true);
       toast.success('DID metadata updated.');
