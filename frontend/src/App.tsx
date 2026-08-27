@@ -7,6 +7,7 @@ import WalletButton from "./components/WalletButton";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { useWallet } from "./hooks/useWallet";
 import { useCredentialExpiryCheck } from "./hooks/useCredentialExpiryCheck";
+import { useTheme } from "./context/ThemeContext";
 import {
   DEFAULT_NETWORK,
   NETWORK_CONFIGS,
@@ -22,33 +23,27 @@ export enum Tab {
   Credentials = "credentials",
 }
 
-function useDarkMode(): [boolean, () => void] {
-  const [isDark, setIsDark] = useState<boolean>(() => {
-    const stored = localStorage.getItem("dark-mode");
-    if (stored !== null) return stored === "true";
-    return window.matchMedia("(prefers-color-scheme: dark)").matches;
-  });
-
-  useEffect(() => {
-    const html = document.documentElement;
-    html.classList.toggle("dark", isDark);
-    html.classList.toggle("light", !isDark);
-    localStorage.setItem("dark-mode", String(isDark));
-  }, [isDark]);
-
-  return [isDark, () => setIsDark((d) => !d)];
-}
-
 export default function App() {
   const [tab, setTab] = useState<Tab>(Tab.Identity);
   const [activeNetwork, setActiveNetwork] = useState<NetworkName>(DEFAULT_NETWORK);
   const [verifyId, setVerifyId] = useState<string | null>(null);
   const networkConfig = NETWORK_CONFIGS[activeNetwork];
   const wallet = useWallet(networkConfig);
-  const [isDark, toggleDark] = useDarkMode();
+  const { isDark, toggleTheme } = useTheme();
   const { t, i18n } = useTranslation();
   const [isConnected, setIsConnected] = useState<boolean | null>(null);
   const [uninitializedContracts, setUninitializedContracts] = useState<string[]>([]);
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  // Close the mobile nav drawer on Escape
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [menuOpen]);
 
   // Check for verify query param on load
   useEffect(() => {
@@ -119,7 +114,19 @@ export default function App() {
       <header style={{ position: "relative" }}>
         <h1>{t("app.title")}</h1>
         <p>{t("app.subtitle")}</p>
+        <button
+          type="button"
+          className="hamburger-btn"
+          aria-label={menuOpen ? "Close menu" : "Open menu"}
+          aria-expanded={menuOpen}
+          aria-controls="mobile-header-actions"
+          onClick={() => setMenuOpen((v) => !v)}
+        >
+          <span className={`hamburger-icon${menuOpen ? " open" : ""}`} />
+        </button>
         <div
+          id="mobile-header-actions"
+          className={`header-actions${menuOpen ? " open" : ""}`}
           style={{
             position: "absolute",
             top: "1rem",
@@ -180,13 +187,18 @@ export default function App() {
           </label>
           <button
             className="theme-toggle"
-            onClick={toggleDark}
+            onClick={toggleTheme}
             aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
           >
             {isDark ? t("app.lightMode") : t("app.darkMode")}
           </button>
           <WalletButton wallet={wallet} />
         </div>
+        <div
+          className={`mobile-drawer-backdrop${menuOpen ? " open" : ""}`}
+          onClick={() => setMenuOpen(false)}
+          aria-hidden="true"
+        />
       </header>
 
       {uninitializedContracts.length > 0 && (

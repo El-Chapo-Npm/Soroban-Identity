@@ -83,7 +83,7 @@ function getCredentialStatus(credential: Credential): CredentialStatus {
 
 function getStatusBadgeClass(status: CredentialStatus): string {
   if (status === "revoked") return "badge badge-red";
-  if (status === "expired") return "badge badge-gray";
+  if (status === "expired") return "badge badge-yellow";
   return "badge badge-green";
 }
 
@@ -91,6 +91,20 @@ function getStatusLabel(status: CredentialStatus): string {
   if (status === "revoked") return "Revoked";
   if (status === "expired") return "Expired";
   return "Active";
+}
+
+function getStatusTooltip(credential: Credential, status: CredentialStatus): string {
+  if (status === "revoked") return "This credential has been revoked by the issuer and is no longer valid.";
+  if (status === "expired") return `This credential expired on ${formatTimestamp(credential.expiresAt)}.`;
+  return credential.expiresAt === 0
+    ? "This credential is valid and does not expire."
+    : `This credential is valid until ${formatTimestamp(credential.expiresAt)}.`;
+}
+
+const STATUS_REFRESH_INTERVAL_MS = 30_000;
+
+function formatCheckedAt(ts: number): string {
+  return new Date(ts).toLocaleTimeString();
 }
 
 function getStatusSortRank(credential: Credential): number {
@@ -162,22 +176,28 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
   const [checkingIssuer, setCheckingIssuer] = useState(false);
 
   const [searchAddress, setSearchAddress] = useState("");
+  const [lastCheckedAt, setLastCheckedAt] = useState<number | null>(null);
+  const [verifyCheckedAt, setVerifyCheckedAt] = useState<number | null>(null);
 
-  const handleVerify = async (credentialId?: string) => {
+  const handleVerify = async (credentialId?: string, silent = false) => {
     const id = (credentialId ?? credId).trim();
     if (!id) return;
-    setVerifying(true);
-    setVerifyState("idle");
+    if (!silent) {
+      setVerifying(true);
+      setVerifyState("idle");
+    }
     try {
       const networkConfig = getNetworkConfig();
       const credentialClient = new CredentialClient(networkConfig);
       const caller = wallet.publicKey || "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
       const result = await credentialClient.verifyCredential(caller, id);
       setVerifyState(result.valid ? "valid" : result.reason || "invalid");
+      setVerifyCheckedAt(Date.now());
     } catch {
       setVerifyState("invalid");
+      setVerifyCheckedAt(Date.now());
     } finally {
-      setVerifying(false);
+      if (!silent) setVerifying(false);
     }
   };
 
@@ -213,19 +233,16 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
     void handleVerify(verifyId);
   }, [verifyId]);
 
-  const handleSearch = async () => {
-    const addr = searchAddress.trim();
-    if (!addr) return;
-    
-    // Validate Stellar address format
-    if (!StrKey.isValidEd25519PublicKey(addr)) {
-      dispatchCredential({ 
-        type: 'FETCH_ERROR', 
-        message: 'Invalid Stellar address format. Address must start with "G" and be 56 characters long.'
-      });
-      return;
-    }
-    
+  // Auto-refresh the verification result so a revoke/expiry elsewhere is reflected here
+  useEffect(() => {
+    if (verifyState === "idle" || !credId) return;
+    const interval = setInterval(() => {
+      void handleVerify(credId, true);
+    }, STATUS_REFRESH_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [verifyState, credId]);
+
+  const fetchCredentialsForAddress = async (addr: string) => {
     dispatchCredential({ type: 'FETCH_START' });
     try {
       const networkConfig = getNetworkConfig();
@@ -233,10 +250,36 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
       const caller = wallet.publicKey || "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
       const results = await credentialClient.getCredentialsBySubject(caller, addr);
       dispatchCredential({ type: 'FETCH_SUCCESS', credentials: results, searchedAddress: addr });
+      setLastCheckedAt(Date.now());
     } catch (e: unknown) {
       dispatchCredential({ type: 'FETCH_ERROR', message: handleError(e) });
     }
   };
+
+  const handleSearch = async () => {
+    const addr = searchAddress.trim();
+    if (!addr) return;
+
+    // Validate Stellar address format
+    if (!StrKey.isValidEd25519PublicKey(addr)) {
+      dispatchCredential({
+        type: 'FETCH_ERROR',
+        message: 'Invalid Stellar address format. Address must start with "G" and be 56 characters long.'
+      });
+      return;
+    }
+
+    await fetchCredentialsForAddress(addr);
+  };
+
+  // Auto-refresh the credential list periodically so status changes (revoke/expiry) show up
+  useEffect(() => {
+    if (!searchedAddress) return;
+    const interval = setInterval(() => {
+      void fetchCredentialsForAddress(searchedAddress);
+    }, STATUS_REFRESH_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [searchedAddress]);
 
   const validateIssueForm = (): boolean => {
     const errors: Record<string, string> = {};
@@ -418,6 +461,12 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
           })}
         </div>
 
+        {lastCheckedAt && !fetching && (
+          <p style={{ color: "var(--text-muted)", fontSize: "0.75rem", marginBottom: "0.5rem" }}>
+            Last checked: {formatCheckedAt(lastCheckedAt)} (auto-refreshes every 30s)
+          </p>
+        )}
+
         {fetching ? (
           <SkeletonCard rows={3} />
         ) : fetchedCredentials !== null && fetchedCredentials.length === 0 ? (
@@ -472,6 +521,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
                   <span
                     className={getStatusBadgeClass(status)}
                     aria-label={`Credential status: ${getStatusLabel(status)}`}
+                    title={getStatusTooltip(cred, status)}
                   >
                     {getStatusLabel(status)}
                   </span>
@@ -564,6 +614,11 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
             )}
             {(verifyState === "invalid" || verifyState === "unknown" as string) && (
               <span className="badge badge-red">Invalid</span>
+            )}
+            {verifyCheckedAt && (
+              <p style={{ color: "var(--text-muted)", fontSize: "0.75rem", marginTop: "0.5rem" }}>
+                Last checked: {formatCheckedAt(verifyCheckedAt)} (auto-refreshes every 30s)
+              </p>
             )}
           </div>
         )}
