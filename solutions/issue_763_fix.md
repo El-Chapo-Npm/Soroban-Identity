@@ -1,0 +1,1 @@
+Solution proposal for [Security] Add penetration testing automation
