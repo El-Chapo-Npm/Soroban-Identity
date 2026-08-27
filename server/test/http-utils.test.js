@@ -15,7 +15,7 @@ function makeRes() {
 }
 
 // Non-JSON Content-Type on POST returns 415 UNSUPPORTED_MEDIA_TYPE
-test('POST with form content-type returns 415', () => {
+test('POST with form content-type returns 415', async () => {
   const req = makeReq('POST', 'application/x-www-form-urlencoded');
   const res = makeRes();
   const result = validateContentType(req, res);
@@ -25,7 +25,7 @@ test('POST with form content-type returns 415', () => {
 });
 
 // Missing Content-Type on POST returns 415
-test('POST with missing content-type returns 415', () => {
+test('POST with missing content-type returns 415', async () => {
   const req = makeReq('POST', undefined);
   const res = makeRes();
   const result = validateContentType(req, res);
@@ -34,7 +34,7 @@ test('POST with missing content-type returns 415', () => {
 });
 
 // Correct Content-Type on POST passes through
-test('POST with application/json passes', () => {
+test('POST with application/json passes', async () => {
   const req = makeReq('POST', 'application/json; charset=utf-8');
   const res = makeRes();
   const result = validateContentType(req, res);
@@ -43,21 +43,21 @@ test('POST with application/json passes', () => {
 });
 
 // GET is unaffected regardless of Content-Type
-test('GET is unaffected', () => {
+test('GET is unaffected', async () => {
   const req = makeReq('GET', 'text/plain');
   const res = makeRes();
   assert.equal(validateContentType(req, res), false);
 });
 
 // DELETE is unaffected
-test('DELETE is unaffected', () => {
+test('DELETE is unaffected', async () => {
   const req = makeReq('DELETE', undefined);
   const res = makeRes();
   assert.equal(validateContentType(req, res), false);
 });
 
 // PATCH with wrong content-type returns 415
-test('PATCH with wrong content-type returns 415', () => {
+test('PATCH with wrong content-type returns 415', async () => {
   const req = makeReq('PATCH', 'multipart/form-data');
   const res = makeRes();
   assert.equal(validateContentType(req, res), true);
@@ -139,81 +139,81 @@ function makeAuthRes() {
 
 const authConfig = { adminApiKey: 'super-secret-key-abc123' };
 
-test('requireAuth returns true for correct API key', () => {
+test('requireAuth returns true for correct API key', async () => {
   const req = makeAuthReq('super-secret-key-abc123');
   const res = makeAuthRes();
-  const result = requireAuth(req, res, authConfig);
+  const result = await requireAuth(req, res, authConfig);
   assert.equal(result, true);
   assert.equal(res._status, null, 'Should not send a response on success');
 });
 
-test('requireAuth returns false and sends 401 for wrong API key', () => {
+test('requireAuth returns false and sends 401 for wrong API key', async () => {
   const req = makeAuthReq('wrong-key');
   const res = makeAuthRes();
-  const result = requireAuth(req, res, authConfig);
+  const result = await requireAuth(req, res, authConfig);
   assert.equal(result, false);
   assert.equal(res._status, 401);
   assert.match(res._body, /UNAUTHORIZED/);
 });
 
-test('requireAuth returns false and sends 401 for key that is prefix of correct key', () => {
+test('requireAuth returns false and sends 401 for key that is prefix of correct key', async () => {
   // Prefix attack — must fail even though bytes match up to the prefix length
   const req = makeAuthReq('super-secret-key-abc');
   const res = makeAuthRes();
-  const result = requireAuth(req, res, authConfig);
+  const result = await requireAuth(req, res, authConfig);
   assert.equal(result, false);
   assert.equal(res._status, 401);
 });
 
-test('requireAuth returns false and sends 401 for key that is correct key plus extra chars', () => {
+test('requireAuth returns false and sends 401 for key that is correct key plus extra chars', async () => {
   const req = makeAuthReq('super-secret-key-abc123EXTRA');
   const res = makeAuthRes();
-  const result = requireAuth(req, res, authConfig);
+  const result = await requireAuth(req, res, authConfig);
   assert.equal(result, false);
   assert.equal(res._status, 401);
 });
 
-test('requireAuth returns false and sends 401 for empty key', () => {
+test('requireAuth returns false and sends 401 for empty key', async () => {
   const req = makeAuthReq('');
   const res = makeAuthRes();
-  const result = requireAuth(req, res, authConfig);
+  const result = await requireAuth(req, res, authConfig);
   assert.equal(result, false);
   assert.equal(res._status, 401);
 });
 
-test('requireAuth returns false and sends 401 when no key is supplied', () => {
+test('requireAuth returns false and sends 401 when no key is supplied', async () => {
   const req = makeAuthReq(undefined);
   const res = makeAuthRes();
-  const result = requireAuth(req, res, authConfig);
+  const result = await requireAuth(req, res, authConfig);
   assert.equal(result, false);
   assert.equal(res._status, 401);
 });
 
-test('requireAuth returns false and sends 503 when adminApiKey is not configured', () => {
+test('requireAuth returns false and sends 503 when adminApiKey is not configured', async () => {
   const req = makeAuthReq('any-key');
   const res = makeAuthRes();
-  const result = requireAuth(req, res, {});
+  const result = await requireAuth(req, res, {});
   assert.equal(result, false);
   assert.equal(res._status, 503);
 });
 
-test('requireAuth accepts correct key supplied via Authorization Bearer header', () => {
+test('requireAuth accepts correct key supplied via Authorization Bearer header', async () => {
   const req = {
     headers: { authorization: 'Bearer super-secret-key-abc123' },
     apiKeyScopes: null,
   };
   const res = makeAuthRes();
-  const result = requireAuth(req, res, authConfig);
+  const result = await requireAuth(req, res, authConfig);
   assert.equal(result, true);
 });
 
-test('requireAuth rejects wrong key supplied via Authorization Bearer header', () => {
+test('requireAuth rejects wrong key supplied via Authorization Bearer header', async () => {
   const req = {
     headers: { authorization: 'Bearer wrong-key' },
     apiKeyScopes: null,
   };
   const res = makeAuthRes();
-  const result = requireAuth(req, res, authConfig);
+  const result = await requireAuth(req, res, authConfig);
   assert.equal(result, false);
   assert.equal(res._status, 401);
 });

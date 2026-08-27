@@ -6,73 +6,255 @@ on:
   pull_request:
     branches: [main]
   schedule:
-    # Run nightly at 2 AM UTC to catch regressions
+    # Nightly at 02:00 UTC. This is the run that actually fuzzes for an hour
+    # per contract; pull requests get a short smoke run instead.
     - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      duration_seconds:
+        description: 'Fuzzing time budget per contract, in seconds'
+        required: false
+        default: '3600'
+
+# A long scheduled run must not be cancelled by a later push, but there is no
+# point stacking smoke runs for the same branch.
+concurrency:
+  group: fuzz-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
 
 jobs:
   fuzz:
-    name: Fuzz Contracts
+    name: Fuzz ${{ matrix.contract }}
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      # Needed only by the alert step, which files an issue when a scheduled
+      # run finds a crash.
+      issues: write
+
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - fuzz_create_did
-          - fuzz_issue_credential
-          - fuzz_submit_score
-    
+        include:
+          - target: fuzz_create_did
+            contract: identity-registry
+          - target: fuzz_issue_credential
+            contract: credential-manager
+          - target: fuzz_submit_score
+            contract: reputation
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Resolve fuzzing budget
+        id: budget
+        shell: bash
+        run: |
+          # A pull request gets a smoke run so feedback stays fast; scheduled
+          # and manual runs get the full hour per contract.
+          case "${{ github.event_name }}" in
+            pull_request|push)
+              seconds=120
+              ;;
+            workflow_dispatch)
+              seconds="${{ github.event.inputs.duration_seconds || '3600' }}"
+              ;;
+            *)
+              seconds=3600
+              ;;
+          esac
+          echo "seconds=$seconds" >> "$GITHUB_OUTPUT"
+          # Allow the toolchain build and corpus merge to finish on top of the
+          # fuzzing budget itself.
+          echo "timeout_minutes=$(( seconds / 60 + 25 ))" >> "$GITHUB_OUTPUT"
+          echo "Fuzzing ${{ matrix.contract }} for ${seconds}s"
+
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
 
-      - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz
-
       - name: Cache cargo registry
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cargo/registry
           key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-registry-
 
       - name: Cache cargo index
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cargo/git
           key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-index-
+
+      - name: Cache cargo-fuzz binary
+        id: cache-cargo-fuzz
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-fuzz
+          key: ${{ runner.os }}-cargo-fuzz-bin
+
+      - name: Install cargo-fuzz
+        if: steps.cache-cargo-fuzz.outputs.cache-hit != 'true'
+        run: cargo install cargo-fuzz
 
       - name: Cache fuzz target build
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: fuzz/target
-          key: ${{ runner.os }}-fuzz-target-${{ matrix.target }}-${{ hashFiles('fuzz/Cargo.lock') }}
+          key: ${{ runner.os }}-fuzz-target-${{ matrix.target }}-${{ hashFiles('fuzz/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-fuzz-target-${{ matrix.target }}-
+
+      # Coverage compounds: a corpus carried between runs starts each night
+      # from the inputs previous nights found interesting, instead of
+      # rediscovering the shallow paths every time.
+      - name: Restore fuzzing corpus
+        uses: actions/cache@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+
+      - name: Seed the corpus
+        shell: bash
+        run: |
+          mkdir -p "fuzz/corpus/${{ matrix.target }}"
+          if [ -d "fuzz/seeds/${{ matrix.target }}" ]; then
+            # Committed seeds cover edge cases worth reaching on the first
+            # execution rather than by chance.
+            cp -n fuzz/seeds/${{ matrix.target }}/* "fuzz/corpus/${{ matrix.target }}/" 2>/dev/null || true
+          fi
+          echo "Corpus size: $(ls -1 "fuzz/corpus/${{ matrix.target }}" | wc -l) inputs"
 
       - name: Run fuzz target
+        id: fuzz
+        timeout-minutes: ${{ fromJSON(steps.budget.outputs.timeout_minutes) }}
+        shell: bash
         run: |
           cd fuzz
-          cargo +nightly fuzz run ${{ matrix.target }} -- \
-            -max_total_time=60 \
+          set -o pipefail
+          cargo +nightly fuzz run ${{ matrix.target }} \
+            corpus/${{ matrix.target }} \
+            -- \
+            -max_total_time=${{ steps.budget.outputs.seconds }} \
             -rss_limit_mb=2048 \
-            -print_final_stats=1
-        timeout-minutes: 3
+            -print_final_stats=1 \
+            2>&1 | tee fuzz-output.log
+
+      - name: Summarize run
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Fuzzing \`${{ matrix.contract }}\` (\`${{ matrix.target }}\`)"
+            echo
+            echo "- Budget: ${{ steps.budget.outputs.seconds }}s"
+            echo "- Outcome: ${{ steps.fuzz.outcome }}"
+            if [ -d "fuzz/corpus/${{ matrix.target }}" ]; then
+              echo "- Corpus: $(ls -1 fuzz/corpus/${{ matrix.target }} | wc -l) inputs"
+            fi
+            if [ -f fuzz/fuzz-output.log ]; then
+              echo
+              echo '```'
+              # The final stats line carries coverage and executions per second.
+              grep -E '^#[0-9]+\s+(DONE|INITED)|stat::' fuzz/fuzz-output.log | tail -20 || true
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: fuzz-crash-${{ matrix.target }}
-          path: fuzz/artifacts/${{ matrix.target }}/
+          path: |
+            fuzz/artifacts/${{ matrix.target }}/
+            fuzz/fuzz-output.log
           retention-days: 30
+          if-no-files-found: ignore
 
-      - name: Report results
+      # The corpus is worth keeping even when the run crashed — the inputs
+      # found before the crash still represent real coverage.
+      - name: Upload corpus
         if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-${{ matrix.target }}
+          path: fuzz/corpus/${{ matrix.target }}/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Check for crashes
+        if: always()
+        shell: bash
         run: |
-          echo "Fuzz target: ${{ matrix.target }}"
-          if [ -d "fuzz/artifacts/${{ matrix.target }}" ] && [ "$(ls -A fuzz/artifacts/${{ matrix.target }})" ]; then
-            echo "::error::Crash detected in ${{ matrix.target }}. See artifacts for reproducer."
+          crash_dir="fuzz/artifacts/${{ matrix.target }}"
+          if [ -d "$crash_dir" ] && [ -n "$(ls -A "$crash_dir" 2>/dev/null)" ]; then
+            echo "::error title=Fuzzing crash::${{ matrix.target }} found a crash in ${{ matrix.contract }}. Download the fuzz-crash-${{ matrix.target }} artifact for the reproducer."
             exit 1
-          else
-            echo "::notice::No crashes detected in ${{ matrix.target }}"
           fi
+          if [ "${{ steps.fuzz.outcome }}" != "success" ]; then
+            echo "::error title=Fuzzing failed::${{ matrix.target }} did not complete successfully."
+            exit 1
+          fi
+          echo "::notice title=Fuzzing clean::No crashes in ${{ matrix.contract }}."
+
+      # A nightly run has nobody watching it, so a crash has to come find
+      # someone. Pull request runs are visible in the checks list already.
+      - name: Open an issue for a nightly crash
+        if: failure() && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const target = '${{ matrix.target }}';
+            const contract = '${{ matrix.contract }}';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const title = `[fuzz] Crash in ${contract} (${target})`;
+
+            // Reuse an open issue for the same target rather than filing a
+            // fresh one every night until someone fixes it.
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'fuzzing',
+              per_page: 100,
+            });
+
+            const match = existing.data.find((issue) => issue.title === title);
+            const body = [
+              `Nightly fuzzing found a crash in \`${contract}\`.`,
+              '',
+              `- Target: \`${target}\``,
+              `- Run: ${runUrl}`,
+              `- Commit: ${context.sha}`,
+              '',
+              'The reproducer is attached to the run as the',
+              `\`fuzz-crash-${target}\` artifact. To reproduce locally:`,
+              '',
+              '```bash',
+              'cd fuzz',
+              `cargo +nightly fuzz run ${target} artifacts/${target}/<crash-file>`,
+              '```',
+            ].join('\n');
+
+            if (match) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: match.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['fuzzing', 'bug', 'contracts'],
+              });
+            }

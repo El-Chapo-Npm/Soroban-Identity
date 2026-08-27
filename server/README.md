@@ -372,6 +372,86 @@ X-API-Key: my-key
 
 For detailed documentation, see [API Key Scopes](../docs/api-key-scopes.md).
 
+## Request Signing
+
+An API key authenticates the caller but does not prove the request arrived
+unmodified, nor stop a captured request from being replayed. Optional
+HMAC-SHA256 request signing covers both: each signed request carries a digest
+over its method, path, timestamp, nonce and body.
+
+```http
+X-Signature:           v1=<hex hmac-sha256>
+X-Signature-Timestamp: 1700000000
+X-Signature-Nonce:     3f0a1c...
+```
+
+Disabled by default — enabling it rejects unsigned requests, so clients need
+their signing secrets first.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `REQUEST_SIGNING_ENABLED` | `false` | Master switch |
+| `REQUEST_SIGNING_ENFORCE` | `mutations` | `mutations` (writes only) or `all` |
+| `REQUEST_SIGNING_MAX_AGE_SECONDS` | `300` | Clock-skew allowance |
+
+For the canonical string, client examples and rollout steps, see
+[Request Signing](../docs/request-signing.md).
+
+## Verifiable Credentials (JSON-LD)
+
+Credentials can be served in W3C Verifiable Credentials form so any conforming
+wallet or verifier can consume them. It is opt-in, so existing clients keep the
+compact internal shape:
+
+```console
+$ curl -H 'Accept: application/ld+json' /credentials/cred-123
+$ curl '/credentials/cred-123?format=jsonld'
+```
+
+Every credential carries a `credentialStatus` entry backed by a public
+`GET /credentials/:id/status` endpoint reporting `active`, `expired` or
+`revoked`.
+
+Proofs use `DataIntegrityProof` with the `eddsa-jcs-2022` cryptosuite, which
+canonicalizes with JCS (RFC 8785) rather than requiring a JSON-LD processor.
+Credentials are signed only when `VC_PROOF_PRIVATE_KEY` is set; without it they
+are emitted unsigned rather than carrying a fabricated proof.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `VC_BASE_CONTEXT` | VC v1.1 | Set to the v2 URI to emit v2 credentials |
+| `VC_EXTRA_CONTEXTS` | — | Extra contexts, comma-separated |
+| `VC_BASE_URL` | — | Makes credential ids resolvable URLs |
+| `VC_PROOF_PRIVATE_KEY` | — | 32-byte Ed25519 seed, hex or base64 |
+| `VC_PROOF_VERIFICATION_METHOD` | `<issuer DID>#key-1` | Where the key is published |
+
+See [Verifiable Credentials (JSON-LD)](../docs/verifiable-credentials-jsonld.md).
+
+## Content Security Policy
+
+Every response carries a CSP header plus the usual companion security headers
+(`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`,
+`Permissions-Policy`, and HSTS in production). The policy uses a fresh
+per-response nonce rather than `'unsafe-inline'`, so the GraphQL playground's
+inline `<style>` and `<script>` run under a policy strict enough to be worth
+enforcing.
+
+Violation reports are collected at `POST /csp-report` — unauthenticated and
+exempt from request signing, because the browser posts them with no
+credentials — and counted as `csp_violations_total{directive="..."}`.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CSP_ENABLED` | `true` | Master switch |
+| `CSP_REPORT_ONLY` | `true` | Report violations without blocking them |
+| `CSP_REPORT_URI` | `/csp-report` | Where the browser posts reports |
+| `CSP_SCRIPT_SRC` etc. | — | Extra trusted origins, comma-separated |
+
+Defaults to report-only: an enforced policy that is even slightly too tight
+breaks the page for everyone at once. See
+[Content Security Policy](../docs/content-security-policy.md) for the rollout
+and the frontend's half of the setup.
+
 ## Audit Log Naming & Rotation
 
 The system generates a new, separate audit log file for each day. The log files are stored in Newline Delimited JSON (NDJSON) format.

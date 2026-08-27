@@ -73,6 +73,11 @@ export class ApiKeyService {
     const rawSecret = crypto.randomBytes(32).toString('hex');
     const rawKey = `sk_${rawSecret}`;
     const hashedKey = hashApiKey(rawKey);
+    // The signing secret is stored in the clear, unlike the API key itself:
+    // verifying an HMAC requires recomputing it, which a hash cannot do. It is
+    // a distinct value from the API key so that leaking one does not surrender
+    // the other, and it is returned to the caller only at issue and rotation.
+    const signingSecret = `ss_${crypto.randomBytes(32).toString('hex')}`;
     const now = Date.now();
     const expiresAt = expiresInDays ? now + expiresInDays * 24 * 60 * 60 * 1000 : null;
 
@@ -82,6 +87,7 @@ export class ApiKeyService {
       owner,
       keyPrefix: rawKey.slice(0, 7) + '...',
       hashedKey,
+      signingSecret,
       scopes: Array.isArray(scopes) ? scopes : [scopes],
       tier: tier || 'free',
       status: 'active',
@@ -96,6 +102,7 @@ export class ApiKeyService {
 
     return {
       apiKey: rawKey,
+      signingSecret,
       id,
       name,
       owner,
@@ -148,8 +155,11 @@ export class ApiKeyService {
    */
   async listKeys() {
     if (!this.loaded) await this.load();
-    return Array.from(this.keys.values()).map(({ hashedKey, ...rest }) => ({
+    return Array.from(this.keys.values()).map(({ hashedKey, signingSecret, ...rest }) => ({
       ...rest,
+      // Presence is useful to an operator; the value never leaves the server
+      // after the one response that issued or rotated it.
+      hasSigningSecret: Boolean(signingSecret),
       createdAt: new Date(rest.createdAt).toISOString(),
       expiresAt: rest.expiresAt ? new Date(rest.expiresAt).toISOString() : null,
       lastUsedAt: rest.lastUsedAt ? new Date(rest.lastUsedAt).toISOString() : null,
@@ -163,13 +173,31 @@ export class ApiKeyService {
     if (!this.loaded) await this.load();
     const record = this.keys.get(id);
     if (!record) return null;
-    const { hashedKey, ...rest } = record;
+    const { hashedKey, signingSecret, ...rest } = record;
     return {
       ...rest,
+      hasSigningSecret: Boolean(signingSecret),
       createdAt: new Date(rest.createdAt).toISOString(),
       expiresAt: rest.expiresAt ? new Date(rest.expiresAt).toISOString() : null,
       lastUsedAt: rest.lastUsedAt ? new Date(rest.lastUsedAt).toISOString() : null,
     };
+  }
+
+  /**
+   * Look up the signing secret for a key.
+   *
+   * Deliberately separate from `getKey`, which is what the admin endpoints
+   * serialize into responses — the secret must never ride along with metadata
+   * by accident.
+   *
+   * @param {string} id
+   * @returns {Promise<string|null>}
+   */
+  async getSigningSecret(id) {
+    if (!this.loaded) await this.load();
+    const record = this.keys.get(id);
+    if (!record || record.status !== 'active') return null;
+    return record.signingSecret ?? null;
   }
 
   /**
@@ -215,9 +243,14 @@ export class ApiKeyService {
     const rawSecret = crypto.randomBytes(32).toString('hex');
     const newRawKey = `sk_${rawSecret}`;
     const newHashedKey = hashApiKey(newRawKey);
+    // Rotation replaces the signing secret too. Leaving the old one in place
+    // would mean a rotation prompted by a suspected leak still honoured
+    // signatures made with the compromised material.
+    const newSigningSecret = `ss_${crypto.randomBytes(32).toString('hex')}`;
     const now = Date.now();
     const expiresAt = expiresInDays ? now + expiresInDays * 24 * 60 * 60 * 1000 : record.expiresAt;
 
+    record.signingSecret = newSigningSecret;
     record.hashedKey = newHashedKey;
     record.keyPrefix = newRawKey.slice(0, 7) + '...';
     record.status = 'active';
@@ -229,6 +262,7 @@ export class ApiKeyService {
 
     return {
       apiKey: newRawKey,
+      signingSecret: newSigningSecret,
       id: record.id,
       name: record.name,
       owner: record.owner,

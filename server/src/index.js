@@ -51,6 +51,19 @@ const expiryJob = new ExpiryNotificationJob(config, soroban);
 
 if (process.env.DISABLE_EXPIRY_JOB !== 'true') expiryJob.start();
 
+const apiKeyService = new ApiKeyService(config);
+
+// The hub is created before the app so credential and DID changes can be
+// pushed to subscribers from the same handlers that fire webhooks.
+const realtime = config.wsEnabled
+  ? new WebSocketHub({
+      config,
+      soroban,
+      apiKeyService,
+      heartbeatIntervalMs: config.wsHeartbeatIntervalMs,
+    })
+  : null;
+
 let accessLogSink = null;
 if (config.accessLogEnabled && config.accessLogPath) {
   accessLogSink = new RotatingFileSink({
@@ -66,7 +79,24 @@ if (config.accessLogEnabled && config.accessLogPath) {
   });
 }
 
-const server = http.createServer(createApp({ config, soroban, metrics, metricsAggregator, accessLogSink, webhookService }));
+const server = http.createServer(
+  createApp({
+    config,
+    soroban,
+    metrics,
+    metricsAggregator,
+    didCache,
+    webhookService,
+    apiKeyService,
+    accessLogSink,
+    realtime,
+  }),
+);
+
+if (realtime) {
+  realtime.attach(server);
+  logger.info({ path: config.wsPath }, 'WebSocket endpoint enabled');
+}
 
 
 const connections = new Set();

@@ -1,51 +1,52 @@
 /// <reference types="vitest" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { buildSecurityHeaders, emitSecurityHeaders } from "./csp.config";
 
-const ALLOWED_RPC_ORIGINS = [
-  "https://soroban-testnet.stellar.org",
-  "https://soroban-mainnet.stellar.org",
-  "https://soroban-testnet-backup.stellar.org",
-  "https://soroban-mainnet-backup.stellar.org",
-].join(" ");
+// The production policy ships with the bundle as a `_headers` file (Netlify /
+// Cloudflare Pages format) — see `emitSecurityHeaders`. Hosts using a
+// different mechanism (Vercel's `vercel.json`, an nginx `add_header` block)
+// should carry the same policy; see `docs/content-security-policy.md`.
 
-// unsafe-inline / unsafe-eval are required by Vite's dev and preview servers.
-// For production hosting platforms (Vercel, Netlify, Caddy, nginx) replace
-// these with a nonce-based policy and set headers at the edge instead.
-const CSP = [
-  "default-src 'self'",
-  "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
-  "style-src 'self' 'unsafe-inline'",
-  `connect-src 'self' ${ALLOWED_RPC_ORIGINS} wss://relay.walletconnect.com`,
-  "img-src 'self' data:",
-  "font-src 'self'",
-  "object-src 'none'",
-  "base-uri 'self'",
-  "frame-ancestors 'none'",
-].join("; ");
+export default defineConfig(({ mode }) => {
+  const isDev = mode !== "production";
 
-const SECURITY_HEADERS = {
-  "Content-Security-Policy": CSP,
-  "X-Content-Type-Options": "nosniff",
-  "X-Frame-Options": "DENY",
-  "Referrer-Policy": "strict-origin-when-cross-origin",
-  "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
-};
+  // Point violation reports at the API server's collector. Left unset, the
+  // policy simply carries no report-uri.
+  const reportUri = process.env.VITE_CSP_REPORT_URI;
 
-export default defineConfig({
-  plugins: [react()],
-  define: {
-    global: "globalThis",
-  },
-  server: {
-    headers: SECURITY_HEADERS,
-  },
-  preview: {
-    headers: SECURITY_HEADERS,
-  },
-  test: {
-    environment: "jsdom",
-    globals: true,
-    setupFiles: ["./src/setupTests.ts"],
-  },
+  // Report-only unless explicitly switched to enforcing, so a policy is
+  // validated against real traffic before it can break the app.
+  const reportOnly = process.env.VITE_CSP_REPORT_ONLY !== "false";
+
+  const devHeaders = buildSecurityHeaders({
+    mode: "development",
+    reportUri,
+    reportOnly,
+  });
+
+  return {
+    plugins: [react(), emitSecurityHeaders({ reportUri, reportOnly })],
+    define: {
+      global: "globalThis",
+    },
+    server: {
+      headers: devHeaders,
+    },
+    preview: {
+      // Preview serves the production bundle, so it gets the production
+      // policy — this is the last chance to catch a policy that breaks the
+      // built app before it reaches a real host.
+      headers: buildSecurityHeaders({
+        mode: isDev ? "development" : "production",
+        reportUri,
+        reportOnly,
+      }),
+    },
+    test: {
+      environment: "jsdom",
+      globals: true,
+      setupFiles: ["./src/setupTests.ts"],
+    },
+  };
 });

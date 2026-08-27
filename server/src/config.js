@@ -178,6 +178,46 @@ export function loadConfig(env = process.env) {
     ),
     corsMaxAge: parseInteger(env.CORS_MAX_AGE, DEFAULT_CORS_MAX_AGE, true),
     maxBodyBytes: parseInteger(env.MAX_BODY_BYTES, 64 * 1024),
+    // HMAC request signing (#752). Off by default: turning it on is a
+    // breaking change for existing clients, which must be given their signing
+    // secrets before their requests start being rejected.
+    requestSigningEnabled: parseBoolean(env.REQUEST_SIGNING_ENABLED, false),
+    // "mutations" signs POST/PUT/PATCH/DELETE only, which is where replay
+    // actually causes damage; "all" additionally covers reads.
+    requestSigningEnforce:
+      (env.REQUEST_SIGNING_ENFORCE ?? "mutations").toLowerCase() === "all" ? "all" : "mutations",
+    requestSigningMaxAgeSeconds: parseInteger(env.REQUEST_SIGNING_MAX_AGE_SECONDS, 300),
+    // Content Security Policy (#754). Report-only by default: an enforced
+    // policy that is even slightly too tight breaks the page, so a deployment
+    // should watch reports first and switch to enforcing once they are clean.
+    cspEnabled: parseBoolean(env.CSP_ENABLED, true),
+    cspReportOnly: parseBoolean(env.CSP_REPORT_ONLY, true),
+    cspReportUri: env.CSP_REPORT_URI ?? "/csp-report",
+    // Extra trusted sources merged into the baseline directives. Each is a
+    // comma-separated list of origins, e.g. "https://cdn.example.org".
+    cspScriptSrc: parseList(env.CSP_SCRIPT_SRC, []),
+    cspStyleSrc: parseList(env.CSP_STYLE_SRC, []),
+    cspConnectSrc: parseList(env.CSP_CONNECT_SRC, []),
+    cspImgSrc: parseList(env.CSP_IMG_SRC, []),
+    cspFontSrc: parseList(env.CSP_FONT_SRC, []),
+    cspFormAction: parseList(env.CSP_FORM_ACTION, []),
+    cspFrameAncestors: parseList(env.CSP_FRAME_ANCESTORS, []),
+    // W3C Verifiable Credentials JSON-LD (#753).
+    // Base context: the v1.1 data model by default; set to the v2 URI to emit
+    // v2 credentials (which renames issuanceDate/expirationDate).
+    vcBaseContext:
+      env.VC_BASE_CONTEXT ?? "https://www.w3.org/2018/credentials/v1",
+    // Additional contexts appended to every credential, for a deployment with
+    // its own vocabulary.
+    vcExtraContexts: parseList(env.VC_EXTRA_CONTEXTS, []),
+    // Public base URL. When set, credential and status ids are resolvable
+    // https URLs instead of urn: identifiers.
+    vcBaseUrl: env.VC_BASE_URL ?? "",
+    // 32-byte Ed25519 seed (hex or base64) used to sign credentials. Without
+    // it credentials are emitted unsigned rather than carrying a fake proof.
+    vcProofPrivateKey: env.VC_PROOF_PRIVATE_KEY ?? "",
+    // Defaults to "<issuer DID>#key-1" when unset.
+    vcProofVerificationMethod: env.VC_PROOF_VERIFICATION_METHOD ?? "",
     dataDir: env.DATA_DIR ? path.resolve(env.DATA_DIR) : DEFAULT_DATA_DIR,
     auditLogPath: env.AUDIT_LOG_PATH
       ? path.resolve(env.AUDIT_LOG_PATH)
