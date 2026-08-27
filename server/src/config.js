@@ -178,6 +178,15 @@ export function loadConfig(env = process.env) {
     ),
     corsMaxAge: parseInteger(env.CORS_MAX_AGE, DEFAULT_CORS_MAX_AGE, true),
     maxBodyBytes: parseInteger(env.MAX_BODY_BYTES, 64 * 1024),
+    // HMAC request signing (#752). Off by default: turning it on is a
+    // breaking change for existing clients, which must be given their signing
+    // secrets before their requests start being rejected.
+    requestSigningEnabled: parseBoolean(env.REQUEST_SIGNING_ENABLED, false),
+    // "mutations" signs POST/PUT/PATCH/DELETE only, which is where replay
+    // actually causes damage; "all" additionally covers reads.
+    requestSigningEnforce:
+      (env.REQUEST_SIGNING_ENFORCE ?? "mutations").toLowerCase() === "all" ? "all" : "mutations",
+    requestSigningMaxAgeSeconds: parseInteger(env.REQUEST_SIGNING_MAX_AGE_SECONDS, 300),
     dataDir: env.DATA_DIR ? path.resolve(env.DATA_DIR) : DEFAULT_DATA_DIR,
     auditLogPath: env.AUDIT_LOG_PATH
       ? path.resolve(env.AUDIT_LOG_PATH)

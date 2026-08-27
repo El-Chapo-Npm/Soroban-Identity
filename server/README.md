@@ -398,6 +398,31 @@ X-API-Key: my-key
 
 For detailed documentation, see [API Key Scopes](../docs/api-key-scopes.md).
 
+## Request Signing
+
+An API key authenticates the caller but does not prove the request arrived
+unmodified, nor stop a captured request from being replayed. Optional
+HMAC-SHA256 request signing covers both: each signed request carries a digest
+over its method, path, timestamp, nonce and body.
+
+```http
+X-Signature:           v1=<hex hmac-sha256>
+X-Signature-Timestamp: 1700000000
+X-Signature-Nonce:     3f0a1c...
+```
+
+Disabled by default — enabling it rejects unsigned requests, so clients need
+their signing secrets first.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `REQUEST_SIGNING_ENABLED` | `false` | Master switch |
+| `REQUEST_SIGNING_ENFORCE` | `mutations` | `mutations` (writes only) or `all` |
+| `REQUEST_SIGNING_MAX_AGE_SECONDS` | `300` | Clock-skew allowance |
+
+For the canonical string, client examples and rollout steps, see
+[Request Signing](../docs/request-signing.md).
+
 ## Audit Log Naming & Rotation
 
 The system generates a new, separate audit log file for each day. The log files are stored in Newline Delimited JSON (NDJSON) format.

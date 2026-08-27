@@ -26,6 +26,7 @@ import {
 import {
   notFound,
   readJson,
+  readRawBody,
   requireAdmin,
   requireAuth,
   sendJson,
@@ -33,6 +34,7 @@ import {
   setCorsHeaders,
   validateContentType,
 } from "./http-utils.js";
+import { KEY_ID_HEADER, NonceStore, verifySignedRequest } from "./request-signing.js";
 import { schemas, validateRequest } from "./validation.js";
 import { routeLabel } from "./route-label.js";
 import { requestContextStore } from "./request-context.js";
@@ -64,6 +66,7 @@ export function createApp({
   apiKeyService = new ApiKeyService(config),
   rateLimiter = new TieredRateLimiter(),
   realtime = null,
+  nonceStore = new NonceStore({ ttlSeconds: config.requestSigningMaxAgeSeconds }),
 }) {
   // Expose the key service on config so http-utils.requireAuth can validate
   // issued API keys instead of falling back to the single admin key.
@@ -146,6 +149,59 @@ export function createApp({
 
     // Rate limiting check (exempt /info, /health, /metrics)
     const isExempt = ["/info", "/health", "/ready", "/live", "/metrics"].includes(url.pathname);
+
+    // HMAC request signing (#752). Verified before routing so no handler can
+    // act on a request whose body was tampered with or replayed. Operational
+    // endpoints are exempt for the same reason they skip rate limiting: a
+    // probe has to work without client credentials.
+    if (config.requestSigningEnabled && !isExempt) {
+      const mustBeSigned =
+        config.requestSigningEnforce === "all" ||
+        !["GET", "HEAD", "OPTIONS"].includes(req.method);
+
+      if (mustBeSigned) {
+        // Buffered here and memoised on the request; the route handler's
+        // readJson call reuses these exact bytes.
+        const { tooLarge, buffer } = await readRawBody(req, config);
+        if (tooLarge) {
+          return sendJson(res, 413, {
+            code: "PAYLOAD_TOO_LARGE",
+            message: "Request body exceeds the size limit.",
+          });
+        }
+
+        // An explicit key id lets a caller sign with a key it is not also
+        // authenticating with; otherwise the authenticated key supplies it.
+        const signingKeyId = req.headers[KEY_ID_HEADER] ?? req.apiKeyId ?? null;
+        const signingSecret = signingKeyId
+          ? await apiKeyService.getSigningSecret(signingKeyId)
+          : null;
+
+        const verdict = verifySignedRequest({
+          headers: req.headers,
+          method: req.method,
+          path: req.url,
+          body: buffer,
+          secret: signingSecret,
+          nonceStore,
+          maxAgeSeconds: config.requestSigningMaxAgeSeconds,
+          scope: signingKeyId ?? "",
+        });
+
+        if (!verdict.ok) {
+          logger.warn(
+            { code: verdict.code, keyId: signingKeyId, route: routeLabel(pathname) },
+            "Rejected request signature",
+          );
+          return sendJson(res, verdict.status, {
+            error: "invalid_signature",
+            code: verdict.code,
+            message: verdict.message,
+          });
+        }
+      }
+    }
+
     if (!isExempt) {
       const rateResult = rateLimiter.consume(req);
       res.setHeader("X-RateLimit-Tier", rateResult.tier);
