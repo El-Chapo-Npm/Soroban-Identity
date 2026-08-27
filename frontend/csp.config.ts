@@ -88,9 +88,7 @@ export function buildFrontendCsp(options: CspOptions): string {
     "frame-ancestors": ["'none'"],
   };
 
-  const parts = Object.entries(directives).map(
-    ([name, sources]) => `${name} ${sources.join(" ")}`
-  );
+  const parts = Object.entries(directives).map(([name, sources]) => `${name} ${sources.join(" ")}`);
 
   if (!isDev) {
     parts.push("upgrade-insecure-requests");
@@ -143,13 +141,11 @@ export function buildSecurityHeaders(
  * ships with the bundle instead of living in a dashboard someone has to
  * remember to update.
  */
-export function renderHeadersFile(
-  options: CspOptions & { reportOnly?: boolean }
-): string {
+export function renderHeadersFile(options: CspOptions & { reportOnly?: boolean }): string {
   const headers = buildSecurityHeaders(options);
   const lines = Object.entries(headers).map(([name, value]) => `  ${name}: ${value}`);
 
-  return `/*\n${lines.join("\n")}\n`;
+  return `/*\n${lines.join("\n")}\n\n/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n\n/*.{js,css,woff2,wasm,png,jpg,jpeg,gif,svg,webp,ico}\n  Cache-Control: public, max-age=31536000, immutable\n\n/\n  Cache-Control: public, max-age=0, must-revalidate\n`;
 }
 
 /** Minimal shape of the Rollup plugin context this plugin relies on. */
@@ -165,10 +161,7 @@ interface EmitFileContext {
  * exists if the build emits it. Keeping it here rather than in a hosting
  * dashboard means the policy is versioned with the code that depends on it.
  */
-export function emitSecurityHeaders(options: {
-  reportUri?: string;
-  reportOnly?: boolean;
-}) {
+export function emitSecurityHeaders(options: { reportUri?: string; reportOnly?: boolean }) {
   return {
     name: "emit-security-headers",
     apply: "build" as const,
