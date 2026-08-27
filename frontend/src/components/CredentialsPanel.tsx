@@ -9,6 +9,7 @@ import FormField from "./FormField";
 import { formatTimestamp } from "../utils/formatDate";
 import { handleError } from "../utils/handleError";
 import { useWalletContext } from "../context/WalletContext";
+import { useToast } from "../context/ToastContext";
 
 type VerifyState =
   | "idle"
@@ -210,6 +211,7 @@ function credentialReducer(_state: CredentialState, action: CredentialAction): C
 
 export default function CredentialsPanel({ verifyId }: { verifyId?: string | null }) {
   const wallet = useWalletContext();
+  const toast = useToast();
   const [credentialState, dispatchCredential] = useReducer(credentialReducer, { status: 'idle' });
 
   const fetchedCredentials = credentialState.status === 'success' ? credentialState.credentials : null;
@@ -235,6 +237,37 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
 
   const [searchAddress, setSearchAddress] = useState("");
 
+  // ── Pagination ──────────────────────────────────────────────────────────
+  const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
+  const readIntParam = (name: string, fallback: number): number => {
+    const raw = new URLSearchParams(window.location.search).get(name);
+    const parsed = raw ? parseInt(raw, 10) : NaN;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  };
+  const [page, setPage] = useState(() => readIntParam("page", 1));
+  const [pageSize, setPageSize] = useState(() => {
+    const fromUrl = readIntParam("pageSize", 10);
+    return (PAGE_SIZE_OPTIONS as readonly number[]).includes(fromUrl) ? fromUrl : 10;
+  });
+
+  const updatePaginationParams = (nextPage: number, nextPageSize: number) => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("page", String(nextPage));
+    url.searchParams.set("pageSize", String(nextPageSize));
+    window.history.replaceState({}, "", url);
+  };
+
+  const goToPage = (nextPage: number) => {
+    setPage(nextPage);
+    updatePaginationParams(nextPage, pageSize);
+  };
+
+  const handlePageSizeChange = (nextPageSize: number) => {
+    setPageSize(nextPageSize);
+    setPage(1);
+    updatePaginationParams(1, nextPageSize);
+  };
+
   // Reused across calls instead of instantiating a fresh CredentialClient (and its
   // own RequestQueue + health check) on every verify/search/issuer-check — see #612.
   const credentialClientRef = useRef<CredentialClient | null>(null);
@@ -252,6 +285,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
   }, []);
 
   const handleVerify = async (credentialId?: string) => {
+    if (verifying) return; // guard against duplicate submissions
     const id = (credentialId ?? credId).trim();
     if (!id) return;
     setVerifying(true);
@@ -266,8 +300,14 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
           ? reason
           : "invalid";
       setVerifyState(result.valid ? "valid" : knownReason);
-    } catch {
+      if (result.valid) {
+        toast.success("Credential is valid.");
+      } else {
+        toast.error(`Credential is invalid (${knownReason.replace("_", " ")}).`);
+      }
+    } catch (e: unknown) {
       setVerifyState("invalid");
+      toast.error(handleError(e));
     } finally {
       setVerifying(false);
     }
@@ -305,26 +345,29 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
   }, [verifyId]);
 
   const handleSearch = async () => {
+    if (fetching) return; // guard against duplicate submissions
     const addr = searchAddress.trim();
     if (!addr) return;
-    
+
     // Validate Stellar address format
     if (!StrKey.isValidEd25519PublicKey(addr)) {
-      dispatchCredential({ 
-        type: 'FETCH_ERROR', 
-        message: 'Invalid Stellar address format. Address must start with "G" and be 56 characters long.'
-      });
+      const message = 'Invalid Stellar address format. Address must start with "G" and be 56 characters long.';
+      dispatchCredential({ type: 'FETCH_ERROR', message });
+      toast.error(message);
       return;
     }
-    
+
     dispatchCredential({ type: 'FETCH_START' });
+    goToPage(1);
     try {
       const credentialClient = getCredentialClient();
       const caller = wallet.publicKey || "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
       const results = await credentialClient.getCredentialsBySubject(caller, addr);
       dispatchCredential({ type: 'FETCH_SUCCESS', credentials: results, searchedAddress: addr });
     } catch (e: unknown) {
-      dispatchCredential({ type: 'FETCH_ERROR', message: handleError(e) });
+      const message = handleError(e);
+      dispatchCredential({ type: 'FETCH_ERROR', message });
+      toast.error(message);
     }
   };
 
@@ -391,7 +434,21 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
     (a, b) => getStatusSortRank(a) - getStatusSortRank(b)
   );
 
+  const totalCredentials = sortedCredentials.length;
+  const totalPages = Math.max(1, Math.ceil(totalCredentials / pageSize));
+  const clampedPage = Math.min(page, totalPages);
+  const pageStart = (clampedPage - 1) * pageSize;
+  const pagedCredentials = sortedCredentials.slice(pageStart, pageStart + pageSize);
+
+  // Reset to page 1 whenever the active filters change the result set shape.
+  useEffect(() => {
+    setPage(1);
+    updatePaginationParams(1, pageSize);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeFilter, activeExpiryFilter]);
+
   const handleIssue = async () => {
+    if (issuing) return; // guard against duplicate submissions
     if (!wallet.connected || !wallet.publicKey) return;
 
     if (!validateIssueForm()) return;
@@ -450,8 +507,11 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
       const credentialId = Buffer.from(raw).toString("hex");
       
       setIssueResult(`Credential issued successfully!\nID: ${credentialId}\nEstimated fee: ${(estimatedFee / 10_000_000).toFixed(7)} XLM`);
+      toast.success("Credential issued successfully.");
     } catch (e: unknown) {
-      setIssueResult(`Error: ${handleError(e)}`);
+      const message = handleError(e);
+      setIssueResult(`Error: ${message}`);
+      toast.error(message);
     } finally {
       setIssuing(false);
     }
@@ -568,8 +628,9 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
             No credentials match the selected filters.
           </p>
         ) : (
+          <>
           <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-            {sortedCredentials.map((cred) => {
+            {pagedCredentials.map((cred) => {
               const status = getCredentialStatus(cred);
               return (
               <li
@@ -673,6 +734,80 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
               );
             })}
           </ul>
+
+          {/* Pagination controls */}
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: "0.75rem",
+              marginTop: "1rem",
+              paddingTop: "0.75rem",
+              borderTop: "1px solid var(--border-input)",
+              fontSize: "0.8rem",
+              color: "var(--text-muted)",
+            }}
+          >
+            <span>
+              Showing {pageStart + 1}–{Math.min(pageStart + pageSize, totalCredentials)} of {totalCredentials}
+            </span>
+
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              <label htmlFor="credential-page-size" style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
+                Per page
+                <select
+                  id="credential-page-size"
+                  value={pageSize}
+                  onChange={(e) => handlePageSizeChange(Number(e.target.value))}
+                  style={{ fontSize: "0.8rem", padding: "0.2rem 0.4rem" }}
+                >
+                  {PAGE_SIZE_OPTIONS.map((size) => (
+                    <option key={size} value={size}>{size}</option>
+                  ))}
+                </select>
+              </label>
+
+              <button
+                onClick={() => goToPage(clampedPage - 1)}
+                disabled={clampedPage <= 1}
+                aria-label="Previous page"
+                style={{ padding: "0.25rem 0.6rem", fontSize: "0.8rem" }}
+              >
+                ‹ Prev
+              </button>
+
+              <span>
+                Page{" "}
+                <input
+                  type="number"
+                  aria-label="Jump to page"
+                  min={1}
+                  max={totalPages}
+                  value={clampedPage}
+                  onChange={(e) => {
+                    const next = parseInt(e.target.value, 10);
+                    if (Number.isFinite(next) && next >= 1 && next <= totalPages) {
+                      goToPage(next);
+                    }
+                  }}
+                  style={{ width: "3rem", textAlign: "center", fontSize: "0.8rem", padding: "0.2rem" }}
+                />{" "}
+                of {totalPages}
+              </span>
+
+              <button
+                onClick={() => goToPage(clampedPage + 1)}
+                disabled={clampedPage >= totalPages}
+                aria-label="Next page"
+                style={{ padding: "0.25rem 0.6rem", fontSize: "0.8rem" }}
+              >
+                Next ›
+              </button>
+            </div>
+          </div>
+          </>
         )}
       </div>
 

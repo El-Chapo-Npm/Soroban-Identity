@@ -1,6 +1,6 @@
 import { createContext, useContext, useMemo, type ReactNode } from "react";
 import { useWallet } from "../hooks/useWallet";
-import type { WalletState } from "../hooks/useWalletState";
+import type { WalletState, WalletConnectionError } from "../hooks/useWalletState";
 import type { FrontendNetworkConfig } from "../network";
 import { getNetworkConfig } from "../network";
 
@@ -8,6 +8,10 @@ interface WalletContextValue extends WalletState {
   connect: (walletType?: string) => void;
   disconnect: () => void;
   signTransaction: (xdr: string) => Promise<string>;
+  /** Manually re-attempt the last connection after retries were exhausted. */
+  retry: () => Promise<void>;
+  isConnecting: boolean;
+  connectionError: WalletConnectionError | string | null;
 }
 
 export const WalletContext = createContext<WalletContextValue | null>(null);
