@@ -202,6 +202,22 @@ export function loadConfig(env = process.env) {
     cspFontSrc: parseList(env.CSP_FONT_SRC, []),
     cspFormAction: parseList(env.CSP_FORM_ACTION, []),
     cspFrameAncestors: parseList(env.CSP_FRAME_ANCESTORS, []),
+    // W3C Verifiable Credentials JSON-LD (#753).
+    // Base context: the v1.1 data model by default; set to the v2 URI to emit
+    // v2 credentials (which renames issuanceDate/expirationDate).
+    vcBaseContext:
+      env.VC_BASE_CONTEXT ?? "https://www.w3.org/2018/credentials/v1",
+    // Additional contexts appended to every credential, for a deployment with
+    // its own vocabulary.
+    vcExtraContexts: parseList(env.VC_EXTRA_CONTEXTS, []),
+    // Public base URL. When set, credential and status ids are resolvable
+    // https URLs instead of urn: identifiers.
+    vcBaseUrl: env.VC_BASE_URL ?? "",
+    // 32-byte Ed25519 seed (hex or base64) used to sign credentials. Without
+    // it credentials are emitted unsigned rather than carrying a fake proof.
+    vcProofPrivateKey: env.VC_PROOF_PRIVATE_KEY ?? "",
+    // Defaults to "<issuer DID>#key-1" when unset.
+    vcProofVerificationMethod: env.VC_PROOF_VERIFICATION_METHOD ?? "",
     dataDir: env.DATA_DIR ? path.resolve(env.DATA_DIR) : DEFAULT_DATA_DIR,
     auditLogPath: env.AUDIT_LOG_PATH
       ? path.resolve(env.AUDIT_LOG_PATH)

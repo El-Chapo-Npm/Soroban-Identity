@@ -36,6 +36,23 @@ import {
 } from "./http-utils.js";
 import { KEY_ID_HEADER, NonceStore, verifySignedRequest } from "./request-signing.js";
 import { normalizeCspReports, setSecurityHeaders } from "./security-headers.js";
+import {
+  CREDENTIAL_STATUS_TYPE,
+  createVcSerializer,
+  credentialStatus,
+} from "./vc-jsonld.js";
+
+/**
+ * Whether the caller wants the W3C JSON-LD representation.
+ *
+ * Accept is the correct mechanism, but a browser address bar cannot set it,
+ * so `?format=jsonld` is honoured as well.
+ */
+function wantsJsonLd(req, url) {
+  if (url.searchParams.get("format") === "jsonld") return true;
+  const accept = String(req.headers.accept ?? "");
+  return accept.includes("application/ld+json");
+}
 import { schemas, validateRequest } from "./validation.js";
 import { routeLabel } from "./route-label.js";
 import { requestContextStore } from "./request-context.js";
@@ -68,6 +85,7 @@ export function createApp({
   rateLimiter = new TieredRateLimiter(),
   realtime = null,
   nonceStore = new NonceStore({ ttlSeconds: config.requestSigningMaxAgeSeconds }),
+  vcSerializer = createVcSerializer(config, { logger }),
 }) {
   // Expose the key service on config so http-utils.requireAuth can validate
   // issued API keys instead of falling back to the single admin key.
@@ -440,6 +458,19 @@ export function createApp({
             limit: limitNum,
             cursor: validated.data.query.cursor ?? null,
           });
+
+          if (wantsJsonLd(req, url)) {
+            return sendJson(
+              res,
+              200,
+              {
+                items: items.map((item) => vcSerializer.serialize(item)),
+                nextCursor,
+              },
+              { "content-type": "application/ld+json; charset=utf-8" },
+            );
+          }
+
           if (version === "v2") {
             return sendJson(res, 200, {
               apiVersion: "v2",
@@ -469,6 +500,20 @@ export function createApp({
           const credentials = await readCredentials(config);
           const credential = credentials.find((c) => c.id === credentialId);
           if (!credential) return notFound(res);
+
+          // W3C JSON-LD form (#753), opt-in so existing clients keep the
+          // compact internal shape they already parse. Requested either by
+          // Accept: application/ld+json or ?format=jsonld — the query
+          // parameter exists because a browser cannot easily set Accept.
+          if (wantsJsonLd(req, url)) {
+            return sendJson(
+              res,
+              200,
+              vcSerializer.serialize(credential),
+              { "content-type": "application/ld+json; charset=utf-8" },
+            );
+          }
+
           if (version === "v2") {
             return sendJson(res, 200, {
               apiVersion: "v2",
@@ -476,6 +521,29 @@ export function createApp({
             });
           }
           return sendJson(res, 200, credential);
+        }
+
+        // Credential status (#753). Referenced by every credential's
+        // `credentialStatus` entry, so a verifier can check revocation
+        // against the issuer rather than trusting the copy it holds.
+        const credentialStatusMatch = pathname.match(/^\/credentials\/([^/]+)\/status$/);
+        if (req.method === "GET" && credentialStatusMatch) {
+          const credentialId = decodeURIComponent(credentialStatusMatch[1]);
+          if (!validateRequest(res, schemas.credentialByIdParams, { params: { credentialId } }).ok) {
+            return;
+          }
+          const credentials = await readCredentials(config);
+          const credential = credentials.find((c) => c.id === credentialId);
+          if (!credential) return notFound(res);
+
+          const status = credentialStatus(credential);
+          return sendJson(res, 200, {
+            id: `${pathname}`,
+            type: CREDENTIAL_STATUS_TYPE,
+            credentialId,
+            ...status,
+            checkedAt: new Date().toISOString(),
+          });
         }
 
         const verifyMatch = pathname.match(/^\/credentials\/([^/]+)\/verify$/);
@@ -544,6 +612,14 @@ export function createApp({
             await appendAuditLog(config, { action: "issue_credential", credentialId: credential.id });
             webhookService.trigger("credential.issued", credential).catch(() => {});
             realtime?.emitCredentialEvent("issued", credential);
+            if (wantsJsonLd(req, url)) {
+              return sendJson(
+                res,
+                201,
+                vcSerializer.serialize(credential),
+                { "content-type": "application/ld+json; charset=utf-8" },
+              );
+            }
             return sendJson(res, 201, credential);
           } catch (err) {
             if (err instanceof DuplicateCredentialError) {

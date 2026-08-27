@@ -423,6 +423,36 @@ their signing secrets first.
 For the canonical string, client examples and rollout steps, see
 [Request Signing](../docs/request-signing.md).
 
+## Verifiable Credentials (JSON-LD)
+
+Credentials can be served in W3C Verifiable Credentials form so any conforming
+wallet or verifier can consume them. It is opt-in, so existing clients keep the
+compact internal shape:
+
+```console
+$ curl -H 'Accept: application/ld+json' /credentials/cred-123
+$ curl '/credentials/cred-123?format=jsonld'
+```
+
+Every credential carries a `credentialStatus` entry backed by a public
+`GET /credentials/:id/status` endpoint reporting `active`, `expired` or
+`revoked`.
+
+Proofs use `DataIntegrityProof` with the `eddsa-jcs-2022` cryptosuite, which
+canonicalizes with JCS (RFC 8785) rather than requiring a JSON-LD processor.
+Credentials are signed only when `VC_PROOF_PRIVATE_KEY` is set; without it they
+are emitted unsigned rather than carrying a fabricated proof.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `VC_BASE_CONTEXT` | VC v1.1 | Set to the v2 URI to emit v2 credentials |
+| `VC_EXTRA_CONTEXTS` | — | Extra contexts, comma-separated |
+| `VC_BASE_URL` | — | Makes credential ids resolvable URLs |
+| `VC_PROOF_PRIVATE_KEY` | — | 32-byte Ed25519 seed, hex or base64 |
+| `VC_PROOF_VERIFICATION_METHOD` | `<issuer DID>#key-1` | Where the key is published |
+
+See [Verifiable Credentials (JSON-LD)](../docs/verifiable-credentials-jsonld.md).
+
 ## Content Security Policy
 
 Every response carries a CSP header plus the usual companion security headers
