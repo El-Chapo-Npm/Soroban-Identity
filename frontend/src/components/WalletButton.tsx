@@ -13,6 +13,7 @@ export default function WalletButton() {
     walletType,
     connect,
     disconnect,
+    retry,
   } = useWalletContext();
   const [showPicker, setShowPicker] = useState(false);
   const [showDropdown, setShowDropdown] = useState(false);
@@ -352,7 +353,11 @@ export default function WalletButton() {
       )}
 
       {error && (
-        <span role="status" aria-live="polite" style={{ fontSize: "0.75rem", color: "var(--error-text)" }}>
+        <span
+          role="status"
+          aria-live="polite"
+          style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.75rem", color: "var(--error-text)" }}
+        >
           {(() => {
             const msg =
               error instanceof Error
@@ -379,6 +384,24 @@ export default function WalletButton() {
               msg
             );
           })()}
+          {!connecting && !reconnecting && !connected && (
+            <button
+              type="button"
+              onClick={() => void retry()}
+              aria-label="Retry wallet connection"
+              style={{
+                background: "none",
+                border: "1px solid var(--error-text)",
+                color: "var(--error-text)",
+                borderRadius: "0.25rem",
+                padding: "0.15rem 0.5rem",
+                fontSize: "0.75rem",
+                cursor: "pointer",
+              }}
+            >
+              ↻ Reconnect
+            </button>
+          )}
         </span>
       )}
     </div>

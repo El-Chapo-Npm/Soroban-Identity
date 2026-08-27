@@ -29,15 +29,24 @@ interface UseWalletConnectionReturn {
   retryCount: number;
 }
 
+// Cap the exponential backoff so a flaky connection doesn't leave the user
+// waiting minutes between attempts.
+const MAX_RETRY_DELAY_MS = 8000;
+
+/** delay before attempt N (1-indexed): retryDelayMs * 2^(N-1), capped. */
+function backoffDelay(baseDelayMs: number, attempt: number): number {
+  return Math.min(baseDelayMs * 2 ** (attempt - 1), MAX_RETRY_DELAY_MS);
+}
+
 /**
  * Handles wallet connection and disconnection for both Freighter and
  * WalletConnect. Retries on timeout with configurable limits.
  *
  * Features:
- * - Retries connection with configurable maxRetries (default: 3)
+ * - Retries connection with exponential backoff, configurable maxRetries (default: 3)
  * - Exposes { isConnecting, error, retryCount, retry } for UI feedback
  * - Logs each failed attempt with attempt number and elapsed time
- * - Stops retrying after maxRetries consecutive failures
+ * - Stops retrying after maxRetries consecutive failures, surfacing a manual retry
  */
 export function useWalletConnection({
   networkConfig,
@@ -164,9 +173,13 @@ export function useWalletConnection({
             retryCount: attempt,
           }));
           setRetryCount(attempt);
+          const delay = backoffDelay(retryDelayMs, attempt);
+          console.warn(
+            `[useWalletConnection] Retrying Freighter connection in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`,
+          );
           freighterTimeoutRef.current = setTimeout(async () => {
             await connectFreighter(true);
-          }, retryDelayMs);
+          }, delay);
         }
       }
     },
@@ -274,9 +287,13 @@ export function useWalletConnection({
             retryCount: attempt,
           }));
           setRetryCount(attempt);
+          const delay = backoffDelay(retryDelayMs, attempt);
+          console.warn(
+            `[useWalletConnection] Retrying WalletConnect connection in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`,
+          );
           walletConnectTimeoutRef.current = setTimeout(async () => {
             await connectWalletConnect(true);
-          }, retryDelayMs);
+          }, delay);
         }
       }
     },
