@@ -69,13 +69,36 @@ export const walletStore = {
   },
 
   connect: async (): Promise<void> => {
-    await kit.openModal({
-      onWalletSelected: async (option) => {
-        kit.setWallet(option.id);
-        const { address } = await kit.getAddress();
-        set({ address });
-      },
-    });
+    try {
+      // Firefox compatibility fix: add explicit timeout and retry logic
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Wallet connection timeout')), 15000)
+      );
+
+      const connectionPromise = kit.openModal({
+        onWalletSelected: async (option) => {
+          kit.setWallet(option.id);
+          const { address } = await kit.getAddress();
+          set({ address });
+        },
+      });
+
+      await Promise.race([connectionPromise, timeoutPromise]);
+    } catch (error) {
+      // Firefox may not trigger the modal properly, attempt direct connection
+      if (typeof window.freighter !== 'undefined') {
+        try {
+          if (await window.freighter.isConnected()) {
+            const publicKey = await window.freighter.getPublicKey();
+            set({ address: publicKey });
+            return;
+          }
+        } catch (directError) {
+          console.error('Direct Freighter connection failed:', directError);
+        }
+      }
+      throw error;
+    }
   },
 
   /** Disconnects the wallet and clears the persisted sessionStorage state. */
