@@ -237,6 +237,8 @@ export function loadConfig(env = process.env) {
     redisMaxRetries: parseInteger(env.REDIS_MAX_RETRIES, 5),
     redisRetryBaseMs: parseInteger(env.REDIS_RETRY_BASE_MS, 200),
     redisCommandTimeoutMs: parseInteger(env.REDIS_COMMAND_TIMEOUT_MS, 1000),
+    redisEnableAutoReconnect: env.REDIS_ENABLE_AUTO_RECONNECT !== "false",
+    redisReconnectDelayMs: parseInteger(env.REDIS_RECONNECT_DELAY_MS, 1000),
     cacheFailureThreshold: parseInteger(env.CACHE_FAILURE_THRESHOLD, 3),
     didCacheWarmList: (env.DID_CACHE_WARM_LIST ?? "")
       .split(",")
