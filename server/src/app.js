@@ -2,7 +2,16 @@ import { URL } from "node:url";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { appendAuditLog, readCredentials, writeCredentials, createAndPersistCredential, revokeAndPersistCredential, DuplicateCredentialError } from "./storage.js";
+import {
+  appendAuditLog,
+  readCredentials,
+  writeCredentials,
+  createAndPersistCredential,
+  revokeAndPersistCredential,
+  updateAndPersistCredential,
+  DuplicateCredentialError,
+  ConcurrencyConflictError,
+} from "./storage.js";
 import { findExpiringCredentials, paginate, paginateCursor } from "./expiry.js";
 import {
   createWebhookRecord,
@@ -693,6 +702,43 @@ export function createApp({
           webhookService.trigger("credential.revoked", { id: credentialId, revokedAt: revoked.revokedAt }).catch(() => {});
           realtime?.emitCredentialEvent("revoked", revoked);
           return sendJson(res, 200, { revoked: true, credential: revoked });
+        }
+
+        // Credential update: PUT /credentials/:id or PATCH /credentials/:id with optimistic concurrency
+        const updateMatch = pathname.match(/^\/credentials\/([^/]+)$/);
+        if ((req.method === "PUT" || req.method === "PATCH") && updateMatch) {
+          if (!await requireAuth(req, res, config, ['credentials:write'])) return;
+          if (validateContentType(req, res)) return;
+          const credentialId = decodeURIComponent(updateMatch[1]);
+          const body = await readJson(req, config);
+          if (body.__payloadTooLarge)
+            return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+
+          // Check version from If-Match header or body
+          const ifMatchHeader = req.headers['if-match'];
+          const expectedVersion = ifMatchHeader
+            ? ifMatchHeader.replace(/^"|"$/g, '')
+            : (body.version ?? body.expectedVersion);
+
+          try {
+            const updated = await updateAndPersistCredential(config, credentialId, body, expectedVersion);
+            if (!updated) return notFound(res);
+            await appendAuditLog(config, { action: "update_credential", credentialId });
+            webhookService.trigger("credential.updated", updated).catch(() => {});
+            realtime?.emitCredentialEvent("updated", updated);
+            return sendJson(res, 200, updated, { ETag: `"${updated.version}"` });
+          } catch (err) {
+            if (err instanceof ConcurrencyConflictError) {
+              return sendJson(res, 409, {
+                code: "CONCURRENCY_CONFLICT",
+                message: err.message,
+                details: [
+                  { field: "version", expected: err.expectedVersion, current: err.currentVersion },
+                ],
+              });
+            }
+            throw err;
+          }
         }
 
         // ── Webhook Endpoints ──────────────────────────────────────────

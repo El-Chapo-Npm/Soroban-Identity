@@ -97,31 +97,55 @@ export function handleEventsRequest(req, res, url, { config, soroban }) {
     'X-Accel-Buffering': 'no',
   });
 
-  const connectedFrame = formatEvent('connected', { ok: true });
-  if (connectedFrame) res.write(connectedFrame);
-
-  let nextLedger = 0;
   let closed = false;
+  let nextLedger = 0;
   let polling = false;
+  let heartbeatTimer = null;
+  let pollTimer = null;
 
-  const heartbeatTimer = setInterval(() => {
+  function cleanup() {
+    if (closed) return;
+    closed = true;
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    if (pollTimer) clearInterval(pollTimer);
+    try {
+      if (!res.writableEnded) {
+        res.end();
+      }
+    } catch {}
+  }
+
+  function safeWrite(frame) {
+    if (closed || res.writableEnded || res.writable === false) return;
+    try {
+      res.write(frame);
+    } catch {
+      cleanup();
+    }
+  }
+
+  const connectedFrame = formatEvent('connected', { ok: true });
+  if (connectedFrame) safeWrite(connectedFrame);
+
+  heartbeatTimer = setInterval(() => {
     const frame = formatEvent('heartbeat', { ts: new Date().toISOString() });
-    if (frame) res.write(frame);
+    if (frame) safeWrite(frame);
   }, HEARTBEAT_INTERVAL_MS);
 
   const pollIntervalMs = config.eventPollIntervalMs > 0 ? config.eventPollIntervalMs : 5000;
-  const pollTimer = setInterval(async () => {
-    if (polling) return; // avoid overlapping polls if getEvents is slow
+  pollTimer = setInterval(async () => {
+    if (polling || closed) return; // avoid overlapping polls if getEvents is slow
     polling = true;
     try {
       const rawEvents = await soroban.getEvents(nextLedger);
       for (const raw of rawEvents) {
+        if (closed) break;
         const event = normalizeContractEvent(raw);
         if (!event) continue;
         if (event.ledger >= nextLedger) nextLedger = event.ledger + 1;
         if (!eventMatchesFilter(event, { contractId, topics })) continue;
         const frame = formatEvent('contract-event', event);
-        if (frame) res.write(frame);
+        if (frame) safeWrite(frame);
       }
     } catch (error) {
       logger.error({ error: error.message }, 'Failed to poll contract events for SSE stream');
@@ -130,13 +154,13 @@ export function handleEventsRequest(req, res, url, { config, soroban }) {
     }
   }, pollIntervalMs);
 
-  function cleanup() {
-    if (closed) return;
-    closed = true;
-    clearInterval(heartbeatTimer);
-    clearInterval(pollTimer);
-  }
-
   req.on('close', cleanup);
   res.on('close', cleanup);
+  req.on('aborted', cleanup);
+  req.on('error', cleanup);
+  res.on('error', cleanup);
+  if (req.socket) {
+    req.socket.on('close', cleanup);
+    req.socket.on('error', cleanup);
+  }
 }

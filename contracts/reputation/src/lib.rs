@@ -160,9 +160,6 @@ impl Reputation {
     /// live-updatable via [`Self::set_min_interval`].
     pub fn initialize(env: Env, admin: Address) -> Result<(), ContractError> {
         Self::require_uninitialized(&env)?;
-        if rate_limit_window < MIN_RATE_LIMIT_WINDOW || rate_limit_window > MAX_RATE_LIMIT_WINDOW {
-            return Err(ContractError::InvalidRateLimitWindow);
-        }
         Self::set_admin(&env, &admin);
         env.storage()
             .instance()
@@ -204,13 +201,13 @@ impl Reputation {
         if stored != admin {
             return Err(ContractError::Unauthorized);
         }
-        if window < MIN_RATE_LIMIT_WINDOW || window > MAX_RATE_LIMIT_WINDOW {
-            return Err(ContractError::InvalidRateLimitWindow);
+        if ledgers < MIN_INTERVAL_FLOOR || ledgers > MIN_INTERVAL_CEILING {
+            return Err(ContractError::InvalidMinInterval);
         }
-        env.storage().instance().set(&RATE_LIMIT_WIN, &window);
+        env.storage().instance().set(&MIN_INTERVAL_KEY, &ledgers);
         env.events().publish(
-            (RATE_LIMIT_WIN, symbol_short!("updated")),
-            (EVENT_VERSION, admin, window),
+            (MIN_INTERVAL_KEY, symbol_short!("updated")),
+            (EVENT_VERSION, admin, ledgers),
         );
         Ok(())
     }
@@ -672,6 +669,7 @@ impl Reputation {
         }
 
         if accepted {
+            let now = env.ledger().timestamp();
             let history_key = Self::history_key(&subject, &reporter);
             let mut history: Vec<ScoreEntry> = env
                 .storage()
@@ -976,7 +974,7 @@ mod tests {
         let contract_id = env.register_contract(None, Reputation);
         let client = ReputationClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
-        client.initialize(&admin, &DEFAULT_RATE_LIMIT_WINDOW);
+        client.initialize(&admin);
         (env, admin, client)
     }
 
@@ -990,7 +988,7 @@ mod tests {
 
     #[test]
     fn test_double_initialize_returns_error() {
-        let (env, admin, client) = setup();
+        let (_env, admin, client) = setup();
         assert_eq!(
             client.try_initialize(&admin),
             Err(Ok(ContractError::AlreadyInitialized))
@@ -1005,7 +1003,7 @@ mod tests {
         client.add_reporter(&reporter);
         let reason = String::from_str(&env, "completed KYC");
         client.submit_score(&reporter, &subject, &50, &reason);
-        env.ledger().with_mut(|li| li.timestamp += DEFAULT_RATE_LIMIT_WINDOW + 1);
+        env.ledger().with_mut(|li| li.sequence_number += DEFAULT_MIN_INTERVAL + 1);
         client.submit_score(&reporter, &subject, &25, &reason);
         let rec = client.get_reputation(&subject);
         assert_eq!(rec.score, 75);
@@ -1191,7 +1189,7 @@ mod tests {
     #[test]
     fn test_default_rate_limit_window_used_on_init() {
         let (_env, _admin, client) = setup();
-        assert_eq!(client.get_rate_limit_window(), DEFAULT_RATE_LIMIT_WINDOW);
+        assert_eq!(client.get_min_interval(), DEFAULT_MIN_INTERVAL);
     }
 
     #[test]
@@ -1200,8 +1198,8 @@ mod tests {
         let reporter = Address::generate(&env);
         let subject = Address::generate(&env);
         client.add_reporter(&reporter);
-        client.set_rate_limit_window(&admin, &300);
-        assert_eq!(client.get_rate_limit_window(), 300);
+        client.set_min_interval(&admin, &300);
+        assert_eq!(client.get_min_interval(), 300);
 
         let reason = String::from_str(&env, "activity");
         client.submit_score(&reporter, &subject, &10, &reason);
@@ -1214,7 +1212,7 @@ mod tests {
         );
 
         // Past the new window — accepted
-        env.ledger().with_mut(|li| li.sequence_number += 10);
+        env.ledger().with_mut(|li| li.sequence_number += 300);
         client.submit_score(&reporter, &subject, &10, &reason);
     }
 
@@ -1222,8 +1220,8 @@ mod tests {
     fn test_set_rate_limit_window_floor_enforced() {
         let (_env, admin, client) = setup();
         assert_eq!(
-            client.try_set_rate_limit_window(&admin, &(MIN_RATE_LIMIT_WINDOW - 1)),
-            Err(Ok(ContractError::InvalidRateLimitWindow))
+            client.try_set_min_interval(&admin, &(MIN_INTERVAL_FLOOR - 1)),
+            Err(Ok(ContractError::InvalidMinInterval))
         );
     }
 
@@ -1231,18 +1229,18 @@ mod tests {
     fn test_set_rate_limit_window_ceiling_enforced() {
         let (_env, admin, client) = setup();
         assert_eq!(
-            client.try_set_rate_limit_window(&admin, &(MAX_RATE_LIMIT_WINDOW + 1)),
-            Err(Ok(ContractError::InvalidRateLimitWindow))
+            client.try_set_min_interval(&admin, &(MIN_INTERVAL_CEILING + 1)),
+            Err(Ok(ContractError::InvalidMinInterval))
         );
     }
 
     #[test]
     fn test_set_rate_limit_window_boundary_values_allowed() {
         let (_env, admin, client) = setup();
-        client.set_rate_limit_window(&admin, &MIN_RATE_LIMIT_WINDOW);
-        assert_eq!(client.get_rate_limit_window(), MIN_RATE_LIMIT_WINDOW);
-        client.set_rate_limit_window(&admin, &MAX_RATE_LIMIT_WINDOW);
-        assert_eq!(client.get_rate_limit_window(), MAX_RATE_LIMIT_WINDOW);
+        client.set_min_interval(&admin, &MIN_INTERVAL_FLOOR);
+        assert_eq!(client.get_min_interval(), MIN_INTERVAL_FLOOR);
+        client.set_min_interval(&admin, &MIN_INTERVAL_CEILING);
+        assert_eq!(client.get_min_interval(), MIN_INTERVAL_CEILING);
     }
 
     #[test]
@@ -1250,9 +1248,26 @@ mod tests {
         let (env, _admin, client) = setup();
         let attacker = Address::generate(&env);
         assert_eq!(
-            client.try_set_rate_limit_window(&attacker, &500),
+            client.try_set_min_interval(&attacker, &500),
             Err(Ok(ContractError::Unauthorized))
         );
+    }
+
+    #[test]
+    fn test_reputation_score_overflow_saturates_at_max() {
+        let (env, _admin, client) = setup();
+        let reporter = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_reporter(&reporter);
+        let reason = String::from_str(&env, "large_score");
+        client.submit_score(&reporter, &subject, &i64::MAX, &reason);
+        assert_eq!(client.get_reputation(&subject).score, i64::MAX);
+
+        // Advance past rate limit and add another positive score
+        env.ledger().with_mut(|li| li.sequence_number += 150);
+        client.submit_score(&reporter, &subject, &100, &reason);
+        // Does not overflow to negative; saturates safely at i64::MAX
+        assert_eq!(client.get_reputation(&subject).score, i64::MAX);
     }
 
     #[test]
