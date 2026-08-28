@@ -12,6 +12,9 @@ members = [
     "credential-manager",
     "reputation",
     "soroban-identity-interface",
+    "schema-registry",
+    "revocation-registry",
+    "selective-disclosure",
 ]
 default-members = [
     ".",
@@ -20,6 +23,9 @@ default-members = [
     "credential-manager",
     "reputation",
     "soroban-identity-interface",
+    "schema-registry",
+    "revocation-registry",
+    "selective-disclosure",
 ]
 resolver = "2"
 
@@ -29,6 +35,9 @@ identity-registry = { path = "identity-registry" }
 reputation = { path = "reputation" }
 shared-errors = { path = "shared-errors" }
 soroban-identity-interface = { path = "soroban-identity-interface" }
+schema-registry = { path = "schema-registry" }
+revocation-registry = { path = "revocation-registry" }
+selective-disclosure = { path = "selective-disclosure" }
 soroban-sdk = { version = "21.0.0", features = ["testutils"] }
 
 [profile.release]

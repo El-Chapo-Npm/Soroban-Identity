@@ -12,6 +12,7 @@ import { WebSocketHub } from './websocket.js';
 import { logger } from './logger.js';
 import { RotatingFileSink } from './access-log.js';
 import { VaultLeaseManager } from './vault.js';
+import { initFeatureFlags, getFlag } from './feature-flags.js';
 
 // Load secrets before validation so existing config consumers see the same
 // values as environment-backed deployments. Vault is opt-in and fails closed
@@ -53,6 +54,22 @@ if (vaultManager.enabled) {
   };
 }
 await ensureDataDir(config);
+// Initialize the feature flag system (#723) and seed a default flag for new
+// credential types so downstream modules can roll them out gradually.
+await initFeatureFlags(config.dataDir);
+if (!getFlag('new_credential_types')) {
+  const { createFlag } = await import('./feature-flags.js');
+  await createFlag(config.dataDir, {
+    key: 'new_credential_types',
+    description: 'Enable newly introduced verifiable credential types',
+    type: 'variant',
+    defaultValue: 'disabled',
+    targetingRules: [
+      { attribute: 'tier', operator: 'eq', value: 'enterprise', variant: 'enabled' },
+    ],
+    createdBy: config.adminActor ?? 'admin',
+  });
+}
 const metrics = new MetricsService();
 const didCache = new DidCache(config, { metrics });
 // Connecting never throws: a cache outage must not stop the server booting.
