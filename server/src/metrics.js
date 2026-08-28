@@ -131,6 +131,34 @@ export class MetricsService {
       registers: [this.registry],
     });
 
+    this.batchOperations = new client.Counter({
+      name: 'batch_operations_total',
+      help: 'Total batch sub-operations processed via POST /batch, by operation type and result',
+      labelNames: ['type', 'result'],
+      registers: [this.registry],
+    });
+
+    this.batchRequests = new client.Counter({
+      name: 'batch_requests_total',
+      help: 'Total POST /batch requests, by atomic mode and whether the batch aborted early',
+      labelNames: ['atomic', 'aborted'],
+      registers: [this.registry],
+    });
+
+    this.quotaThresholdEvents = new client.Counter({
+      name: 'quota_threshold_events_total',
+      help: 'Total quota threshold crossings (80%/100% of a daily or monthly quota), by tier, period and threshold',
+      labelNames: ['tier', 'period', 'threshold'],
+      registers: [this.registry],
+    });
+
+    this.deprecatedEndpointUsage = new client.Counter({
+      name: 'deprecated_endpoint_usage_total',
+      help: 'Total requests to endpoints marked deprecated, by endpoint rule name',
+      labelNames: ['endpoint'],
+      registers: [this.registry],
+    });
+
     if (collectDefaultMetrics) {
       client.collectDefaultMetrics({ register: this.registry });
     }
@@ -206,6 +234,45 @@ export class MetricsService {
    */
   observeCspViolation(directive) {
     this.cspViolations.inc({ directive: directive || 'unknown' });
+  }
+
+  /**
+   * Record one batch sub-operation's outcome (#749).
+   * @param {object} sample
+   * @param {'issue'|'verify'|'revoke'} sample.type
+   * @param {'success'|'failed'} sample.result
+   */
+  observeBatchOperation({ type, result }) {
+    this.batchOperations.inc({ type: type || 'unknown', result: result || 'unknown' });
+  }
+
+  /**
+   * Record one completed POST /batch request (#749).
+   * @param {object} sample
+   * @param {boolean} sample.atomic
+   * @param {boolean} sample.aborted
+   */
+  observeBatchRequest({ atomic, aborted }) {
+    this.batchRequests.inc({ atomic: String(Boolean(atomic)), aborted: String(Boolean(aborted)) });
+  }
+
+  /**
+   * Record a quota threshold crossing (#748).
+   * @param {object} sample
+   * @param {string} sample.tier
+   * @param {'daily'|'monthly'} sample.period
+   * @param {number} sample.threshold - e.g. 0.8 or 1
+   */
+  observeQuotaThreshold({ tier, period, threshold }) {
+    this.quotaThresholdEvents.inc({ tier: tier || 'unknown', period: period || 'unknown', threshold: String(threshold) });
+  }
+
+  /**
+   * Record a request to a deprecated endpoint (#751).
+   * @param {string} endpoint - Deprecation rule name
+   */
+  observeDeprecatedEndpointUsage(endpoint) {
+    this.deprecatedEndpointUsage.inc({ endpoint: endpoint || 'unknown' });
   }
 
   /**

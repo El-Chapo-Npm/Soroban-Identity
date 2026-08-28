@@ -56,9 +56,14 @@ import { schemas, validateRequest } from "./validation.js";
 import { routeLabel } from "./route-label.js";
 import { requestContextStore } from "./request-context.js";
 import { handleEventsRequest } from "./sse.js";
+import { handleLongPollRequest } from "./long-poll.js";
 import { logger } from "./logger.js";
 import { TieredRateLimiter } from "./rate-limiter.js";
 import { ApiKeyService } from "./api-keys.js";
+import { EmailTransport } from "./email.js";
+import { pickQuotaBinding, QuotaTracker, notifyQuotaThresholdOwner } from "./quota.js";
+import { executeBatch } from "./batch.js";
+import { DeprecationRegistry, notifyDeprecatedEndpointOwner } from "./deprecation.js";
 const SERVER_VERSION = "0.1.0";
 const MIN_SDK_VERSION = "0.1.0";
 const SERVER_FEATURES = [
@@ -67,6 +72,8 @@ const SERVER_FEATURES = [
   "event_polling",
   "graphql_api",
   "api_versioning",
+  "quota_tracking",
+  "deprecation_warnings",
 ];
 
 export function createApp({
@@ -86,6 +93,9 @@ export function createApp({
   realtime = null,
   nonceStore = new NonceStore({ ttlSeconds: config.requestSigningMaxAgeSeconds }),
   vcSerializer = createVcSerializer(config, { logger }),
+  emailTransport = new EmailTransport(config),
+  quotaTracker = null,
+  deprecationRegistry = null,
 }) {
   // Expose the key service on config so http-utils.requireAuth can validate
   // issued API keys instead of falling back to the single admin key.
@@ -99,6 +109,33 @@ export function createApp({
       whitelist: config.rateLimitWhitelist ?? [],
       trustProxy: config.trustProxy ?? false,
       maxBuckets: config.rateLimitMaxBuckets ?? 10000,
+    });
+
+  // One quota tracker per app instance (#748), independent of the rate
+  // limiter above: it counts against calendar day/month budgets rather than
+  // a rolling per-minute window.
+  const quota =
+    quotaTracker ??
+    new QuotaTracker({
+      overageMode: config.quotaOverageMode ?? "block",
+      onThreshold: ({ apiKeyId, tier, period, threshold, used, limit }) => {
+        metrics?.observeQuotaThreshold?.({ tier, period, threshold });
+        logger.warn({ apiKeyId, tier, period, threshold, used, limit }, "API quota threshold reached");
+        return notifyQuotaThresholdOwner({ config, apiKeyService, emailTransport, apiKeyId, tier, period, threshold, used, limit });
+      },
+    });
+
+  // One deprecation registry per app instance (#751).
+  const deprecation =
+    deprecationRegistry ??
+    new DeprecationRegistry({
+      onUsage: ({ rule, req }) => {
+        metrics?.observeDeprecatedEndpointUsage?.(rule.name);
+        logger.warn({ endpoint: rule.name, apiKeyId: req.apiKeyId ?? null, path: req.url }, "Deprecated endpoint used");
+        const apiKeyId = req.apiKeyId ?? req.auth?.apiKey?.id ?? null;
+        if (!apiKeyId || !deprecation.shouldNotify(apiKeyId, rule.name)) return undefined;
+        return notifyDeprecatedEndpointOwner({ config, apiKeyService, emailTransport, apiKeyId, rule });
+      },
     });
 
   return async function app(req, res) {
@@ -191,6 +228,13 @@ export function createApp({
     if (req.headers["x-user-tier"]) {
       req.userTier = req.headers["x-user-tier"].toLowerCase();
     }
+
+    // Per-endpoint deprecation warnings (#751), independent of the
+    // per-version deprecation versioning.js already applied above. Runs
+    // after API key extraction so usage logging/notification can be
+    // attributed to the calling key.
+    const deprecationRule = deprecation.match(req.method, pathname);
+    if (deprecationRule) deprecation.handle(req, res, deprecationRule);
 
     // Rate limiting check (exempt /info, /health, /metrics)
     const isExempt = ["/info", "/health", "/ready", "/live", "/metrics"].includes(url.pathname);
@@ -312,6 +356,33 @@ export function createApp({
       }
     }
 
+    // Quota check (#748): a separate budget from the rate limit above,
+    // measured against calendar day/month boundaries rather than a rolling
+    // window. GET /quota itself is exempt so checking your own usage never
+    // consumes it.
+    if (!isExempt && pathname !== "/quota") {
+      const quotaResult = quota.consume(req);
+      const binding = pickQuotaBinding(quotaResult);
+      res.setHeader("X-Quota-Tier", quotaResult.tier);
+      res.setHeader("X-Quota-Period", binding.period);
+      res.setHeader("X-Quota-Limit", String(binding.limit));
+      res.setHeader("X-Quota-Remaining", String(binding.remaining));
+      res.setHeader("X-Quota-Reset", String(binding.resetAt));
+      if (quotaResult.overage) res.setHeader("X-Quota-Overage", "true");
+
+      if (!quotaResult.allowed) {
+        return sendJson(res, 429, {
+          error: "quota_exceeded",
+          code: "QUOTA_EXCEEDED",
+          scope: quotaResult.scope,
+          tier: quotaResult.tier,
+          message: `${quotaResult.scope === "daily" ? "Daily" : "Monthly"} API quota exceeded for tier '${quotaResult.tier}'.`,
+          daily: quotaResult.daily,
+          monthly: quotaResult.monthly,
+        });
+      }
+    }
+
     return requestContextStore.run({ requestId }, async () => {
       try {
         if (req.method === "GET" && pathname === "/info") {
@@ -417,6 +488,16 @@ export function createApp({
 
         if (req.method === "GET" && url.pathname === "/events") {
           return handleEventsRequest(req, res, url, { config, soroban });
+        }
+
+        if (req.method === "GET" && pathname === "/events/poll") {
+          return handleLongPollRequest(req, res, url, { config, soroban });
+        }
+
+        if (req.method === "GET" && pathname === "/quota") {
+          if (!await requireAuth(req, res, config, [])) return;
+          const usage = quota.peek(req);
+          return sendJson(res, 200, { ...usage, overageMode: quota.overageMode });
         }
 
         if (req.method === "GET" && pathname === "/metrics") {
@@ -693,6 +774,31 @@ export function createApp({
           webhookService.trigger("credential.revoked", { id: credentialId, revokedAt: revoked.revokedAt }).catch(() => {});
           realtime?.emitCredentialEvent("revoked", revoked);
           return sendJson(res, 200, { revoked: true, credential: revoked });
+        }
+
+        // ── Batch Operations (#749) ─────────────────────────────────────
+        if (req.method === "POST" && pathname === "/batch") {
+          if (validateContentType(req, res)) return;
+          const body = await readJson(req, config);
+          if (body.__payloadTooLarge)
+            return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+          const validated = validateRequest(res, schemas.batchOperations, { body });
+          if (!validated.ok) return;
+          const { operations, atomic } = validated.data.body;
+
+          // Auth requirement follows whichever operation types are present:
+          // issue/revoke mutate state and need write scope, verify only reads.
+          const types = new Set(operations.map((op) => op.type));
+          const requiredScopes = [];
+          if (types.has("issue") || types.has("revoke")) requiredScopes.push("credentials:write");
+          if (types.has("verify")) requiredScopes.push("credentials:read");
+          if (!await requireAuth(req, res, config, requiredScopes)) return;
+
+          const batchResult = await executeBatch(
+            { operations, atomic: Boolean(atomic) },
+            { config, webhookService, realtime, metrics },
+          );
+          return sendJson(res, 200, batchResult);
         }
 
         // ── Webhook Endpoints ──────────────────────────────────────────
