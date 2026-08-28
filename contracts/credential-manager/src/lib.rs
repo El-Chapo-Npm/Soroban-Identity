@@ -41,6 +41,21 @@ const TTL_MAX: u32 = 6_312_000;
 const TTL_MIN: u32 = 17_280;
 const PAGE_CAP: u32 = 100;
 
+// ── Issue #732: credential dependency chain storage keys ──────────────────────
+/// Maps a credential ID to its list of prerequisite credential IDs.
+const CRED_DEPS: Symbol = symbol_short!("CREDDEPS");
+/// Maps a credential ID to the list of credentials that depend on it
+/// (reverse index — used for cascade-revoke on parent revocation).
+const CRED_RDEPS: Symbol = symbol_short!("CREDRDEP");
+/// Maximum number of direct prerequisites per credential (#732 max-depth guard).
+const MAX_PREREQS: u32 = 10;
+/// Maximum dependency chain depth to traverse during verification (#732).
+const MAX_DEP_DEPTH: u32 = 5;
+
+// ── Issue #733: batch verification cap ────────────────────────────────────────
+/// Maximum number of credential IDs accepted in a single `verify_credentials_batch` call.
+const MAX_VERIFY_BATCH: u32 = 50;
+
 #[contracterror]
 #[derive(Clone, Debug, PartialEq, Copy)]
 pub enum ContractError {
@@ -59,14 +74,23 @@ pub enum ContractError {
     CredentialNotExpiredYet = 13,
     /// New expiry must be strictly later than the current expiry
     NewExpiryNotLater = 14,
-    /// Issue #551: a guarded function was re-entered while a prior
-    /// invocation (which is mid cross-contract call) had not yet completed.
-    ReentrantCall = 20,
     SubjectHasNoDid = 15,
     InvalidMaxIssuers = 16,
     BatchTooLarge = 17,
     InvalidSchemaHash = 18,
     ContractPaused = 19,
+    /// Issue #551: a guarded function was re-entered while a prior
+    /// invocation (which is mid cross-contract call) had not yet completed.
+    ReentrantCall = 20,
+    /// Issue #732: a prerequisite credential is not valid (revoked, expired, or missing).
+    PrerequisiteNotMet = 21,
+    /// Issue #732: adding the requested prerequisite would create a cycle in
+    /// the dependency graph.
+    CircularDependency = 22,
+    /// Issue #732: the number of prerequisites would exceed MAX_PREREQS.
+    TooManyPrerequisites = 23,
+    /// Issue #732: dependency chain depth would exceed MAX_DEP_DEPTH.
+    DependencyDepthExceeded = 24,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -100,6 +124,31 @@ pub struct CredentialIdsPage {
 pub struct IssuersPage {
     pub items: Vec<Address>,
     pub next_cursor: Option<u64>,
+}
+
+// ── Issue #732: dependency chain types ────────────────────────────────────────
+
+/// One entry in a `verify_credentials_batch` response (#733).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BatchVerifyResult {
+    /// The credential ID that was checked.
+    pub id: BytesN<32>,
+    /// `true` if the credential passed all validity checks including its
+    /// full prerequisite chain; `false` otherwise.
+    pub valid: bool,
+}
+
+/// The full prerequisite tree rooted at a given credential (#732).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DependencyTree {
+    /// The credential whose tree is being described.
+    pub id: BytesN<32>,
+    /// Direct prerequisite IDs of this credential.
+    pub prerequisites: Vec<BytesN<32>>,
+    /// Whether this credential itself is currently valid.
+    pub valid: bool,
 }
 
 #[contracttype]
@@ -453,8 +502,12 @@ impl CredentialManager {
         let revoked_at: u64 = env.ledger().timestamp();
         env.events().publish(
             (CRED, symbol_short!("revoked")),
-            (EVENT_VERSION, credential_id, issuer, revoked_at),
+            (EVENT_VERSION, credential_id.clone(), issuer, revoked_at),
         );
+
+        // Issue #732: cascade-revoke all credentials that depend on this one.
+        Self::cascade_revoke_dependants(&env, &credential_id, 0);
+
         Ok(())
     }
 
@@ -566,6 +619,8 @@ impl CredentialManager {
         Ok(())
     }
 
+    /// Verify a credential is valid, not revoked, not expired, and that its
+    /// entire prerequisite chain (issue #732) also passes.
     pub fn verify_credential(env: Env, credential_id: BytesN<32>) -> Result<(), ContractError> {
         let key = Self::cred_key(&credential_id);
         match env.storage().persistent().get::<_, Credential>(&key) {
@@ -580,6 +635,16 @@ impl CredentialManager {
                 }
                 let ttl = Self::ttl_for_credential(&env, cred.expires_at);
                 env.storage().persistent().extend_ttl(&key, ttl, ttl);
+
+                // Issue #732: check that every prerequisite in the dependency
+                // chain is also currently valid.
+                let prereqs = Self::fetch_prereqs(&env, &credential_id);
+                for prereq_id in prereqs.iter() {
+                    if !Self::check_credential_valid(&env, &prereq_id, 0) {
+                        return Err(ContractError::PrerequisiteNotMet);
+                    }
+                }
+
                 Ok(())
             }
         }
@@ -708,6 +773,171 @@ impl CredentialManager {
             revoked_credentials: revoked,
             active_credentials: total.saturating_sub(revoked),
         }
+    }
+
+    // ── Issue #732: credential dependency chain API ───────────────────────────
+
+    /// Set the prerequisite credential IDs for an existing credential.
+    ///
+    /// Only the original issuer of `credential_id` may call this. The function:
+    /// - Rejects if `prerequisites.len() > MAX_PREREQS`.
+    /// - Rejects if any of the prerequisite IDs form a cycle back to
+    ///   `credential_id` (circular dependency check up to `MAX_DEP_DEPTH`).
+    /// - Validates that every listed prerequisite exists and is currently valid.
+    /// - Writes the forward (`CRED_DEPS`) index and the reverse (`CRED_RDEPS`)
+    ///   index so cascade-revoke can walk dependants efficiently.
+    pub fn set_prerequisites(
+        env: Env,
+        issuer: Address,
+        credential_id: BytesN<32>,
+        prerequisites: Vec<BytesN<32>>,
+    ) -> Result<(), ContractError> {
+        issuer.require_auth();
+        Self::require_not_paused(&env)?;
+
+        if prerequisites.len() > MAX_PREREQS {
+            return Err(ContractError::TooManyPrerequisites);
+        }
+
+        // Credential must exist and caller must be its issuer.
+        let cred_key = Self::cred_key(&credential_id);
+        let cred: Credential = env
+            .storage()
+            .persistent()
+            .get(&cred_key)
+            .ok_or(ContractError::CredentialNotFound)?;
+        if cred.issuer != issuer {
+            return Err(ContractError::UnauthorizedIssuer);
+        }
+
+        // Validate each prerequisite: must exist and be currently valid.
+        // Also check depth: no prerequisite chain longer than MAX_DEP_DEPTH.
+        for prereq_id in prerequisites.iter() {
+            // Existence + validity check.
+            let prereq_key = Self::cred_key(&prereq_id);
+            let prereq: Credential = env
+                .storage()
+                .persistent()
+                .get(&prereq_key)
+                .ok_or(ContractError::PrerequisiteNotMet)?;
+            if prereq.revoked {
+                return Err(ContractError::PrerequisiteNotMet);
+            }
+            let now = env.ledger().timestamp();
+            if prereq.expires_at > 0 && now > prereq.expires_at {
+                return Err(ContractError::PrerequisiteNotMet);
+            }
+
+            // Circular-dependency check: walk the existing prerequisite chain
+            // of `prereq_id` to ensure `credential_id` does not appear.
+            Self::check_no_cycle(&env, &credential_id, &prereq_id, 0)?;
+        }
+
+        // Remove old reverse-index entries for this credential.
+        let old_prereqs = Self::fetch_prereqs(&env, &credential_id);
+        for old_id in old_prereqs.iter() {
+            let rdep_key = (CRED_RDEPS, old_id.clone());
+            let mut rdeps: Vec<BytesN<32>> = env
+                .storage()
+                .persistent()
+                .get(&rdep_key)
+                .unwrap_or_else(|| Vec::new(&env));
+            let mut updated: Vec<BytesN<32>> = Vec::new(&env);
+            for dep in rdeps.iter() {
+                if dep != credential_id {
+                    updated.push_back(dep);
+                }
+            }
+            rdeps = updated;
+            env.storage().persistent().set(&rdep_key, &rdeps);
+            env.storage().persistent().extend_ttl(&rdep_key, TTL_MAX, TTL_MAX);
+        }
+
+        // Write new forward index.
+        let deps_key = (CRED_DEPS, credential_id.clone());
+        env.storage().persistent().set(&deps_key, &prerequisites);
+        env.storage().persistent().extend_ttl(&deps_key, TTL_MAX, TTL_MAX);
+
+        // Write new reverse index entries.
+        for prereq_id in prerequisites.iter() {
+            let rdep_key = (CRED_RDEPS, prereq_id.clone());
+            let mut rdeps: Vec<BytesN<32>> = env
+                .storage()
+                .persistent()
+                .get(&rdep_key)
+                .unwrap_or_else(|| Vec::new(&env));
+            if !rdeps.contains(&credential_id) {
+                rdeps.push_back(credential_id.clone());
+            }
+            env.storage().persistent().set(&rdep_key, &rdeps);
+            env.storage().persistent().extend_ttl(&rdep_key, TTL_MAX, TTL_MAX);
+        }
+
+        env.events().publish(
+            (CRED, symbol_short!("prereq_set")),
+            (EVENT_VERSION, credential_id, prerequisites),
+        );
+        Ok(())
+    }
+
+    /// Return the direct prerequisite IDs for a credential.
+    pub fn get_prerequisites(env: Env, credential_id: BytesN<32>) -> Vec<BytesN<32>> {
+        Self::fetch_prereqs(&env, &credential_id)
+    }
+
+    /// Return the credentials that directly depend on `credential_id`.
+    pub fn get_dependants(env: Env, credential_id: BytesN<32>) -> Vec<BytesN<32>> {
+        let rdep_key = (CRED_RDEPS, credential_id.clone());
+        env.storage()
+            .persistent()
+            .get(&rdep_key)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Return the dependency tree rooted at `credential_id` (up to `MAX_DEP_DEPTH` deep).
+    ///
+    /// Returns a flat `DependencyTree` describing the direct prerequisites of `credential_id`
+    /// and whether the root credential itself is valid. Callers can walk the tree recursively
+    /// by calling this function for each prerequisite ID.
+    pub fn get_dependency_tree(env: Env, credential_id: BytesN<32>) -> Result<DependencyTree, ContractError> {
+        let cred_key = Self::cred_key(&credential_id);
+        let cred: Credential = env
+            .storage()
+            .persistent()
+            .get(&cred_key)
+            .ok_or(ContractError::CredentialNotFound)?;
+
+        let now = env.ledger().timestamp();
+        let valid = !cred.revoked && (cred.expires_at == 0 || now <= cred.expires_at);
+        let prerequisites = Self::fetch_prereqs(&env, &credential_id);
+
+        Ok(DependencyTree {
+            id: credential_id,
+            prerequisites,
+            valid,
+        })
+    }
+
+    // ── Issue #733: batch verify credentials ──────────────────────────────────
+
+    /// Verify multiple credentials in a single call, returning one result per ID.
+    ///
+    /// Capped at `MAX_VERIFY_BATCH` (50) entries. Each result includes whether
+    /// the full prerequisite chain also passes. No `require_auth` is needed;
+    /// verification is read-only. Returns `BatchTooLarge` if `ids.len() > 50`.
+    pub fn verify_credentials_batch(
+        env: Env,
+        ids: Vec<BytesN<32>>,
+    ) -> Result<Vec<BatchVerifyResult>, ContractError> {
+        if ids.len() > MAX_VERIFY_BATCH {
+            return Err(ContractError::BatchTooLarge);
+        }
+        let mut results: Vec<BatchVerifyResult> = Vec::new(&env);
+        for id in ids.iter() {
+            let valid = Self::check_credential_valid(&env, &id, 0);
+            results.push_back(BatchVerifyResult { id, valid });
+        }
+        Ok(results)
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -885,6 +1115,107 @@ impl CredentialManager {
         }
         let ledgers = ((expires_at - now) / 5) as u32;
         ledgers.min(TTL_MAX).max(TTL_MIN)
+    }
+
+    // ── Issue #732 private helpers ─────────────────────────────────────────────
+
+    /// Fetch the direct prerequisite IDs for a credential.
+    fn fetch_prereqs(env: &Env, credential_id: &BytesN<32>) -> Vec<BytesN<32>> {
+        let key = (CRED_DEPS, credential_id.clone());
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+        }
+        env.storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env))
+    }
+
+    /// Check that adding `new_prereq` as a prerequisite of `root` would not
+    /// create a cycle. Walks the prerequisite chain of `new_prereq` up to
+    /// `MAX_DEP_DEPTH` levels deep; returns `CircularDependency` if `root`
+    /// appears anywhere in that chain, or `DependencyDepthExceeded` if the
+    /// chain is already at the depth limit.
+    fn check_no_cycle(
+        env: &Env,
+        root: &BytesN<32>,
+        current: &BytesN<32>,
+        depth: u32,
+    ) -> Result<(), ContractError> {
+        if depth >= MAX_DEP_DEPTH {
+            return Err(ContractError::DependencyDepthExceeded);
+        }
+        let prereqs = Self::fetch_prereqs(env, current);
+        for p in prereqs.iter() {
+            if p == *root {
+                return Err(ContractError::CircularDependency);
+            }
+            Self::check_no_cycle(env, root, &p, depth + 1)?;
+        }
+        Ok(())
+    }
+
+    /// Check whether a credential (and its entire prerequisite chain) is valid.
+    /// Returns `false` instead of an error so callers in batch-verify can
+    /// continue with other IDs.
+    fn check_credential_valid(env: &Env, id: &BytesN<32>, depth: u32) -> bool {
+        if depth >= MAX_DEP_DEPTH {
+            return false;
+        }
+        let key = Self::cred_key(id);
+        match env.storage().persistent().get::<_, Credential>(&key) {
+            None => false,
+            Some(cred) => {
+                if cred.revoked {
+                    return false;
+                }
+                let now = env.ledger().timestamp();
+                if cred.expires_at > 0 && now > cred.expires_at {
+                    return false;
+                }
+                // Recursively validate all prerequisites.
+                let prereqs = Self::fetch_prereqs(env, id);
+                for prereq_id in prereqs.iter() {
+                    if !Self::check_credential_valid(env, &prereq_id, depth + 1) {
+                        return false;
+                    }
+                }
+                true
+            }
+        }
+    }
+
+    /// Cascade-revoke all credentials that list `parent_id` as a prerequisite.
+    /// Walks the reverse-dependency index up to `MAX_DEP_DEPTH` levels deep
+    /// and marks each dependent as revoked, emitting a `dep_revoked` event.
+    /// Already-revoked dependants are skipped silently.
+    fn cascade_revoke_dependants(env: &Env, parent_id: &BytesN<32>, depth: u32) {
+        if depth >= MAX_DEP_DEPTH {
+            return;
+        }
+        let rdep_key = (CRED_RDEPS, parent_id.clone());
+        let dependants: Vec<BytesN<32>> = env
+            .storage()
+            .persistent()
+            .get(&rdep_key)
+            .unwrap_or_else(|| Vec::new(env));
+        for dep_id in dependants.iter() {
+            let dep_key = Self::cred_key(&dep_id);
+            if let Some(mut dep) = env.storage().persistent().get::<_, Credential>(&dep_key) {
+                if !dep.revoked {
+                    dep.revoked = true;
+                    env.storage().persistent().set(&dep_key, &dep);
+                    let revoked: u32 = env.storage().instance().get(&REVOKED_CNT).unwrap_or(0);
+                    env.storage().instance().set(&REVOKED_CNT, &(revoked + 1));
+                    env.events().publish(
+                        (CRED, symbol_short!("dep_rev")),
+                        (EVENT_VERSION, dep_id.clone(), parent_id.clone()),
+                    );
+                    // Recurse: cascade to credentials that depend on this one.
+                    Self::cascade_revoke_dependants(env, &dep_id, depth + 1);
+                }
+            }
+        }
     }
 }
 

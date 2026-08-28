@@ -441,11 +441,20 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
   const pagedCredentials = sortedCredentials.slice(pageStart, pageStart + pageSize);
 
   // Reset to page 1 whenever the active filters change the result set shape.
-  useEffect(() => {
+  // We do this synchronously in the click handler (not via useEffect) so the
+  // corrected page number is applied in the same render cycle and there is
+  // never a frame showing an empty page. Fixes #734.
+  const handleFilterChange = (type: FilterType) => {
+    setActiveFilter(type);
     setPage(1);
     updatePaginationParams(1, pageSize);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeFilter, activeExpiryFilter]);
+  };
+
+  const handleExpiryFilterChange = (status: ExpiryFilterType) => {
+    setActiveExpiryFilter(status);
+    setPage(1);
+    updatePaginationParams(1, pageSize);
+  };
 
   const handleIssue = async () => {
     if (issuing) return; // guard against duplicate submissions
@@ -549,7 +558,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
             return (
               <button
                 key={type}
-                onClick={() => setActiveFilter(type)}
+                onClick={() => handleFilterChange(type)}
                 style={{
                   padding: "0.3rem 0.75rem",
                   borderRadius: "999px",
@@ -587,7 +596,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
             return (
               <button
                 key={status}
-                onClick={() => setActiveExpiryFilter(status)}
+                onClick={() => handleExpiryFilterChange(status)}
                 style={{
                   padding: "0.3rem 0.75rem",
                   borderRadius: "999px",
