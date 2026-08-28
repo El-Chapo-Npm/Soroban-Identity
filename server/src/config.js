@@ -301,6 +301,13 @@ export function loadConfig(env = process.env) {
       credential: env.CREDENTIAL_CONTRACT_ID ?? env.CREDENTIAL_MANAGER_ID ?? "",
       reputation: env.REPUTATION_ID ?? "",
     },
+    // OAuth 2.0 authorization server (#744).
+    oauthStorePath: env.OAUTH_STORE_PATH
+      ? path.resolve(env.OAUTH_STORE_PATH)
+      : path.join(DEFAULT_DATA_DIR, "oauth-store.json"),
+    oauthAuthCodeTtlMs: parseInteger(env.OAUTH_AUTH_CODE_TTL_MS, 60 * 1000),
+    oauthAccessTokenTtlMs: parseInteger(env.OAUTH_ACCESS_TOKEN_TTL_MS, 60 * 60 * 1000),
+    oauthRefreshTokenTtlMs: parseInteger(env.OAUTH_REFRESH_TOKEN_TTL_MS, 30 * 24 * 60 * 60 * 1000),
   };
 }
 
@@ -350,6 +357,9 @@ export function validateConfig(env = process.env) {
     { key: "ACCESS_LOG_MAX_BYTES", desc: "must be a valid integer" },
     { key: "ACCESS_LOG_MAX_FILES", desc: "must be a valid integer" },
     { key: "LOG_PAYLOAD_MAX_BYTES", desc: "must be a valid integer" },
+    { key: "OAUTH_AUTH_CODE_TTL_MS", desc: "must be a valid integer" },
+    { key: "OAUTH_ACCESS_TOKEN_TTL_MS", desc: "must be a valid integer" },
+    { key: "OAUTH_REFRESH_TOKEN_TTL_MS", desc: "must be a valid integer" },
   ];
 
   for (const item of numericVars) {
