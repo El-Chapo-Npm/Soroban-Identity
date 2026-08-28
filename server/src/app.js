@@ -64,6 +64,7 @@ import { EmailTransport } from "./email.js";
 import { pickQuotaBinding, QuotaTracker, notifyQuotaThresholdOwner } from "./quota.js";
 import { executeBatch } from "./batch.js";
 import { DeprecationRegistry, notifyDeprecatedEndpointOwner } from "./deprecation.js";
+import { DdosProtection, ddosResponse } from "./ddos-protection.js";
 const SERVER_VERSION = "0.1.0";
 const MIN_SDK_VERSION = "0.1.0";
 const SERVER_FEATURES = [
@@ -96,6 +97,7 @@ export function createApp({
   emailTransport = new EmailTransport(config),
   quotaTracker = null,
   deprecationRegistry = null,
+  ddosProtection = null,
 }) {
   // Expose the key service on config so http-utils.requireAuth can validate
   // issued API keys instead of falling back to the single admin key.
@@ -122,6 +124,15 @@ export function createApp({
         metrics?.observeQuotaThreshold?.({ tier, period, threshold });
         logger.warn({ apiKeyId, tier, period, threshold, used, limit }, "API quota threshold reached");
         return notifyQuotaThresholdOwner({ config, apiKeyService, emailTransport, apiKeyId, tier, period, threshold, used, limit });
+      },
+    });
+
+  const ddos =
+    ddosProtection ??
+    new DdosProtection(config, {
+      onAlert: async (event) => {
+        metrics?.observeDdosEvent?.(event.type);
+        logger.warn(event, "DDoS protection event");
       },
     });
 
@@ -192,6 +203,13 @@ export function createApp({
         sink: accessLogSink,
       });
       res.on("finish", () => finishAccessLog({ requestBody: req.loggedBody ?? null }));
+    }
+
+    // Origin-side DDoS controls run before authentication, body parsing, or RPC work.
+    // Health/observability endpoints remain available for load balancers and alerts.
+    if (!isMetricsEndpoint && !["/health", "/ready", "/live"].includes(pathname)) {
+      const trafficResult = await ddos.check(req);
+      if (!trafficResult.allowed) return ddosResponse(res, trafficResult);
     }
 
     // Apply CORS headers
