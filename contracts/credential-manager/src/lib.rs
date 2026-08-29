@@ -3,8 +3,8 @@
 
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN, Env,
-    IntoVal, Map, String, Symbol, Val, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short,
+    Address, Bytes, BytesN, Env, IntoVal, Map, String, Symbol, Val, Vec,
 };
 
 pub const CONTRACT_VERSION: u32 = 1;
