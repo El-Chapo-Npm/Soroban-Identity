@@ -68,6 +68,12 @@ const CRED_BY_ISSUED: Symbol = symbol_short!("CBISS");
 /// Secondary index: credentials by expiry timestamp for range queries
 const CRED_BY_EXPIRY: Symbol = symbol_short!("CBEXP");
 
+// ── Issue #663: Contract upgrade mechanism ────────────────────────────────────
+/// Pending upgrade proposal with timelock
+const UPGRADE_PROPOSAL: Symbol = symbol_short!("UPGPROP");
+/// Default timelock duration for upgrades (7 days = 604,800 seconds)
+const DEFAULT_UPGRADE_TIMELOCK: u32 = 604_800;
+
 #[contracterror]
 #[derive(Clone, Debug, PartialEq, Copy)]
 pub enum ContractError {
@@ -103,9 +109,29 @@ pub enum ContractError {
     TooManyPrerequisites = 23,
     /// Issue #732: dependency chain depth would exceed MAX_DEP_DEPTH.
     DependencyDepthExceeded = 24,
+    /// Issue #663: no upgrade proposal is pending
+    NoUpgradePending = 25,
+    /// Issue #663: upgrade proposal timelock has not expired
+    UpgradeTimelockNotExpired = 26,
+    /// Issue #663: upgrade proposal has already been executed
+    UpgradeAlreadyExecuted = 27,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
+
+/// Issue #663: Upgrade proposal structure with timelock
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct UpgradeProposal {
+    /// Hash of the new contract WASM code
+    pub new_wasm_hash: BytesN<32>,
+    /// Timestamp when this proposal was created
+    pub proposed_at: u64,
+    /// Timelock duration in seconds before upgrade can be executed
+    pub timelock_duration: u32,
+    /// Whether this proposal has been executed
+    pub executed: bool,
+}
 
 #[contracttype]
 #[derive(Clone)]
@@ -256,14 +282,84 @@ impl CredentialManager {
         Ok(())
     }
 
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
+    /// Issue #663: Propose a contract upgrade with timelock.
+    /// Creates an upgrade proposal that must be approved after a timelock expires.
+    /// Only the admin can propose upgrades.
+    pub fn propose_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+        timelock_duration: Option<u32>,
+    ) -> Result<(), ContractError> {
         admin.require_auth();
         let stored: Address = env.storage().instance().get(&ADMIN).ok_or(ContractError::NotInitialized)?;
         if stored != admin {
             return Err(ContractError::Unauthorized);
         }
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        let timelock = timelock_duration.unwrap_or(DEFAULT_UPGRADE_TIMELOCK);
+        let proposal = UpgradeProposal {
+            new_wasm_hash: new_wasm_hash.clone(),
+            proposed_at: env.ledger().timestamp(),
+            timelock_duration: timelock,
+            executed: false,
+        };
+        env.storage().instance().set(&UPGRADE_PROPOSAL, &proposal);
+        env.events().publish(
+            (ADMIN, symbol_short!("upg_prop")),
+            (EVENT_VERSION, new_wasm_hash, timelock),
+        );
         Ok(())
+    }
+
+    /// Issue #663: Execute a proposed upgrade after timelock expires.
+    /// Only the admin can execute upgrades. The timelock must have expired.
+    pub fn execute_upgrade(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored: Address = env.storage().instance().get(&ADMIN).ok_or(ContractError::NotInitialized)?;
+        if stored != admin {
+            return Err(ContractError::Unauthorized);
+        }
+        let mut proposal: UpgradeProposal = env.storage().instance().get(&UPGRADE_PROPOSAL)
+            .ok_or(ContractError::NoUpgradePending)?;
+        if proposal.executed {
+            return Err(ContractError::UpgradeAlreadyExecuted);
+        }
+        let now = env.ledger().timestamp();
+        let unlock_time = proposal.proposed_at + (proposal.timelock_duration as u64);
+        if now < unlock_time {
+            return Err(ContractError::UpgradeTimelockNotExpired);
+        }
+        proposal.executed = true;
+        env.storage().instance().set(&UPGRADE_PROPOSAL, &proposal);
+        env.deployer().update_current_contract_wasm(proposal.new_wasm_hash.clone());
+        env.events().publish(
+            (ADMIN, symbol_short!("upg_exec")),
+            (EVENT_VERSION, proposal.new_wasm_hash),
+        );
+        Ok(())
+    }
+
+    /// Issue #663: Cancel a pending upgrade proposal.
+    /// Only the admin can cancel upgrades.
+    pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored: Address = env.storage().instance().get(&ADMIN).ok_or(ContractError::NotInitialized)?;
+        if stored != admin {
+            return Err(ContractError::Unauthorized);
+        }
+        let proposal: UpgradeProposal = env.storage().instance().get(&UPGRADE_PROPOSAL)
+            .ok_or(ContractError::NoUpgradePending)?;
+        if proposal.executed {
+            return Err(ContractError::UpgradeAlreadyExecuted);
+        }
+        env.storage().instance().remove(&UPGRADE_PROPOSAL);
+        env.events().publish((ADMIN, symbol_short!("upg_cancel")), EVENT_VERSION);
+        Ok(())
+    }
+
+    /// Issue #663: Get pending upgrade proposal details.
+    pub fn get_upgrade_proposal(env: Env) -> Option<UpgradeProposal> {
+        env.storage().instance().get(&UPGRADE_PROPOSAL)
     }
 
     pub fn pause(env: Env) -> Result<(), ContractError> {
