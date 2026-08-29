@@ -167,6 +167,20 @@ pub struct Credential {
     pub schema_hash: Option<BytesN<32>>,
 }
 
+// ── Issue #661: Storage optimization structures ────────────────────────────────
+/// Packed storage for contract-wide configuration to reduce storage operations.
+/// Combines multiple config fields into a single storage entry for efficiency.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ContractConfig {
+    /// Maximum number of issuers allowed
+    pub max_issuers: u32,
+    /// Whether the contract is paused
+    pub is_paused: bool,
+}
+
+const CONFIG: Symbol = symbol_short!("CFG");
+
 // ── Reentrancy guard (Issue #551) ──────────────────────────────────────────────
 //
 // Cross-contract call order for this contract:
@@ -242,20 +256,24 @@ impl CredentialManager {
 
     pub fn pause(env: Env) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
-        env.storage().instance().set(&PAUSED, &true);
+        let mut config = Self::get_config(&env);
+        config.is_paused = true;
+        Self::set_config(&env, &config);
         env.events().publish((symbol_short!("contract"), symbol_short!("paused")), EVENT_VERSION);
         Ok(())
     }
 
     pub fn unpause(env: Env) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
-        env.storage().instance().set(&PAUSED, &false);
+        let mut config = Self::get_config(&env);
+        config.is_paused = false;
+        Self::set_config(&env, &config);
         env.events().publish((symbol_short!("contract"), symbol_short!("unpaused")), EVENT_VERSION);
         Ok(())
     }
 
     pub fn is_paused(env: Env) -> bool {
-        env.storage().instance().get(&PAUSED).unwrap_or(false)
+        Self::get_config(&env).is_paused
     }
 
     pub fn add_issuer(env: Env, issuer: Address) -> Result<(), ContractError> {
@@ -281,8 +299,10 @@ impl CredentialManager {
         if new_max == 0 || new_max > ABSOLUTE_MAX_ISSUERS {
             return Err(ContractError::InvalidMaxIssuers);
         }
-        let old_max = Self::get_max_issuers_internal(&env);
-        env.storage().instance().set(&MAX_ISSUERS_CFG, &new_max);
+        let mut config = Self::get_config(&env);
+        let old_max = config.max_issuers;
+        config.max_issuers = new_max;
+        Self::set_config(&env, &config);
         env.events().publish(
             (ADMIN, Symbol::new(&env, "admin_config_changed")),
             (EVENT_VERSION, symbol_short!("max_iss"), old_max, new_max),
@@ -996,8 +1016,22 @@ impl CredentialManager {
         Ok(())
     }
 
+    /// Issue #661: Get packed config from storage (optimized single read).
+    fn get_config(env: &Env) -> ContractConfig {
+        env.storage().instance().get(&CONFIG).unwrap_or(ContractConfig {
+            max_issuers: MAX_ISSUERS,
+            is_paused: false,
+        })
+    }
+
+    /// Issue #661: Set packed config to storage (optimized single write).
+    fn set_config(env: &Env, config: &ContractConfig) {
+        env.storage().instance().set(&CONFIG, config);
+    }
+
     fn require_not_paused(env: &Env) -> Result<(), ContractError> {
-        if env.storage().instance().get(&PAUSED).unwrap_or(false) {
+        let config = Self::get_config(env);
+        if config.is_paused {
             return Err(ContractError::ContractPaused);
         }
         Ok(())
@@ -1014,13 +1048,13 @@ impl CredentialManager {
         env.storage().instance().get(&ISSUER).unwrap_or_else(|| Vec::new(env))
     }
 
-    /// Current effective issuer cap.
+    /// Current effective issuer cap (Issue #661: optimized via packed config).
     fn effective_max_issuers(env: &Env) -> u32 {
-        env.storage().instance().get(&MAX_ISSUERS_CFG).unwrap_or(MAX_ISSUERS)
+        Self::get_config(env).max_issuers
     }
 
     fn get_max_issuers_internal(env: &Env) -> u32 {
-        env.storage().instance().get(&MAX_ISSUERS_CFG).unwrap_or(MAX_ISSUERS)
+        Self::get_config(env).max_issuers
     }
 
     /// Derives the deterministic credential ID as
