@@ -1036,7 +1036,7 @@ impl CredentialManager {
         Ok(results)
     }
 
-    // ── Issue #659: Proof of possession challenge (credential proof requirements) ──
+    // -- Issue #659: Proof of possession challenge (credential proof requirements)
     /// Generates a challenge for proof of possession. The subject must sign this
     /// challenge with their private key before issuing a credential.
     ///
