@@ -1,5 +1,8 @@
 import { readCredentials, upsertCredential, writeCredentials } from './storage.js';
 import { logger } from './logger.js';
+import { CronJob } from './cron.js';
+import { EmailTransport, renderExpirySubject, renderExpiryBody, resolveRecipient } from './email.js';
+import { appendNotificationLog } from './notification-log.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -71,21 +74,61 @@ function upperBound(index, upper) {
   return lo;
 }
 
-export function findExpiringCredentials(credentials, { windowDays, now = new Date(), includeNotified = false } = {}) {
+export function findExpiringCredentials(
+  credentials,
+  {
+    windowDays,
+    thresholds = [30, 7, 1],
+    now = new Date(),
+    includeNotified = false,
+    includeSnoozed = false,
+  } = {}
+) {
   if (_indexedCredentials !== credentials) {
     _expiryIndex = buildExpiryIndex(credentials);
     _indexedCredentials = credentials;
   }
 
   const nowMs = now.getTime();
-  const upper = nowMs + windowDays * DAY_MS;
+  const sortedThresholds = Array.isArray(thresholds) && thresholds.length > 0
+    ? [...thresholds].sort((a, b) => a - b)
+    : null;
+  const maxThreshold = sortedThresholds ? sortedThresholds[sortedThresholds.length - 1] : 7;
+  const effectiveWindowDays = windowDays ?? maxThreshold;
+  const upper = nowMs + effectiveWindowDays * DAY_MS;
 
   const lo = lowerBound(_expiryIndex, nowMs);
   const hi = upperBound(_expiryIndex, upper);
 
   return _expiryIndex
     .slice(lo, hi)
-    .filter((c) => includeNotified || !c.expiry_notified_at);
+    .filter((c) => {
+      // Exclude dismissed credentials unless requested
+      if (!includeSnoozed && c.expiry_dismissed) return false;
+      // Exclude snoozed credentials unless snooze has expired
+      if (!includeSnoozed && c.snoozed_until && Number(c.snoozed_until) > nowMs) return false;
+
+      if (includeNotified) return true;
+
+      // When thresholds are specified (e.g. [1, 7, 30])
+      if (sortedThresholds) {
+        const expiresAtMs = Number(c.expires_at || c.expiresAt) * 1000;
+        const daysRemaining = Math.max(0, Math.ceil((expiresAtMs - nowMs) / DAY_MS));
+        c.daysRemaining = daysRemaining;
+
+        // Find applicable threshold: smallest threshold >= daysRemaining
+        const dueThreshold = sortedThresholds.find((t) => daysRemaining <= t);
+        if (dueThreshold === undefined) return false;
+
+        const notifiedThresholds = Array.isArray(c.notified_thresholds) ? c.notified_thresholds : [];
+        if (notifiedThresholds.includes(dueThreshold)) return false;
+
+        c.dueThreshold = dueThreshold;
+        return true;
+      }
+
+      return !c.expiry_notified_at;
+    });
 }
 
 /**
@@ -126,9 +169,11 @@ export function paginate(items, { page = 1, pageSize = 50 } = {}) {
 }
 
 export class ExpiryNotificationJob {
-  constructor(config, soroban = null) {
+  constructor(config, soroban = null, { emailTransport = null } = {}) {
     this.config = config;
     this.soroban = soroban;
+    this.emailTransport = emailTransport ?? new EmailTransport(config);
+    this.cronJob = null;
     this.timer = null;
     this.nextLedger = Number.parseInt(process.env.EXPIRY_EVENTS_START_LEDGER ?? '0', 10);
 
@@ -165,23 +210,48 @@ export class ExpiryNotificationJob {
     await writeExpiryWatermark(this.config, this.nextLedger);
   }
 
+  /**
+   * Start the job.
+   *
+   * When `EXPIRY_CRON_SCHEDULE` is set the job runs on that cron schedule;
+   * otherwise it falls back to the historical fixed-interval behaviour so
+   * existing deployments keep working unchanged.
+   */
   start() {
-    if (this.timer) return;
-    this.runOnce().catch((error) => logger.error({ error: error.message, stack: error.stack }, 'Expiry job failed'));
-    this.timer = setInterval(() => {
-      this.runOnce().catch((error) => logger.error({ error: error.message, stack: error.stack }, 'Expiry job failed'));
-    }, this.config.expiryJobIntervalMs);
+    if (this.timer || this.cronJob) return;
+
+    const runSafely = () =>
+      this.runOnce().catch((error) =>
+        logger.error({ error: error.message, stack: error.stack }, 'Expiry job failed'),
+      );
+
+    if (this.config.expiryCronSchedule) {
+      this.cronJob = new CronJob(this.config.expiryCronSchedule, () => this.runOnce(), {
+        name: 'expiry-notifications',
+      });
+      this.cronJob.start();
+      return;
+    }
+
+    runSafely();
+    this.timer = setInterval(runSafely, this.config.expiryJobIntervalMs);
   }
 
   stop() {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    if (this.cronJob) this.cronJob.stop();
+    this.cronJob = null;
   }
 
   async runOnce() {
     let credentials = await readCredentials(this.config);
     credentials = await this.indexCredentialEvents(credentials);
-    const expiring = findExpiringCredentials(credentials, { windowDays: this.config.expiryWarningDays });
+    const thresholds = this.config.expiryReminderThresholds ?? [30, 7, 1];
+    const expiring = findExpiringCredentials(credentials, {
+      thresholds,
+      windowDays: Math.max(...thresholds, this.config.expiryWarningDays ?? 7),
+    });
     
     // Always persist credentials, even if none are expiring
     if (expiring.length === 0) {
@@ -190,7 +260,7 @@ export class ExpiryNotificationJob {
       return 0;
     }
     
-    logger.info({ count: expiring.length, concurrency: this.concurrency }, 'Processing expiring credentials');
+    logger.info({ count: expiring.length, concurrency: this.concurrency, thresholds }, 'Processing expiring credentials');
     
     // Create bounded concurrency pool
     const pool = createConcurrencyPool(this.concurrency);
@@ -200,8 +270,8 @@ export class ExpiryNotificationJob {
       expiring.map(credential => 
         pool(async () => {
           try {
-            await this.dispatch(credential);
-            return { credential, success: true };
+            const dispatchResult = await this.dispatch(credential);
+            return { credential, success: true, dispatchResult };
           } catch (error) {
             logger.error({ 
               credentialId: credential.id,
@@ -214,20 +284,44 @@ export class ExpiryNotificationJob {
       )
     );
     
-    // Update credentials with notification timestamps for successful dispatches
+    // Update credentials with notification timestamps and delivery status
     let updated = credentials;
     let successCount = 0;
     let failureCount = 0;
+    const nowIso = new Date().toISOString();
     
     for (const result of results) {
       if (result.status === 'fulfilled' && result.value.success) {
-        const { credential } = result.value;
+        const { credential, dispatchResult } = result.value;
+        const dueThreshold = credential.dueThreshold ?? this.config.expiryWarningDays ?? 7;
+        const notifiedThresholds = Array.isArray(credential.notified_thresholds)
+          ? [...new Set([...credential.notified_thresholds, dueThreshold])]
+          : [dueThreshold];
+
         updated = upsertCredential(updated, { 
           ...credential, 
-          expiry_notified_at: new Date().toISOString() 
+          expiry_notified_at: nowIso,
+          notified_thresholds: notifiedThresholds,
+          last_delivery_status: {
+            status: 'delivered',
+            timestamp: nowIso,
+            threshold: dueThreshold,
+            target: dispatchResult?.target,
+          },
         });
         successCount++;
       } else {
+        const credential = result.status === 'fulfilled' ? result.value.credential : null;
+        if (credential) {
+          updated = upsertCredential(updated, {
+            ...credential,
+            last_delivery_status: {
+              status: 'failed',
+              timestamp: nowIso,
+              error: result.value?.error?.message ?? 'Dispatch error',
+            },
+          });
+        }
         failureCount++;
       }
     }
@@ -257,22 +351,200 @@ export class ExpiryNotificationJob {
     return next;
   }
 
+  /**
+   * Deliver expiry notifications for one credential across every configured
+   * channel (webhook and email). Each channel is attempted independently with
+   * bounded retries, and every attempt is written to the notification log.
+   *
+   * Resolves when at least one channel delivered, or when every configured
+   * channel was skipped. Throws when all configured channels failed.
+   */
   async dispatch(credential) {
-    const target = this.config.subjectNotificationWebhooks[credential.subject] ?? this.config.notificationWebhookUrl;
-    if (!target) return;
-    const response = await fetch(target, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        type: 'credential.expiring',
-        credential_id: credential.id,
+    const expiresAt = Number(credential.expires_at || credential.expiresAt);
+    const now = Math.floor(Date.now() / 1000);
+    const daysRemaining =
+      credential.daysRemaining ?? Math.max(0, Math.ceil((expiresAt - now) / (24 * 3600)));
+    const threshold = credential.dueThreshold ?? this.config.expiryWarningDays ?? 7;
+
+    const results = await Promise.all([
+      this.deliverWebhook(credential, { expiresAt, daysRemaining, threshold }),
+      this.deliverEmail(credential, { daysRemaining, threshold }),
+    ]);
+
+    const delivered = results.filter((result) => result.status === 'delivered');
+    const failed = results.filter((result) => result.status === 'failed');
+
+    if (delivered.length === 0 && failed.length > 0) {
+      throw new Error(
+        `all notification channels failed: ${failed
+          .map((result) => `${result.channel}: ${result.error}`)
+          .join('; ')}`,
+      );
+    }
+
+    return {
+      target: delivered[0]?.target ?? null,
+      skipped: delivered.length === 0,
+      channels: results,
+      daysRemaining,
+      threshold,
+    };
+  }
+
+  /**
+   * Run one delivery attempt with exponential backoff, logging every attempt
+   * (success or failure) to the notification log.
+   */
+  async attemptWithRetries({ credential, channel, target, threshold, daysRemaining, send }) {
+    const maxRetries = Math.max(1, this.config.notificationMaxRetries ?? 3);
+    const baseMs = Math.max(1, this.config.notificationRetryBaseMs ?? 500);
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
+      const startTime = Date.now();
+      try {
+        const result = await send();
+        await appendNotificationLog(this.config, {
+          credentialId: credential.id,
+          channel,
+          status: 'delivered',
+          target,
+          threshold,
+          daysRemaining,
+          attempt,
+          durationMs: result?.durationMs ?? Date.now() - startTime,
+        });
+        logger.info(
+          { credentialId: credential.id, channel, target, attempt, threshold, daysRemaining },
+          'Expiry notification delivered',
+        );
+        // Spread first so the channel-level `status` is never shadowed by the
+        // transport's HTTP status code.
+        return {
+          ...result,
+          httpStatus: result?.status,
+          channel,
+          status: 'delivered',
+          target,
+          attempt,
+        };
+      } catch (error) {
+        lastError = error;
+        await appendNotificationLog(this.config, {
+          credentialId: credential.id,
+          channel,
+          status: 'failed',
+          target,
+          threshold,
+          daysRemaining,
+          attempt,
+          durationMs: Date.now() - startTime,
+          error: error.message,
+        });
+        logger.warn(
+          {
+            credentialId: credential.id,
+            channel,
+            target,
+            attempt,
+            maxRetries,
+            error: error.message,
+          },
+          'Expiry notification attempt failed',
+        );
+        if (attempt < maxRetries) {
+          await new Promise((resolve) => setTimeout(resolve, baseMs * 2 ** (attempt - 1)));
+        }
+      }
+    }
+
+    return { channel, status: 'failed', target, error: lastError?.message ?? 'unknown error' };
+  }
+
+  async deliverWebhook(credential, { expiresAt, daysRemaining, threshold }) {
+    const target =
+      this.config.subjectNotificationWebhooks[credential.subject] ??
+      credential.notificationWebhookUrl ??
+      this.config.notificationWebhookUrl;
+
+    if (!target) {
+      return { channel: 'webhook', status: 'skipped', target: null };
+    }
+
+    const payload = {
+      type: 'credential.expiry_reminder',
+      event: 'credential.expiry_reminder',
+      credential_id: credential.id,
+      threshold_days: threshold,
+      days_remaining: daysRemaining,
+      credential: {
+        id: credential.id,
         subject: credential.subject,
         issuer: credential.issuer,
-        expires_at: credential.expires_at,
-        warning_window_days: this.config.expiryWarningDays,
-      }),
+        credentialType: credential.credentialType,
+        expires_at: expiresAt,
+        expiry_date: new Date(expiresAt * 1000).toISOString(),
+        issued_at: credential.issued_at || credential.issuedAt,
+        claims: credential.claims,
+      },
+      warning_window_days: this.config.expiryWarningDays,
+      timestamp: new Date().toISOString(),
+    };
+
+    return this.attemptWithRetries({
+      credential,
+      channel: 'webhook',
+      target,
+      threshold,
+      daysRemaining,
+      send: async () => {
+        const startTime = Date.now();
+        const response = await fetch(target, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const durationMs = Date.now() - startTime;
+        if (!response.ok) {
+          throw new Error(`notification dispatch failed with HTTP ${response.status}`);
+        }
+        return { status: response.status, durationMs };
+      },
     });
-    if (!response.ok) throw new Error(`notification dispatch failed with HTTP ${response.status}`);
+  }
+
+  async deliverEmail(credential, { daysRemaining, threshold }) {
+    if (!this.emailTransport?.enabled) {
+      return { channel: 'email', status: 'skipped', target: null };
+    }
+
+    const recipient = resolveRecipient(this.config, credential);
+    if (!recipient) {
+      await appendNotificationLog(this.config, {
+        credentialId: credential.id,
+        channel: 'email',
+        status: 'skipped',
+        threshold,
+        daysRemaining,
+        error: 'no recipient address configured',
+      });
+      return { channel: 'email', status: 'skipped', target: null };
+    }
+
+    const subject = renderExpirySubject({
+      credentialType: credential.credentialType,
+      daysRemaining,
+    });
+    const { text, html } = renderExpiryBody({ credential, daysRemaining, threshold });
+
+    return this.attemptWithRetries({
+      credential,
+      channel: 'email',
+      target: recipient,
+      threshold,
+      daysRemaining,
+      send: () => this.emailTransport.send({ to: recipient, subject, text, html }),
+    });
   }
 }
 

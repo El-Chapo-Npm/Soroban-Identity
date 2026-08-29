@@ -9,7 +9,8 @@
   },
   "tabs": {
     "identity": "Identidad (DID)",
-    "credentials": "Credenciales"
+    "credentials": "Credenciales",
+    "label": "Secciones"
   },
   "wallet": {
     "connect": "Conectar Billetera",
@@ -73,5 +74,33 @@
     "expiresInHours_plural": "Expira en {{count}} horas",
     "expiresInMins": "Expira en {{count}} min",
     "expiresInMins_plural": "Expira en {{count}} mins"
+  },
+  "a11y": {
+    "skipToContent": "Saltar al contenido principal",
+    "switchLanguage": "Cambiar idioma",
+    "dismissNotification": "Descartar notificación"
+  },
+  "shortcuts": {
+    "title": "Atajos de Teclado",
+    "description": "Usa atajos de teclado para navegar e interactuar con la aplicación de manera más eficiente.",
+    "close": "Cerrar ayuda de atajos",
+    "enableShortcuts": "Habilitar atajos de teclado",
+    "hint": "Presiona ? para ver los atajos en cualquier momento. {{key}}+/ también funciona.",
+    "category": {
+      "navigation": "Navegación",
+      "actions": "Acciones",
+      "ui": "Interfaz de Usuario"
+    },
+    "table": {
+      "shortcut": "Atajo",
+      "description": "Descripción"
+    },
+    "search": "Abrir búsqueda",
+    "createCredential": "Crear nueva credencial",
+    "goToDIDs": "Ir a pestaña DIDs",
+    "goToCredentials": "Ir a pestaña Credenciales",
+    "toggleTheme": "Cambiar tema",
+    "showHelp": "Mostrar atajos de teclado",
+    "closeDialog": "Cerrar diálogo o modal"
   }
 }

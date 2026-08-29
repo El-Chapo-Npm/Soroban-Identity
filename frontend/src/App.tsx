@@ -1,15 +1,28 @@
-import { useState, useEffect, useCallback } from "react";
+import { lazy, Suspense, useState, useEffect, useCallback, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { SorobanRpc } from "@stellar/stellar-sdk";
-import IdentityPanel from "./components/IdentityPanel";
-import CredentialsPanel from "./components/CredentialsPanel";
+import LoadingFallback from "./components/LoadingFallback";
+import KeyboardShortcutsModal from "./components/KeyboardShortcutsModal";
+import { useKeyboardShortcuts, useSequentialShortcuts } from "./hooks/useKeyboardShortcuts";
+import { useKeyboardShortcutsContext } from "./context/KeyboardShortcutsContext";
+
+// Tab panels are route-like application surfaces. Keep the initial identity
+// route small and fetch the credentials route only when it is needed.
+const IdentityPanel = lazy(() => import("./components/IdentityPanel"));
+const CredentialsPanel = lazy(() => import("./components/CredentialsPanel"));
+const preloadCredentialsPanel = () => {
+  void import("./components/CredentialsPanel");
+};
 import WalletButton from "./components/WalletButton";
 import ErrorBoundary from "./components/ErrorBoundary";
 import Toast from "./components/Toast";
 import { ToastProvider } from "./context/ToastContext";
 import { useWallet } from "./hooks/useWallet";
 import { useCredentialExpiryCheck } from "./hooks/useCredentialExpiryCheck";
+import { useTheme } from "./context/ThemeContext";
 import { useTheme, cycleTheme, getThemeIcon, getThemeLabel } from "./hooks/useTheme";
+import { useServiceWorker } from "./hooks/useServiceWorker";
+import OfflineIndicator from "./components/OfflineIndicator";
 import {
   DEFAULT_NETWORK,
   NETWORK_CONFIGS,
@@ -24,6 +37,8 @@ import type { Credential } from "../../sdk/src/types";
 const SUPPORTED_LOCALES: { code: string; label: string }[] = [
   { code: "en", label: "EN" },
   { code: "es", label: "ES" },
+  { code: "fr", label: "FR" },
+  { code: "zh", label: "中文" },
 ];
 
 export enum Tab {
@@ -31,16 +46,35 @@ export enum Tab {
   Credentials = "credentials",
 }
 
+const TAB_ORDER: Tab[] = [Tab.Identity, Tab.Credentials];
+
 export default function App() {
   const [tab, setTab] = useState<Tab>(Tab.Identity);
+  const tabRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({});
   const [activeNetwork, setActiveNetwork] = useState<NetworkName>(DEFAULT_NETWORK);
   const [verifyId, setVerifyId] = useState<string | null>(null);
   const networkConfig = NETWORK_CONFIGS[activeNetwork];
   const wallet = useWallet(networkConfig);
+  const { isDark, toggleTheme } = useTheme();
   const [theme, setTheme, isDarkMode] = useTheme();
   const { t, i18n } = useTranslation();
   const [isConnected, setIsConnected] = useState<boolean | null>(null);
   const [uninitializedContracts, setUninitializedContracts] = useState<string[]>([]);
+  const [menuOpen, setMenuOpen] = useState(false);
+  
+  // Keyboard shortcuts
+  const { enabled: shortcutsEnabled, toggleHelp: toggleShortcutsHelp, showHelp: showShortcutsHelp } = useKeyboardShortcutsContext();
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Close the mobile nav drawer on Escape
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [menuOpen]);
 
   // Check for verify query param on load
   useEffect(() => {
@@ -104,14 +138,138 @@ export default function App() {
     setLocale(e.target.value);
   };
 
+  // WAI-ARIA tab pattern: Left/Right cycle, Home/End jump to the ends.
+  const handleTabKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const currentIndex = TAB_ORDER.indexOf(tab);
+    let nextIndex: number | null = null;
+
+    switch (event.key) {
+      case "ArrowRight":
+        nextIndex = (currentIndex + 1) % TAB_ORDER.length;
+        break;
+      case "ArrowLeft":
+        nextIndex = (currentIndex - 1 + TAB_ORDER.length) % TAB_ORDER.length;
+        break;
+      case "Home":
+        nextIndex = 0;
+        break;
+      case "End":
+        nextIndex = TAB_ORDER.length - 1;
+        break;
+      default:
+        return;
+    }
+
+    event.preventDefault();
+    const nextTab = TAB_ORDER[nextIndex];
+    setTab(nextTab);
+    tabRefs.current[nextTab]?.focus();
+  };
+
+  // Register keyboard shortcuts
+  useKeyboardShortcuts({
+    enabled: shortcutsEnabled,
+    shortcuts: [
+      {
+        key: 'k',
+        ctrl: true,
+        description: t('shortcuts.search'),
+        category: 'actions',
+        handler: () => {
+          // Focus search input if it exists
+          searchInputRef.current?.focus();
+        },
+      },
+      {
+        key: 'n',
+        ctrl: true,
+        description: t('shortcuts.createCredential'),
+        category: 'actions',
+        handler: () => {
+          // Switch to credentials tab
+          setTab(Tab.Credentials);
+          // Note: Actual credential creation would be triggered in CredentialsPanel
+        },
+      },
+      {
+        key: 't',
+        ctrl: true,
+        shift: true,
+        description: t('shortcuts.toggleTheme'),
+        category: 'ui',
+        handler: () => {
+          setTheme(cycleTheme(theme));
+        },
+      },
+      {
+        key: '?',
+        description: t('shortcuts.showHelp'),
+        category: 'ui',
+        handler: () => {
+          toggleShortcutsHelp();
+        },
+      },
+      {
+        key: '/',
+        ctrl: true,
+        description: t('shortcuts.showHelp'),
+        category: 'ui',
+        handler: () => {
+          toggleShortcutsHelp();
+        },
+      },
+      {
+        key: 'Escape',
+        description: t('shortcuts.closeDialog'),
+        category: 'ui',
+        handler: () => {
+          if (showShortcutsHelp) {
+            toggleShortcutsHelp();
+          } else if (menuOpen) {
+            setMenuOpen(false);
+          }
+        },
+        preventDefault: false,
+      },
+    ],
+  });
+
+  // Sequential shortcuts for navigation (g+d, g+c)
+  useSequentialShortcuts({
+    'g,d': () => {
+      setTab(Tab.Identity);
+      tabRefs.current[Tab.Identity]?.focus();
+    },
+    'g,c': () => {
+      setTab(Tab.Credentials);
+      tabRefs.current[Tab.Credentials]?.focus();
+    },
+  }, { enabled: shortcutsEnabled });
+
   return (
     <ToastProvider>
       <Toast />
+      <KeyboardShortcutsModal isOpen={showShortcutsHelp} onClose={toggleShortcutsHelp} />
+      <a className="skip-link" href="#main-content">
+        {t("a11y.skipToContent")}
+      </a>
       <div className="container">
       <header style={{ position: "relative" }}>
         <h1>{t("app.title")}</h1>
         <p>{t("app.subtitle")}</p>
+        <button
+          type="button"
+          className="hamburger-btn"
+          aria-label={menuOpen ? "Close menu" : "Open menu"}
+          aria-expanded={menuOpen}
+          aria-controls="mobile-header-actions"
+          onClick={() => setMenuOpen((v) => !v)}
+        >
+          <span className={`hamburger-icon${menuOpen ? " open" : ""}`} />
+        </button>
         <div
+          id="mobile-header-actions"
+          className={`header-actions${menuOpen ? " open" : ""}`}
           style={{
             position: "absolute",
             top: "1rem",
@@ -123,6 +281,8 @@ export default function App() {
         >
           {isConnected !== null && (
             <div
+              role="status"
+              aria-live="polite"
               style={{
                 display: "flex",
                 alignItems: "center",
@@ -139,6 +299,7 @@ export default function App() {
               }}
             >
               <span
+                aria-hidden="true"
                 style={{
                   display: "inline-block",
                   width: "8px",
@@ -153,16 +314,17 @@ export default function App() {
           <select
             value={i18n.language}
             onChange={handleLocaleChange}
-            aria-label="Switch language"
+            aria-label={t("a11y.switchLanguage")}
             style={{ padding: "0.3rem 0.5rem", borderRadius: "0.25rem", fontSize: "0.85rem" }}
           >
             {SUPPORTED_LOCALES.map(({ code, label }) => (
               <option key={code} value={code}>{label}</option>
             ))}
           </select>
-          <label className="network-switcher" aria-label="Network">
+          <label className="network-switcher" htmlFor="network-select">
             <span>Network</span>
             <select
+              id="network-select"
               value={activeNetwork}
               onChange={(e) => setActiveNetwork(e.target.value as NetworkName)}
             >
@@ -175,6 +337,8 @@ export default function App() {
           </label>
           <button
             className="theme-toggle"
+            onClick={toggleTheme}
+            aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
             onClick={() => setTheme(cycleTheme(theme))}
             aria-label={`Switch theme. Current: ${theme === 'system' ? 'System' : theme === 'light' ? 'Light' : 'Dark'}`}
             title={`Theme: ${theme === 'system' ? 'System' : theme === 'light' ? 'Light' : 'Dark'}`}
@@ -183,6 +347,11 @@ export default function App() {
           </button>
           <WalletButton wallet={wallet} />
         </div>
+        <div
+          className={`mobile-drawer-backdrop${menuOpen ? " open" : ""}`}
+          onClick={() => setMenuOpen(false)}
+          aria-hidden="true"
+        />
       </header>
 
       {uninitializedContracts.length > 0 && (
@@ -199,7 +368,7 @@ export default function App() {
             fontSize: "0.9rem",
           }}
         >
-          ⚠ Contract not initialized: <strong>{uninitializedContracts.join(", ")}</strong>.
+          <span aria-hidden="true">⚠</span> Contract not initialized: <strong>{uninitializedContracts.join(", ")}</strong>.
           Please run the deploy script and update your contract IDs.{" "}
           <a
             href="docs/architecture.md"
@@ -227,7 +396,7 @@ export default function App() {
             fontWeight: 600,
           }}
         >
-          ⚠ You are connected to Stellar <strong>mainnet</strong>. All actions submit real
+          <span aria-hidden="true">⚠</span> You are connected to Stellar <strong>mainnet</strong>. All actions submit real
           transactions and may incur on-chain fees.
         </div>
       )}
@@ -249,12 +418,12 @@ export default function App() {
           }}
         >
           <span>
-            ⚠ {notification.count} credential{notification.count > 1 ? "s" : ""}{" "}
-            expiring within 7 days
+            <span aria-hidden="true">⚠</span> {notification.count} credential
+            {notification.count > 1 ? "s" : ""} expiring within 7 days
           </span>
           <button
             onClick={dismiss}
-            aria-label="Dismiss notification"
+            aria-label={t("a11y.dismissNotification")}
             style={{
               background: "none",
               border: "none",
@@ -268,27 +437,58 @@ export default function App() {
         </div>
       )}
 
-      <div className="tabs">
-        <button
-          className={`tab ${tab === Tab.Identity ? "active" : ""}`}
-          onClick={() => setTab(Tab.Identity)}
-        >
-          {t("tabs.identity")}
-        </button>
-        <button
-          className={`tab ${tab === Tab.Credentials ? "active" : ""}`}
-          onClick={() => setTab(Tab.Credentials)}
-        >
-          {t("tabs.credentials")}
-        </button>
+      <div
+        className="tabs"
+        role="tablist"
+        aria-label={t("tabs.label")}
+        onKeyDown={handleTabKeyDown}
+      >
+        {TAB_ORDER.map((name) => (
+          <button
+            key={name}
+            id={`tab-${name}`}
+            role="tab"
+            type="button"
+            className={`tab ${tab === name ? "active" : ""}`}
+            aria-selected={tab === name}
+            aria-controls={`panel-${name}`}
+            // Roving tabindex: only the selected tab is in the tab order, and
+            // the arrow keys move between tabs from there.
+            tabIndex={tab === name ? 0 : -1}
+            ref={(node) => {
+              tabRefs.current[name] = node;
+            }}
+            onClick={() => setTab(name)}
+            onMouseEnter={name === Tab.Credentials ? preloadCredentialsPanel : undefined}
+            onFocus={name === Tab.Credentials ? preloadCredentialsPanel : undefined}
+          >
+            {t(`tabs.${name}`)}
+          </button>
+        ))}
       </div>
 
-      <ErrorBoundary>
-        {tab === Tab.Identity && <IdentityPanel />}
-        {tab === Tab.Credentials && (
-          <CredentialsPanel verifyId={verifyId} />
-        )}
-      </ErrorBoundary>
+      <main id="main-content" tabIndex={-1}>
+        <ErrorBoundary>
+          <Suspense fallback={<LoadingFallback />}>
+          <div
+            id={`panel-${Tab.Identity}`}
+            role="tabpanel"
+            aria-labelledby={`tab-${Tab.Identity}`}
+            hidden={tab !== Tab.Identity}
+          >
+            {tab === Tab.Identity && <IdentityPanel />}
+          </div>
+          <div
+            id={`panel-${Tab.Credentials}`}
+            role="tabpanel"
+            aria-labelledby={`tab-${Tab.Credentials}`}
+            hidden={tab !== Tab.Credentials}
+          >
+            {tab === Tab.Credentials && <CredentialsPanel verifyId={verifyId} />}
+          </div>
+          </Suspense>
+        </ErrorBoundary>
+      </main>
     </div>
     </ToastProvider>
   );

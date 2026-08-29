@@ -1,4 +1,4 @@
-import { useState, useEffect, useReducer } from "react";
+import { useState, useEffect, useReducer, useRef } from "react";
 import { StrKey, SorobanRpc, TransactionBuilder, BASE_FEE, nativeToScVal, Contract, scValToNative } from '@stellar/stellar-sdk';
 import type { CredentialType, Credential, VerifyResult } from "../../../sdk/src/types";
 import { CredentialClient } from '../../../sdk/src';
@@ -6,9 +6,12 @@ import { validateStellarAddress } from "../../../sdk/src/utils";
 import { getNetworkConfig } from '../network';
 import SkeletonCard from "./SkeletonCard";
 import FormField from "./FormField";
+import CredentialImport from "./CredentialImport";
 import { formatTimestamp } from "../utils/formatDate";
 import { handleError } from "../utils/handleError";
 import { useWalletContext } from "../context/WalletContext";
+import { useToast } from "../context/ToastContext";
+import CredentialTimeline from "./CredentialTimeline";
 
 type VerifyState =
   | "idle"
@@ -16,23 +19,12 @@ type VerifyState =
   | "not_found"
   | "revoked"
   | "expired"
-  | "invalid";
+  | "invalid"
+  | "unknown";
 
 type FilterType = "All" | CredentialType;
 type ExpiryFilterType = "All" | "Active" | "Expired";
 type CredentialStatus = "active" | "expired" | "revoked";
-type Credential = {
-  id: string;
-  credentialType: CredentialType;
-  subject: string;
-  issuer: string;
-  claims: Record<string, string>;
-  claimsHash: string;
-  signature: string;
-  issuedAt: number;
-  expiresAt: number;
-  revoked: boolean;
-};
 
 function formatExpiry(expiresAt: number): string {
   if (expiresAt === 0) return "No expiry";
@@ -84,7 +76,7 @@ function getCredentialStatus(credential: Credential): CredentialStatus {
 
 function getStatusBadgeClass(status: CredentialStatus): string {
   if (status === "revoked") return "badge badge-red";
-  if (status === "expired") return "badge badge-gray";
+  if (status === "expired") return "badge badge-yellow";
   return "badge badge-green";
 }
 
@@ -92,6 +84,20 @@ function getStatusLabel(status: CredentialStatus): string {
   if (status === "revoked") return "Revoked";
   if (status === "expired") return "Expired";
   return "Active";
+}
+
+function getStatusTooltip(credential: Credential, status: CredentialStatus): string {
+  if (status === "revoked") return "This credential has been revoked by the issuer and is no longer valid.";
+  if (status === "expired") return `This credential expired on ${formatTimestamp(credential.expiresAt)}.`;
+  return credential.expiresAt === 0
+    ? "This credential is valid and does not expire."
+    : `This credential is valid until ${formatTimestamp(credential.expiresAt)}.`;
+}
+
+const STATUS_REFRESH_INTERVAL_MS = 30_000;
+
+function formatCheckedAt(ts: number): string {
+  return new Date(ts).toLocaleTimeString();
 }
 
 function getStatusSortRank(credential: Credential): number {
@@ -221,6 +227,7 @@ function credentialReducer(_state: CredentialState, action: CredentialAction): C
 
 export default function CredentialsPanel({ verifyId }: { verifyId?: string | null }) {
   const wallet = useWalletContext();
+  const toast = useToast();
   const [credentialState, dispatchCredential] = useReducer(credentialReducer, { status: 'idle' });
 
   const fetchedCredentials = credentialState.status === 'success' ? credentialState.credentials : null;
@@ -245,22 +252,94 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
   const [checkingIssuer, setCheckingIssuer] = useState(false);
 
   const [searchAddress, setSearchAddress] = useState("");
+  const [lastCheckedAt, setLastCheckedAt] = useState<number | null>(null);
+  const [verifyCheckedAt, setVerifyCheckedAt] = useState<number | null>(null);
+
+  // Import/Export state
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [exportFormat, setExportFormat] = useState<"json" | "csv" | "pdf">("json");
+  const [isExporting, setIsExporting] = useState(false);
+  const [selectedCredentialsForExport, setSelectedCredentialsForExport] = useState<Set<string>>(new Set());
+
+  const handleVerify = async (credentialId?: string, silent = false) => {
+  // ── Pagination ──────────────────────────────────────────────────────────
+  const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
+  const readIntParam = (name: string, fallback: number): number => {
+    const raw = new URLSearchParams(window.location.search).get(name);
+    const parsed = raw ? parseInt(raw, 10) : NaN;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  };
+  const [page, setPage] = useState(() => readIntParam("page", 1));
+  const [pageSize, setPageSize] = useState(() => {
+    const fromUrl = readIntParam("pageSize", 10);
+    return (PAGE_SIZE_OPTIONS as readonly number[]).includes(fromUrl) ? fromUrl : 10;
+  });
+
+  const updatePaginationParams = (nextPage: number, nextPageSize: number) => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("page", String(nextPage));
+    url.searchParams.set("pageSize", String(nextPageSize));
+    window.history.replaceState({}, "", url);
+  };
+
+  const goToPage = (nextPage: number) => {
+    setPage(nextPage);
+    updatePaginationParams(nextPage, pageSize);
+  };
+
+  const handlePageSizeChange = (nextPageSize: number) => {
+    setPageSize(nextPageSize);
+    setPage(1);
+    updatePaginationParams(1, nextPageSize);
+  };
+
+  // Reused across calls instead of instantiating a fresh CredentialClient (and its
+  // own RequestQueue + health check) on every verify/search/issuer-check — see #612.
+  const credentialClientRef = useRef<CredentialClient | null>(null);
+  const getCredentialClient = () => {
+    if (!credentialClientRef.current) {
+      credentialClientRef.current = new CredentialClient(getNetworkConfig());
+    }
+    return credentialClientRef.current;
+  };
+  useEffect(() => {
+    return () => {
+      credentialClientRef.current?.dispose();
+      credentialClientRef.current = null;
+    };
+  }, []);
 
   const handleVerify = async (credentialId?: string) => {
+    if (verifying) return; // guard against duplicate submissions
     const id = (credentialId ?? credId).trim();
     if (!id) return;
-    setVerifying(true);
-    setVerifyState("idle");
+    if (!silent) {
+      setVerifying(true);
+      setVerifyState("idle");
+    }
     try {
-      const networkConfig = getNetworkConfig();
-      const credentialClient = new CredentialClient(networkConfig);
+      const credentialClient = getCredentialClient();
       const caller = wallet.publicKey || "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
       const result = await credentialClient.verifyCredential(caller, id);
       setVerifyState(result.valid ? "valid" : result.reason || "invalid");
-    } catch {
+      setVerifyCheckedAt(Date.now());
+      const reason = result.reason;
+      const knownReason: VerifyState =
+        reason === "not_found" || reason === "revoked" || reason === "expired" || reason === "unknown"
+          ? reason
+          : "invalid";
+      setVerifyState(result.valid ? "valid" : knownReason);
+      if (result.valid) {
+        toast.success("Credential is valid.");
+      } else {
+        toast.error(`Credential is invalid (${knownReason.replace("_", " ")}).`);
+      }
+    } catch (e: unknown) {
       setVerifyState("invalid");
+      setVerifyCheckedAt(Date.now());
+      toast.error(handleError(e));
     } finally {
-      setVerifying(false);
+      if (!silent) setVerifying(false);
     }
   };
 
@@ -274,8 +353,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
     const checkIssuerStatus = async () => {
       setCheckingIssuer(true);
       try {
-        const networkConfig = getNetworkConfig();
-        const credentialClient = new CredentialClient(networkConfig);
+        const credentialClient = getCredentialClient();
         const caller = wallet.publicKey || "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
         const issuer = await credentialClient.isIssuer(caller, wallet.publicKey!);
         setIsIssuer(issuer);
@@ -296,30 +374,68 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
     void handleVerify(verifyId);
   }, [verifyId]);
 
+  // Auto-refresh the verification result so a revoke/expiry elsewhere is reflected here
+  useEffect(() => {
+    if (verifyState === "idle" || !credId) return;
+    const interval = setInterval(() => {
+      void handleVerify(credId, true);
+    }, STATUS_REFRESH_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [verifyState, credId]);
+
+  const fetchCredentialsForAddress = async (addr: string) => {
+  const handleSearch = async () => {
+    if (fetching) return; // guard against duplicate submissions
+    const addr = searchAddress.trim();
+    if (!addr) return;
+
+    // Validate Stellar address format
+    if (!StrKey.isValidEd25519PublicKey(addr)) {
+      const message = 'Invalid Stellar address format. Address must start with "G" and be 56 characters long.';
+      dispatchCredential({ type: 'FETCH_ERROR', message });
+      toast.error(message);
+      return;
+    }
+
+    dispatchCredential({ type: 'FETCH_START' });
+    goToPage(1);
+    try {
+      const credentialClient = getCredentialClient();
+      const caller = wallet.publicKey || "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
+      const results = await credentialClient.getCredentialsBySubject(caller, addr);
+      dispatchCredential({ type: 'FETCH_SUCCESS', credentials: results, searchedAddress: addr });
+      setLastCheckedAt(Date.now());
+    } catch (e: unknown) {
+      const message = handleError(e);
+      dispatchCredential({ type: 'FETCH_ERROR', message });
+      toast.error(message);
+    }
+  };
+
   const handleSearch = async () => {
     const addr = searchAddress.trim();
     if (!addr) return;
-    
+
     // Validate Stellar address format
     if (!StrKey.isValidEd25519PublicKey(addr)) {
-      dispatchCredential({ 
-        type: 'FETCH_ERROR', 
+      dispatchCredential({
+        type: 'FETCH_ERROR',
         message: 'Invalid Stellar address format. Address must start with "G" and be 56 characters long.'
       });
       return;
     }
-    
-    dispatchCredential({ type: 'FETCH_START' });
-    try {
-      const networkConfig = getNetworkConfig();
-      const credentialClient = new CredentialClient(networkConfig);
-      const caller = wallet.publicKey || "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
-      const results = await credentialClient.getCredentialsBySubject(caller, addr);
-      dispatchCredential({ type: 'FETCH_SUCCESS', credentials: results, searchedAddress: addr });
-    } catch (e: unknown) {
-      dispatchCredential({ type: 'FETCH_ERROR', message: handleError(e) });
-    }
+
+    await fetchCredentialsForAddress(addr);
   };
+
+  // Auto-refresh the credential list periodically so status changes (revoke/expiry) show up
+  useEffect(() => {
+    if (!searchedAddress) return;
+    const interval = setInterval(() => {
+      void fetchCredentialsForAddress(searchedAddress);
+    }, STATUS_REFRESH_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [searchedAddress]);
 
   const validateIssueForm = (): boolean => {
     const errors: Record<string, string> = {};
@@ -366,6 +482,44 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
     setClaims(updated);
   };
 
+  const handleExport = async (format: "json" | "csv" | "pdf") => {
+    try {
+      setIsExporting(true);
+      const credentialsToExport =
+        selectedCredentialsForExport.size > 0
+          ? sortedCredentials.filter((c) => selectedCredentialsForExport.has(c.id))
+          : sortedCredentials;
+
+      if (credentialsToExport.length === 0) {
+        toast.error("No credentials to export");
+        return;
+      }
+
+      const result = await exportCredentialsWithProgress(credentialsToExport, format);
+      downloadExport(result.content, result.filename, result.mimeType);
+      toast.success(`Successfully exported ${credentialsToExport.length} credentials as ${format.toUpperCase()}`);
+      setSelectedCredentialsForExport(new Set());
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Export failed");
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const handleImportCredentials = (credentials: Credential[]) => {
+    toast.success(`Imported ${credentials.length} credentials`);
+  };
+
+  const toggleCredentialSelection = (credentialId: string) => {
+    const newSet = new Set(selectedCredentialsForExport);
+    if (newSet.has(credentialId)) {
+      newSet.delete(credentialId);
+    } else {
+      newSet.add(credentialId);
+    }
+    setSelectedCredentialsForExport(newSet);
+  };
+
   const displayCredentials = fetchedCredentials ?? [];
 
   const filteredCredentials =
@@ -384,9 +538,32 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
     (a, b) => getStatusSortRank(a) - getStatusSortRank(b)
   );
 
+  const totalCredentials = sortedCredentials.length;
+  const totalPages = Math.max(1, Math.ceil(totalCredentials / pageSize));
+  const clampedPage = Math.min(page, totalPages);
+  const pageStart = (clampedPage - 1) * pageSize;
+  const pagedCredentials = sortedCredentials.slice(pageStart, pageStart + pageSize);
+
+  // Reset to page 1 whenever the active filters change the result set shape.
+  // We do this synchronously in the click handler (not via useEffect) so the
+  // corrected page number is applied in the same render cycle and there is
+  // never a frame showing an empty page. Fixes #734.
+  const handleFilterChange = (type: FilterType) => {
+    setActiveFilter(type);
+    setPage(1);
+    updatePaginationParams(1, pageSize);
+  };
+
+  const handleExpiryFilterChange = (status: ExpiryFilterType) => {
+    setActiveExpiryFilter(status);
+    setPage(1);
+    updatePaginationParams(1, pageSize);
+  };
+
   const handleIssue = async () => {
-    if (!wallet.connected) return;
-    
+    if (issuing) return; // guard against duplicate submissions
+    if (!wallet.connected || !wallet.publicKey) return;
+
     if (!validateIssueForm()) return;
 
     setIssuing(true);
@@ -443,8 +620,11 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
       const credentialId = Buffer.from(raw).toString("hex");
       
       setIssueResult(`Credential issued successfully!\nID: ${credentialId}\nEstimated fee: ${(estimatedFee / 10_000_000).toFixed(7)} XLM`);
+      toast.success("Credential issued successfully.");
     } catch (e: unknown) {
-      setIssueResult(`Error: ${handleError(e)}`);
+      const message = handleError(e);
+      setIssueResult(`Error: ${message}`);
+      toast.error(message);
     } finally {
       setIssuing(false);
     }
@@ -454,11 +634,74 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
     <>
       {/* Filter bar */}
       <div className="card">
-        <h2>Credentials</h2>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+          <h2 style={{ margin: 0 }}>Credentials</h2>
+          <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+            <button
+              onClick={() => setShowImportModal(true)}
+              style={{
+                padding: "0.5rem 1rem",
+                backgroundColor: "var(--accent-light)",
+                color: "white",
+                border: "none",
+                borderRadius: "0.25rem",
+                cursor: "pointer",
+                fontSize: "0.85rem",
+                fontWeight: 500,
+              }}
+              title="Import credentials from JSON or CSV"
+            >
+              📥 Import
+            </button>
+            {displayCredentials.length > 0 && (
+              <div style={{ display: "flex", gap: "0.25rem" }}>
+                <select
+                  value={exportFormat}
+                  onChange={(e) => setExportFormat(e.target.value as "json" | "csv" | "pdf")}
+                  style={{
+                    padding: "0.5rem 0.75rem",
+                    fontSize: "0.85rem",
+                    borderRadius: "0.25rem",
+                    border: "1px solid var(--border-input)",
+                    backgroundColor: "var(--card-bg)",
+                    color: "var(--text)",
+                  }}
+                >
+                  <option value="json">JSON</option>
+                  <option value="csv">CSV</option>
+                  <option value="pdf">PDF</option>
+                </select>
+                <button
+                  onClick={() => handleExport(exportFormat)}
+                  disabled={isExporting}
+                  style={{
+                    padding: "0.5rem 1rem",
+                    backgroundColor: "var(--accent-light)",
+                    color: "white",
+                    border: "none",
+                    borderRadius: "0.25rem",
+                    cursor: isExporting ? "not-allowed" : "pointer",
+                    fontSize: "0.85rem",
+                    fontWeight: 500,
+                    opacity: isExporting ? 0.6 : 1,
+                  }}
+                  title={`Export ${selectedCredentialsForExport.size > 0 ? selectedCredentialsForExport.size : displayCredentials.length} credentials`}
+                >
+                  📤 Export {selectedCredentialsForExport.size > 0 ? `(${selectedCredentialsForExport.size})` : ""}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
 
         {/* Subject search */}
         <div style={{ display: "flex", gap: "0.5rem", marginBottom: "1rem" }}>
+          <label htmlFor="credential-search" className="visually-hidden">
+            Search credentials by subject address
+          </label>
           <input
+            id="credential-search"
+            type="search"
             placeholder="Search by subject address (G…)"
             value={searchAddress}
             onChange={(e) => setSearchAddress(e.target.value)}
@@ -477,7 +720,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
             return (
               <button
                 key={type}
-                onClick={() => setActiveFilter(type)}
+                onClick={() => handleFilterChange(type)}
                 style={{
                   padding: "0.3rem 0.75rem",
                   borderRadius: "999px",
@@ -508,6 +751,11 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
           })}
         </div>
 
+        {lastCheckedAt && !fetching && (
+          <p style={{ color: "var(--text-muted)", fontSize: "0.75rem", marginBottom: "0.5rem" }}>
+            Last checked: {formatCheckedAt(lastCheckedAt)} (auto-refreshes every 30s)
+          </p>
+        )}
         <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginBottom: "1rem" }}>
           {EXPIRY_FILTER_OPTIONS.map((status) => {
             const count = countByExpiry(displayCredentials, status);
@@ -515,7 +763,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
             return (
               <button
                 key={status}
-                onClick={() => setActiveExpiryFilter(status)}
+                onClick={() => handleExpiryFilterChange(status)}
                 style={{
                   padding: "0.3rem 0.75rem",
                   borderRadius: "999px",
@@ -556,8 +804,9 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
             No credentials match the selected filters.
           </p>
         ) : (
+          <>
           <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-            {sortedCredentials.map((cred) => {
+            {pagedCredentials.map((cred) => {
               const status = getCredentialStatus(cred);
               return (
               <li
@@ -574,12 +823,13 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
                   style={{
                     padding: "0.6rem 1rem",
                     display: "flex",
+                    flexWrap: "wrap",
                     justifyContent: "space-between",
                     alignItems: "center",
                     width: "100%",
                     fontSize: "0.85rem",
                     color: "var(--text)",
-                    gap: "1rem",
+                    gap: "0.5rem 1rem",
                     cursor: "pointer",
                     background: "var(--cred-item-bg)",
                     border: 0,
@@ -588,14 +838,27 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
                   }}
                   onClick={() => setExpandedCredId(expandedCredId === cred.id ? null : cred.id)}
                 >
+                  <input
+                    type="checkbox"
+                    checked={selectedCredentialsForExport.has(cred.id)}
+                    onChange={(e) => {
+                      e.stopPropagation();
+                      toggleCredentialSelection(cred.id);
+                    }}
+                    style={{ cursor: "pointer" }}
+                    aria-label={`Select credential ${cred.id}`}
+                  />
                   <span style={{ fontSize: "1.2rem", minWidth: "1.5rem" }}>
                     {CREDENTIAL_TYPE_ICONS[cred.credentialType] || "📋"}
                   </span>
-                  <span style={{ fontFamily: "monospace", color: "var(--text-muted)" }}>{cred.id}</span>
+                  <span style={{ fontFamily: "monospace", color: "var(--text-muted)" }} title={cred.id}>
+                    {cred.id.slice(0, 8)}…{cred.id.slice(-6)}
+                  </span>
                   <span className="badge badge-green">{cred.credentialType}</span>
                   <span
                     className={getStatusBadgeClass(status)}
                     aria-label={`Credential status: ${getStatusLabel(status)}`}
+                    title={getStatusTooltip(cred, status)}
                   >
                     {getStatusLabel(status)}
                   </span>
@@ -652,18 +915,98 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
                     ) : (
                       <p style={{ margin: 0, color: "var(--text-muted)", fontSize: "0.8rem" }}>No claims</p>
                     )}
+                    {/* Credential lifecycle timeline — closes #707 */}
+                    <CredentialTimeline credential={cred} />
                   </div>
                 )}
               </li>
               );
             })}
           </ul>
+
+          {/* Pagination controls */}
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: "0.75rem",
+              marginTop: "1rem",
+              paddingTop: "0.75rem",
+              borderTop: "1px solid var(--border-input)",
+              fontSize: "0.8rem",
+              color: "var(--text-muted)",
+            }}
+          >
+            <span>
+              Showing {pageStart + 1}–{Math.min(pageStart + pageSize, totalCredentials)} of {totalCredentials}
+            </span>
+
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              <label htmlFor="credential-page-size" style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
+                Per page
+                <select
+                  id="credential-page-size"
+                  value={pageSize}
+                  onChange={(e) => handlePageSizeChange(Number(e.target.value))}
+                  style={{ fontSize: "0.8rem", padding: "0.2rem 0.4rem" }}
+                >
+                  {PAGE_SIZE_OPTIONS.map((size) => (
+                    <option key={size} value={size}>{size}</option>
+                  ))}
+                </select>
+              </label>
+
+              <button
+                onClick={() => goToPage(clampedPage - 1)}
+                disabled={clampedPage <= 1}
+                aria-label="Previous page"
+                style={{ padding: "0.25rem 0.6rem", fontSize: "0.8rem" }}
+              >
+                ‹ Prev
+              </button>
+
+              <span>
+                Page{" "}
+                <input
+                  type="number"
+                  aria-label="Jump to page"
+                  min={1}
+                  max={totalPages}
+                  value={clampedPage}
+                  onChange={(e) => {
+                    const next = parseInt(e.target.value, 10);
+                    if (Number.isFinite(next) && next >= 1 && next <= totalPages) {
+                      goToPage(next);
+                    }
+                  }}
+                  style={{ width: "3rem", textAlign: "center", fontSize: "0.8rem", padding: "0.2rem" }}
+                />{" "}
+                of {totalPages}
+              </span>
+
+              <button
+                onClick={() => goToPage(clampedPage + 1)}
+                disabled={clampedPage >= totalPages}
+                aria-label="Next page"
+                style={{ padding: "0.25rem 0.6rem", fontSize: "0.8rem" }}
+              >
+                Next ›
+              </button>
+            </div>
+          </div>
+          </>
         )}
       </div>
 
       <div className="card">
         <h2>Verify Credential</h2>
+        <label htmlFor="verify-credential-id" className="visually-hidden">
+          Credential ID to verify
+        </label>
         <input
+          id="verify-credential-id"
           placeholder="Credential ID (hex)"
           value={credId}
           onChange={(e) => setCredId(e.target.value)}
@@ -686,8 +1029,13 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
             {verifyState === "not_found" && (
               <span className="badge badge-red">Invalid — credential not found</span>
             )}
-            {(verifyState === "invalid" || verifyState === "unknown" as string) && (
+            {(verifyState === "invalid" || verifyState === "unknown") && (
               <span className="badge badge-red">Invalid</span>
+            )}
+            {verifyCheckedAt && (
+              <p style={{ color: "var(--text-muted)", fontSize: "0.75rem", marginTop: "0.5rem" }}>
+                Last checked: {formatCheckedAt(verifyCheckedAt)} (auto-refreshes every 30s)
+              </p>
             )}
           </div>
         )}
@@ -721,12 +1069,14 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
                 {claims.map((claim, idx) => (
                   <div key={idx} style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem" }}>
                     <input
+                      aria-label={`Claim key ${idx + 1}`}
                       placeholder="Key"
                       value={claim.key}
                       onChange={(e) => handleClaimChange(idx, "key", e.target.value)}
                       style={{ flex: 1 }}
                     />
                     <input
+                      aria-label={`Claim value ${idx + 1}`}
                       placeholder="Value"
                       value={claim.value}
                       onChange={(e) => handleClaimChange(idx, "value", e.target.value)}
@@ -798,6 +1148,14 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
         )}
         {!issuing && issueResult && <pre className="result">{issueResult}</pre>}
       </div>
+
+      {/* Import Modal */}
+      {showImportModal && (
+        <CredentialImport
+          onImport={handleImportCredentials}
+          onClose={() => setShowImportModal(false)}
+        />
+      )}
     </>
   );
 }
