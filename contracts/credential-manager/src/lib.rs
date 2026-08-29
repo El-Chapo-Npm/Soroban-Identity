@@ -56,6 +56,18 @@ const MAX_DEP_DEPTH: u32 = 5;
 /// Maximum number of credential IDs accepted in a single `verify_credentials_batch` call.
 const MAX_VERIFY_BATCH: u32 = 50;
 
+// ── Issue #662: Credential metadata indexing ──────────────────────────────────
+/// Secondary index: credentials by type for efficient type-based queries
+const CRED_BY_TYPE: Symbol = symbol_short!("CBTYPE");
+/// Secondary index: credentials by issuer address
+const CRED_BY_ISSUER: Symbol = symbol_short!("CBISSUER");
+/// Secondary index: credentials by subject address
+const CRED_BY_SUBJECT: Symbol = symbol_short!("CBSUBJ");
+/// Secondary index: credentials by issued timestamp for range queries
+const CRED_BY_ISSUED: Symbol = symbol_short!("CBISS");
+/// Secondary index: credentials by expiry timestamp for range queries
+const CRED_BY_EXPIRY: Symbol = symbol_short!("CBEXP");
+
 #[contracterror]
 #[derive(Clone, Debug, PartialEq, Copy)]
 pub enum ContractError {
@@ -488,6 +500,28 @@ impl CredentialManager {
         let total_issued: u32 = env.storage().instance().get(&TOTAL_ISSUED_CNT).unwrap_or(0);
         env.storage().instance().set(&TOTAL_ISSUED_CNT, &(total_issued + 1));
 
+        // Issue #662: Maintain secondary indexes for efficient metadata queries
+        // Index by credential type for type-based queries
+        let type_key = (CRED_BY_TYPE, credential_type.clone());
+        let mut type_creds: Vec<BytesN<32>> = env.storage().persistent().get(&type_key).unwrap_or_else(|| Vec::new(&env));
+        type_creds.push_back(id.clone());
+        env.storage().persistent().set(&type_key, &type_creds);
+        env.storage().persistent().extend_ttl(&type_key, TTL_MAX, TTL_MAX);
+
+        // Index by issuer for issuer-based queries
+        let issuer_idx_key = (CRED_BY_ISSUER, issuer.clone());
+        let mut issuer_idx: Vec<BytesN<32>> = env.storage().persistent().get(&issuer_idx_key).unwrap_or_else(|| Vec::new(&env));
+        issuer_idx.push_back(id.clone());
+        env.storage().persistent().set(&issuer_idx_key, &issuer_idx);
+        env.storage().persistent().extend_ttl(&issuer_idx_key, TTL_MAX, TTL_MAX);
+
+        // Index by subject for subject-based queries
+        let subject_idx_key = (CRED_BY_SUBJECT, subject.clone());
+        let mut subject_idx: Vec<BytesN<32>> = env.storage().persistent().get(&subject_idx_key).unwrap_or_else(|| Vec::new(&env));
+        subject_idx.push_back(id.clone());
+        env.storage().persistent().set(&subject_idx_key, &subject_idx);
+        env.storage().persistent().extend_ttl(&subject_idx_key, TTL_MAX, TTL_MAX);
+
         env.events().publish(
             (CRED, symbol_short!("issued")),
             (EVENT_VERSION, id.clone(), subject, issuer, credential_type, expires_at),
@@ -517,6 +551,26 @@ impl CredentialManager {
 
         let revoked: u32 = env.storage().instance().get(&REVOKED_CNT).unwrap_or(0);
         env.storage().instance().set(&REVOKED_CNT, &(revoked + 1));
+
+        // Issue #662: Remove from secondary indexes when revoked
+        let type_key = (CRED_BY_TYPE, cred.credential_type.clone());
+        if let Some(mut type_creds) = env.storage().persistent().get::<_, Vec<BytesN<32>>>(&type_key) {
+            type_creds = Self::remove_from_vec(&env, type_creds, &credential_id);
+            env.storage().persistent().set(&type_key, &type_creds);
+        }
+
+        let issuer_idx_key = (CRED_BY_ISSUER, issuer.clone());
+        if let Some(mut issuer_idx) = env.storage().persistent().get::<_, Vec<BytesN<32>>>(&issuer_idx_key) {
+            issuer_idx = Self::remove_from_vec(&env, issuer_idx, &credential_id);
+            env.storage().persistent().set(&issuer_idx_key, &issuer_idx);
+        }
+
+        let subject_idx_key = (CRED_BY_SUBJECT, cred.subject.clone());
+        if let Some(mut subject_idx) = env.storage().persistent().get::<_, Vec<BytesN<32>>>(&subject_idx_key) {
+            subject_idx = Self::remove_from_vec(&env, subject_idx, &credential_id);
+            env.storage().persistent().set(&subject_idx_key, &subject_idx);
+        }
+
         // closes #553: include revocation timestamp so off-chain systems can
         // detect and invalidate cached verify_credential results.
         let revoked_at: u64 = env.ledger().timestamp();
@@ -798,6 +852,47 @@ impl CredentialManager {
         }
     }
 
+    // ── Issue #662: Credential metadata indexing API ──────────────────────────
+
+    /// Query credentials by type with pagination.
+    /// Returns all non-revoked credentials of the specified type.
+    pub fn get_credentials_by_type(
+        env: Env,
+        credential_type: CredentialType,
+        cursor: Option<u64>,
+        limit: u32,
+    ) -> CredentialIdsPage {
+        let type_key = (CRED_BY_TYPE, credential_type);
+        let all: Vec<BytesN<32>> = env.storage().persistent().get(&type_key).unwrap_or_else(|| Vec::new(&env));
+        Self::paginate_credentials(&env, &all, cursor, limit)
+    }
+
+    /// Query credentials by issuer address with pagination.
+    /// Returns all non-revoked credentials issued by the specified issuer.
+    pub fn get_credentials_by_issuer_index(
+        env: Env,
+        issuer: Address,
+        cursor: Option<u64>,
+        limit: u32,
+    ) -> CredentialIdsPage {
+        let issuer_key = (CRED_BY_ISSUER, issuer);
+        let all: Vec<BytesN<32>> = env.storage().persistent().get(&issuer_key).unwrap_or_else(|| Vec::new(&env));
+        Self::paginate_credentials(&env, &all, cursor, limit)
+    }
+
+    /// Query credentials by subject address with pagination.
+    /// Returns all non-revoked credentials held by the specified subject.
+    pub fn get_credentials_by_subject_index(
+        env: Env,
+        subject: Address,
+        cursor: Option<u64>,
+        limit: u32,
+    ) -> CredentialIdsPage {
+        let subject_key = (CRED_BY_SUBJECT, subject);
+        let all: Vec<BytesN<32>> = env.storage().persistent().get(&subject_key).unwrap_or_else(|| Vec::new(&env));
+        Self::paginate_credentials(&env, &all, cursor, limit)
+    }
+
     // ── Issue #732: credential dependency chain API ───────────────────────────
 
     /// Set the prerequisite credential IDs for an existing credential.
@@ -1055,6 +1150,35 @@ impl CredentialManager {
 
     fn get_max_issuers_internal(env: &Env) -> u32 {
         Self::get_config(env).max_issuers
+    }
+
+    /// Issue #662: Pagination helper for credential index queries.
+    /// Extracts a page of credentials from a list with cursor-based pagination.
+    fn paginate_credentials(env: &Env, all: &Vec<BytesN<32>>, cursor: Option<u64>, limit: u32) -> CredentialIdsPage {
+        let total = all.len();
+        let start: u64 = cursor.unwrap_or(0);
+        let effective_limit: u32 = if limit == 0 || limit > PAGE_CAP { PAGE_CAP } else { limit };
+        let mut items: Vec<BytesN<32>> = Vec::new(env);
+        let mut next: u64 = start;
+        let mut taken: u32 = 0;
+        while (next as u32) < total && taken < effective_limit {
+            items.push_back(all.get(next as u32).unwrap());
+            next += 1;
+            taken += 1;
+        }
+        let next_cursor = if (next as u32) < total { Some(next) } else { None };
+        CredentialIdsPage { items, next_cursor }
+    }
+
+    /// Issue #662: Helper to remove a credential ID from an index vector.
+    fn remove_from_vec(env: &Env, mut vec: Vec<BytesN<32>>, id: &BytesN<32>) -> Vec<BytesN<32>> {
+        let mut result: Vec<BytesN<32>> = Vec::new(env);
+        for i in vec.iter() {
+            if i != *id {
+                result.push_back(i);
+            }
+        }
+        result
     }
 
     /// Derives the deterministic credential ID as
