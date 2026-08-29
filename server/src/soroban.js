@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { RpcCache } from './rpc-cache.js';
 import { CircuitBreaker, SorobanUnavailableError } from './circuit-breaker.js';
 import { logger } from './logger.js';
+import { QueryResultCache } from './query-cache.js';
 
 export class SorobanError extends Error {
   constructor(category, publicMessage, internalDetail) {
@@ -22,13 +23,14 @@ export class SorobanTimeoutError extends Error {
 }
 
 export class SorobanClient {
-  constructor(config, metrics, { didCache = null } = {}) {
+  constructor(config, metrics, { didCache = null, queryCache = null } = {}) {
     this.config = config;
     this.metrics = metrics;
     this.cache = new RpcCache(config.rpcCacheTtlMs);
     // Optional Redis-backed DID cache. When absent, resolution falls straight
     // through to the contract, so the client works uncached unchanged.
     this.didCache = didCache;
+    this.queryCache = queryCache ?? new QueryResultCache(config, { redisClient: didCache?.client ?? null, metrics });
     this.circuitBreaker = new CircuitBreaker({
       failureThreshold: 5,
       successThreshold: 2,
@@ -195,6 +197,8 @@ export class SorobanClient {
 
   async getIssuers() {
     const key = `${this.config.contracts.credential}:get_issuers:[]`;
+    const distributed = await this.queryCache.get('get_issuers');
+    if (distributed !== null) return distributed;
     const cached = this.cache.get(key);
     if (cached !== null) {
       if (this.metrics && typeof this.metrics.counters === 'object') {
@@ -208,16 +212,19 @@ export class SorobanClient {
     const raw = await this.invoke(this.config.contracts.credential, 'get_issuers');
     const result = parseAddressList(raw);
     this.cache.set(key, result);
+    await this.queryCache.set('get_issuers', [], result, 'stable');
     return result;
   }
 
   async addIssuer(issuer) {
     this.cache.delete(`${this.config.contracts.credential}:get_issuers:[]`);
+    await this.queryCache.invalidate('get_issuers');
     return this.invoke(this.config.contracts.credential, 'add_issuer', ['--issuer', issuer]);
   }
 
   async removeIssuer(issuer) {
     this.cache.delete(`${this.config.contracts.credential}:get_issuers:[]`);
+    await this.queryCache.invalidate('get_issuers');
     return this.invoke(this.config.contracts.credential, 'remove_issuer', ['--issuer', issuer]);
   }
 
