@@ -1119,6 +1119,150 @@ export function createApp({
           return sendJson(res, 200, rotated);
         }
 
+        // ── Audit Log Query API (#720) ─────────────────────────────────
+        // GET /admin/audit-logs — paginated query over daily NDJSON audit log files.
+        // Query params: date (YYYY-MM-DD), action (string), limit (int), offset (int)
+        if (req.method === "GET" && pathname === "/admin/audit-logs") {
+          if (!await requireAuth(req, res, config, ['admin:read'])) return;
+
+          const dateParam  = url.searchParams.get("date")   ?? null;
+          const actionParam = url.searchParams.get("action") ?? null;
+          const limit  = Math.min(Math.max(Number.parseInt(url.searchParams.get("limit")  ?? "50",  10) || 50, 1), 500);
+          const offset = Math.max(Number.parseInt(url.searchParams.get("offset") ?? "0", 10) || 0, 0);
+
+          try {
+            const logDir = path.dirname(config.auditLogPath);
+            const baseName = path.basename(config.auditLogPath);
+
+            // Collect candidate log files
+            let files;
+            try {
+              files = await fs.readdir(logDir);
+            } catch (e) {
+              if (e.code === 'ENOENT') files = [];
+              else throw e;
+            }
+
+            const logPattern = new RegExp(`^${baseName.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')}-(\\d{4}-\\d{2}-\\d{2})\\.ndjson$`);
+            let matchingFiles = files.filter((f) => {
+              const m = f.match(logPattern);
+              if (!m) return false;
+              if (dateParam && m[1] !== dateParam) return false;
+              return true;
+            }).sort(); // ascending date order
+
+            // Parse all matching entries
+            const entries = [];
+            for (const file of matchingFiles) {
+              let raw;
+              try {
+                raw = await fs.readFile(path.join(logDir, file), 'utf8');
+              } catch (e) {
+                if (e.code === 'ENOENT') continue;
+                throw e;
+              }
+              for (const line of raw.split('\n')) {
+                const trimmed = line.trim();
+                if (!trimmed) continue;
+                try {
+                  const entry = JSON.parse(trimmed);
+                  if (actionParam && entry.action !== actionParam) continue;
+                  entries.push(entry);
+                } catch {
+                  // skip malformed lines
+                }
+              }
+            }
+
+            const total = entries.length;
+            const page = entries.slice(offset, offset + limit);
+            return sendJson(res, 200, { total, limit, offset, entries: page });
+          } catch (err) {
+            logger.error({ error: err.message, stack: err.stack }, 'Failed to read audit logs');
+            return sendJson(res, 500, { error: 'audit_log_read_failed', message: err.message });
+          }
+        }
+
+        // GET /admin/audit-logs/export — CSV export of audit log entries.
+        // Supports the same query params as /admin/audit-logs (date, action).
+        if (req.method === "GET" && pathname === "/admin/audit-logs/export") {
+          if (!await requireAuth(req, res, config, ['admin:read'])) return;
+
+          const dateParam   = url.searchParams.get("date")   ?? null;
+          const actionParam = url.searchParams.get("action") ?? null;
+
+          try {
+            const logDir  = path.dirname(config.auditLogPath);
+            const baseName = path.basename(config.auditLogPath);
+
+            let files;
+            try {
+              files = await fs.readdir(logDir);
+            } catch (e) {
+              if (e.code === 'ENOENT') files = [];
+              else throw e;
+            }
+
+            const logPattern = new RegExp(`^${baseName.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')}-(\\d{4}-\\d{2}-\\d{2})\\.ndjson$`);
+            const matchingFiles = files.filter((f) => {
+              const m = f.match(logPattern);
+              if (!m) return false;
+              if (dateParam && m[1] !== dateParam) return false;
+              return true;
+            }).sort();
+
+            // Collect all field names across all entries to build CSV header dynamically
+            const allEntries = [];
+            for (const file of matchingFiles) {
+              let raw;
+              try {
+                raw = await fs.readFile(path.join(logDir, file), 'utf8');
+              } catch (e) {
+                if (e.code === 'ENOENT') continue;
+                throw e;
+              }
+              for (const line of raw.split('\n')) {
+                const trimmed = line.trim();
+                if (!trimmed) continue;
+                try {
+                  const entry = JSON.parse(trimmed);
+                  if (actionParam && entry.action !== actionParam) continue;
+                  allEntries.push(entry);
+                } catch {
+                  // skip malformed lines
+                }
+              }
+            }
+
+            // Derive CSV columns from the union of all entry keys
+            const colSet = new Set();
+            for (const e of allEntries) Object.keys(e).forEach((k) => colSet.add(k));
+            const cols = ['timestamp', 'action', ...Array.from(colSet).filter((c) => c !== 'timestamp' && c !== 'action').sort()];
+
+            const csvEscape = (v) => {
+              if (v === null || v === undefined) return '';
+              const s = typeof v === 'object' ? JSON.stringify(v) : String(v);
+              return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
+            };
+
+            const lines = [cols.join(',')];
+            for (const e of allEntries) {
+              lines.push(cols.map((c) => csvEscape(e[c])).join(','));
+            }
+
+            const csv = lines.join('\n');
+            const exportDate = dateParam ?? new Date().toISOString().split('T')[0];
+            res.writeHead(200, {
+              'content-type': 'text/csv; charset=utf-8',
+              'content-disposition': `attachment; filename="audit-logs-${exportDate}.csv"`,
+            });
+            return res.end(csv);
+          } catch (err) {
+            logger.error({ error: err.message, stack: err.stack }, 'Failed to export audit logs');
+            return sendJson(res, 500, { error: 'audit_log_export_failed', message: err.message });
+          }
+        }
+
         return notFound(res);
       } catch (error) {
         if (error.name === "SorobanError") {
