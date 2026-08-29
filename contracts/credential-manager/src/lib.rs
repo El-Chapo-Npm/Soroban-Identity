@@ -1501,7 +1501,10 @@ impl CredentialManager {
     }
 
     /// Issue #658: Execute an admin action after threshold is reached.
-    fn execute_admin_action_internal(env: &Env, action: &AdminAction) -> Result<(), ContractError> {
+    fn execute_admin_action_internal(
+        env: &Env,
+        action: &AdminAction,
+    ) -> Result<(), ContractError> {
         match action.action_type {
             AdminActionType::AddIssuer => {
                 // Execute add_issuer without requiring additional auth
