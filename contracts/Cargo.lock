@@ -878,6 +878,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "revocation-registry"
+version = "0.1.0"
+dependencies = [
+ "shared-errors",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "rfc6979"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -915,6 +923,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
+name = "schema-registry"
+version = "0.1.0"
+dependencies = [
+ "shared-errors",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "sec1"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -925,6 +941,14 @@ dependencies = [
  "generic-array",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "selective-disclosure"
+version = "0.1.0"
+dependencies = [
+ "shared-errors",
+ "soroban-sdk",
 ]
 
 [[package]]
@@ -1146,6 +1170,9 @@ dependencies = [
  "credential-manager",
  "identity-registry",
  "reputation",
+ "revocation-registry",
+ "schema-registry",
+ "selective-disclosure",
  "shared-errors",
  "soroban-identity-interface",
  "soroban-sdk",

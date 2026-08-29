@@ -1,0 +1,83 @@
+{
+  "app": {
+    "title": "Soroban Identity",
+    "subtitle": "Identité Décentralisée pour un Monde sans Confiance",
+    "lightMode": "☀ Clair",
+    "darkMode": "☾ Sombre",
+    "networkOnline": "Réseau OK",
+    "networkOffline": "Erreur Réseau"
+  },
+  "tabs": {
+    "identity": "Identité (DID)",
+    "credentials": "Justificatifs",
+    "label": "Sections"
+  },
+  "wallet": {
+    "connect": "Connecter le Portefeuille",
+    "disconnect": "Déconnecter",
+    "connecting": "Connexion…"
+  },
+  "identity": {
+    "resolveDid": "Résoudre le DID",
+    "resolveAddress": "Adresse Stellar (G…)",
+    "resolve": "Résoudre",
+    "resolving": "Résolution…",
+    "reputation": "Réputation",
+    "score": "Score",
+    "reporters": "Rapporteurs",
+    "lastUpdated": "Dernière mise à jour",
+    "noReputation": "Aucun enregistrement de réputation trouvé pour cette adresse.",
+    "loadingReputation": "Chargement de la réputation…",
+    "antiSybil": "Vérification Anti-Sybil",
+    "minScore": "Score Minimum",
+    "minReporters": "Rapporteurs Minimum",
+    "runSybilCheck": "Lancer la Vérification Sybil",
+    "checkingSybil": "Vérification…",
+    "passesSybil": "✓ Passe la vérification sybil",
+    "failsSybil": "✗ Échoue la vérification sybil",
+    "resolveDIDFirst": "Résolvez un DID ci-dessus pour lancer la vérification anti-sybil.",
+    "createDid": "Créer un DID",
+    "creating": "Création…",
+    "connectToCreate": "Connectez votre portefeuille Freighter pour créer un nouveau DID en chaîne.",
+    "connectedAs": "Connecté en tant que",
+    "showQr": "Afficher le Code QR",
+    "hideQr": "Masquer le Code QR"
+  },
+  "credentials": {
+    "credentials": "Justificatifs",
+    "verifyCredential": "Vérifier le Justificatif",
+    "credentialIdPlaceholder": "ID du Justificatif (hex)",
+    "verify": "Vérifier",
+    "verifying": "Vérification…",
+    "valid": "Valide",
+    "revokedMsg": "Invalide — le justificatif a été révoqué",
+    "expiredMsg": "Invalide — le justificatif a expiré",
+    "notFoundMsg": "Invalide — justificatif introuvable",
+    "invalid": "Invalide",
+    "issueCredential": "Émettre un Justificatif",
+    "issuingAs": "Émission en tant que",
+    "subjectPlaceholder": "Adresse du sujet (G…)",
+    "issueKyc": "Émettre un Justificatif KYC",
+    "issuing": "Émission…",
+    "connectToIssue": "Connectez votre portefeuille Freighter pour émettre des justificatifs en tant qu'émetteur enregistré.",
+    "noCredentials": "Aucun justificatif de type {{type}} trouvé.",
+    "noExpiry": "Pas d'expiration",
+    "expiredDaysAgo": "Expiré il y a {{count}} jour",
+    "expiredDaysAgo_plural": "Expiré il y a {{count}} jours",
+    "expiredHoursAgo": "Expiré il y a {{count}} heure",
+    "expiredHoursAgo_plural": "Expiré il y a {{count}} heures",
+    "expiredMinsAgo": "Expiré il y a {{count}} min",
+    "expiredMinsAgo_plural": "Expiré il y a {{count}} mins",
+    "expiresInDays": "Expire dans {{count}} jour",
+    "expiresInDays_plural": "Expire dans {{count}} jours",
+    "expiresInHours": "Expire dans {{count}} heure",
+    "expiresInHours_plural": "Expire dans {{count}} heures",
+    "expiresInMins": "Expire dans {{count}} min",
+    "expiresInMins_plural": "Expire dans {{count}} mins"
+  },
+  "a11y": {
+    "skipToContent": "Passer au contenu principal",
+    "switchLanguage": "Changer de langue",
+    "dismissNotification": "Fermer la notification"
+  }
+}

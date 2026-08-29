@@ -335,10 +335,14 @@ export function validateConfig(
 export interface FeeEstimate {
   /** Base network fee in stroops. */
   baseFee: number;
-  /** Soroban resource fee in stroops. */
+  /** Soroban resource fee in stroops (after applying gas multiplier). */
   resourceFee: number;
   /** Total fee (baseFee + resourceFee) in stroops. */
   totalFee: number;
+  /** Gas multiplier applied to the resource fee (1.0 = no adjustment, 1.5 = 50% increase). */
+  gasMultiplier?: number;
+  /** Original resource fee before multiplier was applied (in stroops). */
+  originalResourceFee?: number;
 }
 
 export class SimulationError extends Error {

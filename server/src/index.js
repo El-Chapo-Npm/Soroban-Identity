@@ -12,8 +12,7 @@ import { WebSocketHub } from './websocket.js';
 import { logger } from './logger.js';
 import { RotatingFileSink } from './access-log.js';
 import { VaultLeaseManager } from './vault.js';
-import { createCompressionMiddleware } from './compression.js';
-import { createCredentialIssueQueue, createBatchVerificationQueue } from './job-queue.js';
+import { initFeatureFlags, getFlag } from './feature-flags.js';
 
 // Load secrets before validation so existing config consumers see the same
 // values as environment-backed deployments. Vault is opt-in and fails closed
@@ -55,11 +54,35 @@ if (vaultManager.enabled) {
   };
 }
 await ensureDataDir(config);
+// Initialize the feature flag system (#723) and seed a default flag for new
+// credential types so downstream modules can roll them out gradually.
+await initFeatureFlags(config.dataDir);
+if (!getFlag('new_credential_types')) {
+  const { createFlag } = await import('./feature-flags.js');
+  await createFlag(config.dataDir, {
+    key: 'new_credential_types',
+    description: 'Enable newly introduced verifiable credential types',
+    type: 'variant',
+    defaultValue: 'disabled',
+    targetingRules: [
+      { attribute: 'tier', operator: 'eq', value: 'enterprise', variant: 'enabled' },
+    ],
+    createdBy: config.adminActor ?? 'admin',
+  });
+}
 const metrics = new MetricsService();
 const didCache = new DidCache(config, { metrics });
+const queryCache = new QueryResultCache(config, { redisClient: didCache.client, metrics });
+const ddosProtection = new DdosProtection(config, { onAlert: async (event) => { metrics.observeDdosEvent(event.type); logger.warn(event, 'DDoS protection event'); } });
 // Connecting never throws: a cache outage must not stop the server booting.
 await didCache.connect();
-const soroban = new SorobanClient(config, metrics, { didCache });
+const soroban = new SorobanClient(config, metrics, { didCache, queryCache });
+if (config.queryCacheWarmQueries.length > 0) {
+  void queryCache.warm(config.queryCacheWarmQueries, async (query) => {
+    if (query === 'get_issuers') return soroban.getIssuers();
+    return null;
+  }).catch((error) => logger.warn({ error: error.message }, 'Query cache warm failed'));
+}
 
 if (config.didCacheWarmList.length > 0) {
   // Warm in the background so startup is not blocked on RPC round trips.
@@ -138,8 +161,7 @@ const server = http.createServer(
     apiKeyService,
     accessLogSink,
     realtime,
-    credentialIssueQueue,
-    batchVerificationQueue,
+    ddosProtection,
   }),
 );
 
@@ -163,9 +185,15 @@ if (realtime) {
 
 const connections = new Set();
 server.on('connection', (socket) => {
+  const ip = config.trustProxy ? (socket.remoteAddress ?? 'unknown') : (socket.remoteAddress ?? 'unknown');
+  if (!ddosProtection.connectionOpened(ip)) {
+    socket.destroy();
+    return;
+  }
   connections.add(socket);
   socket.on('close', () => {
     connections.delete(socket);
+    ddosProtection.connectionClosed(ip);
   });
 });
 

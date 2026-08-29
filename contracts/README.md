@@ -1,10 +1,13 @@
 # Soroban Identity Contracts
 
-This directory contains the three on-chain contracts that power the Soroban Identity protocol:
+This directory contains the on-chain contracts that power the Soroban Identity protocol:
 
 - **identity-registry** — DID creation, resolution, and lifecycle
 - **credential-manager** — verifiable credential issuance and verification
 - **reputation** — score aggregation and anti-sybil signals
+- **schema-registry** — on-chain verifiable credential schema storage and validation (#726)
+- **revocation-registry** — centralized bitmap-based revocation registry with reasons and merkle root proofs (#725)
+- **selective-disclosure** — commitment-based selective disclosure of credential attributes with ZK-friendly proofs (#724)
 
 ## Canonical admin initialization pattern
 

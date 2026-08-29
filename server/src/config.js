@@ -232,11 +232,22 @@ export function loadConfig(env = process.env) {
       .filter(Boolean),
     rateLimitMaxBuckets: parseInteger(env.RATE_LIMIT_MAX_BUCKETS, 10000),
     trustProxy: env.TRUST_PROXY === "true",
+    ddosProtectionEnabled: parseBoolean(env.DDOS_PROTECTION_ENABLED, false),
+    ddosWindowMs: parseInteger(env.DDOS_WINDOW_MS, 60_000),
+    ddosMaxRequestsPerIp: parseInteger(env.DDOS_MAX_REQUESTS_PER_IP, 120),
+    ddosMaxConnectionsPerIp: parseInteger(env.DDOS_MAX_CONNECTIONS_PER_IP, 20),
+    ddosSuspiciousThreshold: parseInteger(env.DDOS_SUSPICIOUS_THRESHOLD, 96),
+    ddosCaptchaEnabled: parseBoolean(env.DDOS_CAPTCHA_ENABLED, false),
+    ddosCaptchaSecret: env.DDOS_CAPTCHA_SECRET ?? "",
+    ddosCaptchaUrl: env.DDOS_CAPTCHA_URL ?? "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+    ddosBlockedRegions: parseList(env.DDOS_BLOCKED_REGIONS, []),
     redisUrl: env.REDIS_URL ?? "",
     didCacheTtlMs: parseInteger(env.DID_CACHE_TTL_MS, 60 * 1000),
     redisMaxRetries: parseInteger(env.REDIS_MAX_RETRIES, 5),
     redisRetryBaseMs: parseInteger(env.REDIS_RETRY_BASE_MS, 200),
     redisCommandTimeoutMs: parseInteger(env.REDIS_COMMAND_TIMEOUT_MS, 1000),
+    redisEnableAutoReconnect: env.REDIS_ENABLE_AUTO_RECONNECT !== "false",
+    redisReconnectDelayMs: parseInteger(env.REDIS_RECONNECT_DELAY_MS, 1000),
     cacheFailureThreshold: parseInteger(env.CACHE_FAILURE_THRESHOLD, 3),
     didCacheWarmList: (env.DID_CACHE_WARM_LIST ?? "")
       .split(",")
@@ -283,6 +294,11 @@ export function loadConfig(env = process.env) {
     network: env.STELLAR_NETWORK ?? "testnet",
     rpcUrl: env.STELLAR_RPC_URL ?? env.RPC_URL ?? "https://soroban-testnet.stellar.org",
     rpcCacheTtlMs: parseInteger(env.RPC_CACHE_TTL_MS, 5000),
+    queryCacheEnabled: parseBoolean(env.QUERY_CACHE_ENABLED, true),
+    queryCacheDefaultTtlMs: parseInteger(env.QUERY_CACHE_DEFAULT_TTL_MS, 5000),
+    queryCacheTtlVolatileMs: parseInteger(env.QUERY_CACHE_TTL_VOLATILE_MS, 1000),
+    queryCacheTtlStableMs: parseInteger(env.QUERY_CACHE_TTL_STABLE_MS, 60_000),
+    queryCacheWarmQueries: parseJson(env.QUERY_CACHE_WARM_QUERIES, []),
     // RPC_MAX_RETRIES=0 disables retries (allowZero: true)
     rpcMaxRetries: parseInteger(env.RPC_MAX_RETRIES, 3, true),
     rpcRetryBaseMs: parseInteger(env.RPC_RETRY_BASE_MS, 500),
@@ -331,6 +347,15 @@ export function loadConfig(env = process.env) {
       credential: env.CREDENTIAL_CONTRACT_ID ?? env.CREDENTIAL_MANAGER_ID ?? "",
       reputation: env.REPUTATION_ID ?? "",
     },
+    // Jaeger distributed tracing (#714)
+    jaegerEnabled: parseBoolean(env.JAEGER_ENABLED, false),
+    jaegerServiceName: env.JAEGER_SERVICE_NAME ?? "soroban-identity-server",
+    jaegerAgentHost: env.JAEGER_AGENT_HOST ?? "localhost",
+    jaegerAgentPort: parseInteger(env.JAEGER_AGENT_PORT, 6832),
+    jaegerSamplerType: env.JAEGER_SAMPLER_TYPE ?? "const",
+    jaegerSamplerParam: parseFloat(env.JAEGER_SAMPLER_PARAM ?? "1"),
+    jaegerReporterLogSpans: parseBoolean(env.JAEGER_REPORTER_LOG_SPANS, false),
+    jaegerReporterFlushInterval: parseInteger(env.JAEGER_REPORTER_FLUSH_INTERVAL, 1000),
   };
 }
 
@@ -548,6 +573,12 @@ export function logDefaultValues(env = process.env) {
     { key: "CORS_ALLOWED_HEADERS", defaultVal: DEFAULT_CORS_ALLOWED_HEADERS.join(",") },
     { key: "CORS_EXPOSED_HEADERS", defaultVal: DEFAULT_CORS_EXPOSED_HEADERS.join(",") },
     { key: "CORS_MAX_AGE", defaultVal: String(DEFAULT_CORS_MAX_AGE) },
+    { key: "JAEGER_ENABLED", defaultVal: "false" },
+    { key: "JAEGER_SERVICE_NAME", defaultVal: "'soroban-identity-server'" },
+    { key: "JAEGER_AGENT_HOST", defaultVal: "'localhost'" },
+    { key: "JAEGER_AGENT_PORT", defaultVal: "6832" },
+    { key: "JAEGER_SAMPLER_TYPE", defaultVal: "'const'" },
+    { key: "JAEGER_SAMPLER_PARAM", defaultVal: "1" },
   ];
 
   for (const item of defaults) {

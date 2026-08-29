@@ -18,6 +18,11 @@ pub const MIN_INTERVAL_FLOOR: u32 = 10;
 /// Highest value an admin may configure the rate-limit window to.
 pub const MIN_INTERVAL_CEILING: u32 = 50_000;
 
+// Aliases used by tests and the fuzz harness (#780).
+pub const DEFAULT_RATE_LIMIT_WINDOW: u32 = DEFAULT_MIN_INTERVAL;
+pub const MIN_RATE_LIMIT_WINDOW: u32 = MIN_INTERVAL_FLOOR;
+pub const MAX_RATE_LIMIT_WINDOW: u32 = MIN_INTERVAL_CEILING;
+
 const MIN_SCORE: i64 = 0;
 const TTL_MAX: u32 = 6_312_000;
 const MAX_HISTORY: usize = 50;
@@ -171,9 +176,6 @@ impl Reputation {
     /// live-updatable via [`Self::set_min_interval`].
     pub fn initialize(env: Env, admin: Address) -> Result<(), ContractError> {
         Self::require_uninitialized(&env)?;
-        if rate_limit_window < MIN_RATE_LIMIT_WINDOW || rate_limit_window > MAX_RATE_LIMIT_WINDOW {
-            return Err(ContractError::InvalidRateLimitWindow);
-        }
         Self::set_admin(&env, &admin);
         env.storage()
             .instance()
@@ -193,6 +195,11 @@ impl Reputation {
             .instance()
             .get(&MIN_INTERVAL_KEY)
             .unwrap_or(DEFAULT_MIN_INTERVAL)
+    }
+
+    /// Alias for `get_min_interval` — used by tests and the fuzz harness (#780).
+    pub fn get_rate_limit_window(env: Env) -> u32 {
+        Self::get_min_interval(env)
     }
 
     /// Updates the rate-limit window (admin only).
@@ -215,15 +222,24 @@ impl Reputation {
         if stored != admin {
             return Err(ContractError::Unauthorized);
         }
-        if window < MIN_RATE_LIMIT_WINDOW || window > MAX_RATE_LIMIT_WINDOW {
-            return Err(ContractError::InvalidRateLimitWindow);
+        if ledgers < MIN_INTERVAL_FLOOR || ledgers > MIN_INTERVAL_CEILING {
+            return Err(ContractError::InvalidMinInterval);
         }
-        env.storage().instance().set(&RATE_LIMIT_WIN, &window);
+        env.storage().instance().set(&MIN_INTERVAL_KEY, &ledgers);
         env.events().publish(
-            (RATE_LIMIT_WIN, symbol_short!("updated")),
-            (EVENT_VERSION, admin, window),
+            (MIN_INTERVAL_KEY, symbol_short!("updated")),
+            (EVENT_VERSION, admin, ledgers),
         );
         Ok(())
+    }
+
+    /// Alias for `set_min_interval` — used by tests and the fuzz harness (#780).
+    pub fn set_rate_limit_window(
+        env: Env,
+        admin: Address,
+        ledgers: u32,
+    ) -> Result<(), ContractError> {
+        Self::set_min_interval(env, admin, ledgers)
     }
 
     pub fn propose_admin(
@@ -456,7 +472,9 @@ impl Reputation {
                     .get(&rep_history_key)
                     .unwrap_or_else(|| Vec::new(&env));
                 for entry in rep_history.iter() {
-                    computed_score = computed_score.saturating_add(entry.delta).max(MIN_SCORE);
+                    // Saturating add prevents overflow on extreme deltas (e.g. i64::MIN / i64::MAX).
+                    // Clamp to MIN_SCORE (0) after each step so the running total never goes negative.
+                    computed_score = computed_score.saturating_add(entry.delta).clamp(MIN_SCORE, i64::MAX);
                 }
             }
         }
@@ -693,6 +711,7 @@ impl Reputation {
             if delta_index < history.len() {
                 let disputed_delta = history.get(delta_index).unwrap().delta;
                 history.remove(delta_index);
+                let now = env.ledger().timestamp();
 
                 let rec_key = Self::record_key(&subject);
                 let mut record: ReputationRecord =
@@ -1095,7 +1114,9 @@ impl Reputation {
                     .get(&rep_history_key)
                     .unwrap_or_else(|| Vec::new(env));
                 for entry in rep_history.iter() {
-                    computed_score = computed_score.saturating_add(entry.delta).max(MIN_SCORE);
+                    // Saturating add prevents overflow on extreme deltas (e.g. i64::MIN / i64::MAX).
+                    // Clamp to MIN_SCORE (0) after each step so the running total never goes negative.
+                    computed_score = computed_score.saturating_add(entry.delta).clamp(MIN_SCORE, i64::MAX);
                 }
             }
         }
@@ -1143,7 +1164,7 @@ mod tests {
         let contract_id = env.register_contract(None, Reputation);
         let client = ReputationClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
-        client.initialize(&admin, &DEFAULT_RATE_LIMIT_WINDOW);
+        client.initialize(&admin);
         (env, admin, client)
     }
 
@@ -1172,7 +1193,7 @@ mod tests {
         client.add_reporter(&reporter);
         let reason = String::from_str(&env, "completed KYC");
         client.submit_score(&reporter, &subject, &50, &reason);
-        env.ledger().with_mut(|li| li.timestamp += DEFAULT_RATE_LIMIT_WINDOW + 1);
+        env.ledger().with_mut(|li| li.sequence_number += DEFAULT_RATE_LIMIT_WINDOW + 1);
         client.submit_score(&reporter, &subject, &25, &reason);
         let rec = client.get_reputation(&subject);
         assert_eq!(rec.score, 75);
@@ -1390,7 +1411,7 @@ mod tests {
         let (_env, admin, client) = setup();
         assert_eq!(
             client.try_set_rate_limit_window(&admin, &(MIN_RATE_LIMIT_WINDOW - 1)),
-            Err(Ok(ContractError::InvalidRateLimitWindow))
+            Err(Ok(ContractError::InvalidMinInterval))
         );
     }
 
@@ -1399,7 +1420,7 @@ mod tests {
         let (_env, admin, client) = setup();
         assert_eq!(
             client.try_set_rate_limit_window(&admin, &(MAX_RATE_LIMIT_WINDOW + 1)),
-            Err(Ok(ContractError::InvalidRateLimitWindow))
+            Err(Ok(ContractError::InvalidMinInterval))
         );
     }
 
