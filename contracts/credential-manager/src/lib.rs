@@ -931,7 +931,11 @@ impl CredentialManager {
         let all = Self::get_issuers_internal(&env);
         let total = all.len();
         let start: u64 = cursor.unwrap_or(0);
-        let effective_limit: u32 = if limit == 0 || limit > PAGE_CAP { PAGE_CAP } else { limit };
+        let effective_limit: u32 = if limit == 0 || limit > PAGE_CAP {
+            PAGE_CAP
+        } else {
+            limit
+        };
         let mut items: Vec<Address> = Vec::new(&env);
         let mut next: u64 = start;
         let mut taken: u32 = 0;
@@ -940,7 +944,11 @@ impl CredentialManager {
             next += 1;
             taken += 1;
         }
-        let next_cursor = if (next as u32) < total { Some(next) } else { None };
+        let next_cursor = if (next as u32) < total {
+            Some(next)
+        } else {
+            None
+        };
         IssuersPage { items, next_cursor }
     }
 
@@ -961,7 +969,11 @@ impl CredentialManager {
         let all = Self::fetch_issuer_creds(&env, &issuer);
         let total = all.len();
         let start: u64 = cursor.unwrap_or(0);
-        let effective_limit: u32 = if limit == 0 || limit > PAGE_CAP { PAGE_CAP } else { limit };
+        let effective_limit: u32 = if limit == 0 || limit > PAGE_CAP {
+            PAGE_CAP
+        } else {
+            limit
+        };
         let mut items: Vec<BytesN<32>> = Vec::new(&env);
         let mut next: u64 = start;
         let mut taken: u32 = 0;
@@ -970,7 +982,11 @@ impl CredentialManager {
             next += 1;
             taken += 1;
         }
-        let next_cursor = if (next as u32) < total { Some(next) } else { None };
+        let next_cursor = if (next as u32) < total {
+            Some(next)
+        } else {
+            None
+        };
         CredentialIdsPage { items, next_cursor }
     }
 
