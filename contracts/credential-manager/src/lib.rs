@@ -444,7 +444,9 @@ impl CredentialManager {
         }
         let schema_key = (SCHEMA, issuer.clone(), schema_hash.clone());
         env.storage().persistent().set(&schema_key, &true);
-        env.storage().persistent().extend_ttl(&schema_key, TTL_MAX, TTL_MAX);
+        env.storage()
+            .persistent()
+            .extend_ttl(&schema_key, TTL_MAX, TTL_MAX);
         env.events().publish(
             (CRED, symbol_short!("sch_reg")),
             (EVENT_VERSION, issuer, schema_hash),
@@ -545,15 +547,14 @@ impl CredentialManager {
 
         // Reject if the most recently issued credential for this triple is not revoked.
         if current_nonce > 0 {
-            let existing_id = Self::derive_id(
-                &env,
-                &issuer,
-                &subject,
-                &credential_type,
-                current_nonce,
-            );
+            let existing_id =
+                Self::derive_id(&env, &issuer, &subject, &credential_type, current_nonce);
             let existing_key = Self::cred_key(&existing_id);
-            if let Some(existing) = env.storage().persistent().get::<_, Credential>(&existing_key) {
+            if let Some(existing) = env
+                .storage()
+                .persistent()
+                .get::<_, Credential>(&existing_key)
+            {
                 if !existing.revoked {
                     return Err(ContractError::CredentialAlreadyExists);
                 }
@@ -583,14 +584,18 @@ impl CredentialManager {
         env.storage().persistent().extend_ttl(&key, ttl, ttl);
 
         env.storage().persistent().set(&nonce_key, &next_nonce);
-        env.storage().persistent().extend_ttl(&nonce_key, TTL_MAX, TTL_MAX);
+        env.storage()
+            .persistent()
+            .extend_ttl(&nonce_key, TTL_MAX, TTL_MAX);
 
         // Index credential under subject
         let mut subject_creds = Self::fetch_subject_creds(&env, &subject);
         subject_creds.push_back(id.clone());
         let subject_key = Self::subject_key(&subject);
         env.storage().persistent().set(&subject_key, &subject_creds);
-        env.storage().persistent().extend_ttl(&subject_key, TTL_MAX, TTL_MAX);
+        env.storage()
+            .persistent()
+            .extend_ttl(&subject_key, TTL_MAX, TTL_MAX);
 
         // Index credential under issuer for reverse lookup
         // Apply ring-buffer semantics: cap at MAX_ISSUER_CREDS
@@ -608,19 +613,32 @@ impl CredentialManager {
         }
         issuer_creds.push_back(id.clone());
         let issuer_creds_key = Self::issuer_creds_key(&issuer);
-        env.storage().persistent().set(&issuer_creds_key, &issuer_creds);
-        env.storage().persistent().extend_ttl(&issuer_creds_key, TTL_MAX, TTL_MAX);
+        env.storage()
+            .persistent()
+            .set(&issuer_creds_key, &issuer_creds);
+        env.storage()
+            .persistent()
+            .extend_ttl(&issuer_creds_key, TTL_MAX, TTL_MAX);
 
         let cnt_key = (CRED_CNT, subject.clone());
         let cnt: u32 = env.storage().persistent().get(&cnt_key).unwrap_or(0);
         env.storage().persistent().set(&cnt_key, &(cnt + 1));
 
         let total_issued: u32 = env.storage().instance().get(&TOTAL_ISSUED_CNT).unwrap_or(0);
-        env.storage().instance().set(&TOTAL_ISSUED_CNT, &(total_issued + 1));
+        env.storage()
+            .instance()
+            .set(&TOTAL_ISSUED_CNT, &(total_issued + 1));
 
         env.events().publish(
             (CRED, symbol_short!("issued")),
-            (EVENT_VERSION, id.clone(), subject, issuer, credential_type, expires_at),
+            (
+                EVENT_VERSION,
+                id.clone(),
+                subject,
+                issuer,
+                credential_type,
+                expires_at,
+            ),
         );
         Ok(id)
     }
@@ -650,8 +668,12 @@ impl CredentialManager {
         let mut revocations = Self::fetch_revocations(&env, &issuer, &cred.subject);
         revocations.push_back(credential_id.clone());
         let revocations_key = Self::revocations_key(&issuer, &cred.subject);
-        env.storage().persistent().set(&revocations_key, &revocations);
-        env.storage().persistent().extend_ttl(&revocations_key, TTL_MAX, TTL_MAX);
+        env.storage()
+            .persistent()
+            .set(&revocations_key, &revocations);
+        env.storage()
+            .persistent()
+            .extend_ttl(&revocations_key, TTL_MAX, TTL_MAX);
 
         let revoked: u32 = env.storage().instance().get(&REVOKED_CNT).unwrap_or(0);
         env.storage().instance().set(&REVOKED_CNT, &(revoked + 1));
@@ -857,7 +879,11 @@ impl CredentialManager {
         let all = Self::fetch_subject_creds(&env, &subject);
         let total = all.len();
         let start: u64 = cursor.unwrap_or(0);
-        let effective_limit: u32 = if limit == 0 || limit > PAGE_CAP { PAGE_CAP } else { limit };
+        let effective_limit: u32 = if limit == 0 || limit > PAGE_CAP {
+            PAGE_CAP
+        } else {
+            limit
+        };
         let mut items: Vec<BytesN<32>> = Vec::new(&env);
         let mut next: u64 = start;
         let mut taken: u32 = 0;
@@ -879,14 +905,20 @@ impl CredentialManager {
                 taken += 1;
             }
         }
-        let next_cursor = if (next as u32) < total { Some(next) } else { None };
+        let next_cursor = if (next as u32) < total {
+            Some(next)
+        } else {
+            None
+        };
         CredentialIdsPage { items, next_cursor }
     }
 
     pub fn get_credential_count(env: Env, subject: Address) -> u32 {
         let cnt_key = (CRED_CNT, subject);
         if env.storage().persistent().has(&cnt_key) {
-            env.storage().persistent().extend_ttl(&cnt_key, TTL_MAX, TTL_MAX);
+            env.storage()
+                .persistent()
+                .extend_ttl(&cnt_key, TTL_MAX, TTL_MAX);
         }
         env.storage().persistent().get(&cnt_key).unwrap_or(0)
     }
