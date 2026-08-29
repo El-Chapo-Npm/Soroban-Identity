@@ -298,28 +298,54 @@ impl CredentialManager {
         CONTRACT_VERSION
     }
 
-    pub fn initialize(env: Env, admin: Address, identity_registry_id: Address) -> Result<(), ContractError> {
+    pub fn initialize(
+        env: Env,
+        admin: Address,
+        identity_registry_id: Address,
+    ) -> Result<(), ContractError> {
         Self::require_uninitialized(&env)?;
         Self::set_admin(&env, &admin);
-        env.storage().instance().set(&IDENTITY_REGISTRY, &identity_registry_id);
-        env.events().publish((ADMIN, symbol_short!("init")), (EVENT_VERSION, admin));
+        env.storage()
+            .instance()
+            .set(&IDENTITY_REGISTRY, &identity_registry_id);
+        env.events()
+            .publish((ADMIN, symbol_short!("init")), (EVENT_VERSION, admin));
         Ok(())
     }
 
-    pub fn transfer_admin(env: Env, current_admin: Address, new_admin: Address) -> Result<(), ContractError> {
+    pub fn transfer_admin(
+        env: Env,
+        current_admin: Address,
+        new_admin: Address,
+    ) -> Result<(), ContractError> {
         current_admin.require_auth();
-        let stored: Address = env.storage().instance().get(&ADMIN).ok_or(ContractError::NotInitialized)?;
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(ContractError::NotInitialized)?;
         if stored != current_admin {
             return Err(ContractError::Unauthorized);
         }
         env.storage().instance().set(&ADMIN, &new_admin);
-        env.events().publish((ADMIN, symbol_short!("transfer")), (EVENT_VERSION, current_admin, new_admin));
+        env.events().publish(
+            (ADMIN, symbol_short!("transfer")),
+            (EVENT_VERSION, current_admin, new_admin),
+        );
         Ok(())
     }
 
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
+    pub fn upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
         admin.require_auth();
-        let stored: Address = env.storage().instance().get(&ADMIN).ok_or(ContractError::NotInitialized)?;
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(ContractError::NotInitialized)?;
         if stored != admin {
             return Err(ContractError::Unauthorized);
         }
@@ -330,14 +356,20 @@ impl CredentialManager {
     pub fn pause(env: Env) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
         env.storage().instance().set(&PAUSED, &true);
-        env.events().publish((symbol_short!("contract"), symbol_short!("paused")), EVENT_VERSION);
+        env.events().publish(
+            (symbol_short!("contract"), symbol_short!("paused")),
+            EVENT_VERSION,
+        );
         Ok(())
     }
 
     pub fn unpause(env: Env) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
         env.storage().instance().set(&PAUSED, &false);
-        env.events().publish((symbol_short!("contract"), symbol_short!("unpaused")), EVENT_VERSION);
+        env.events().publish(
+            (symbol_short!("contract"), symbol_short!("unpaused")),
+            EVENT_VERSION,
+        );
         Ok(())
     }
 
@@ -354,14 +386,19 @@ impl CredentialManager {
             }
             issuers.push_back(issuer.clone());
             env.storage().instance().set(&ISSUER, &issuers);
-            env.events().publish((ISSUER, symbol_short!("added")), (EVENT_VERSION, issuer));
+            env.events()
+                .publish((ISSUER, symbol_short!("added")), (EVENT_VERSION, issuer));
         }
         Ok(())
     }
 
     pub fn set_max_issuers(env: Env, admin: Address, new_max: u32) -> Result<(), ContractError> {
         admin.require_auth();
-        let stored: Address = env.storage().instance().get(&ADMIN).ok_or(ContractError::NotInitialized)?;
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(ContractError::NotInitialized)?;
         if stored != admin {
             return Err(ContractError::Unauthorized);
         }
@@ -394,7 +431,11 @@ impl CredentialManager {
         Ok(())
     }
 
-    pub fn register_schema(env: Env, issuer: Address, schema_hash: BytesN<32>) -> Result<(), ContractError> {
+    pub fn register_schema(
+        env: Env,
+        issuer: Address,
+        schema_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
         issuer.require_auth();
         Self::require_not_paused(&env)?;
         Self::require_issuer(&env, &issuer)?;
@@ -404,7 +445,10 @@ impl CredentialManager {
         let schema_key = (SCHEMA, issuer.clone(), schema_hash.clone());
         env.storage().persistent().set(&schema_key, &true);
         env.storage().persistent().extend_ttl(&schema_key, TTL_MAX, TTL_MAX);
-        env.events().publish((CRED, symbol_short!("sch_reg")), (EVENT_VERSION, issuer, schema_hash));
+        env.events().publish(
+            (CRED, symbol_short!("sch_reg")),
+            (EVENT_VERSION, issuer, schema_hash),
+        );
         Ok(())
     }
 
@@ -467,7 +511,11 @@ impl CredentialManager {
         // Issue #551: guard the cross-contract call into identity-registry.
         let _guard = ReentrancyGuard::acquire(&env)?;
 
-        let registry_id: Address = env.storage().instance().get(&IDENTITY_REGISTRY).ok_or(ContractError::NotInitialized)?;
+        let registry_id: Address = env
+            .storage()
+            .instance()
+            .get(&IDENTITY_REGISTRY)
+            .ok_or(ContractError::NotInitialized)?;
         let mut registry_args: Vec<Val> = Vec::new(&env);
         registry_args.push_back(subject.clone().into_val(&env));
         // Wrap the cross-contract call so a missing/deactivated DID (or any
@@ -497,7 +545,13 @@ impl CredentialManager {
 
         // Reject if the most recently issued credential for this triple is not revoked.
         if current_nonce > 0 {
-            let existing_id = Self::derive_id(&env, &issuer, &subject, &credential_type, current_nonce);
+            let existing_id = Self::derive_id(
+                &env,
+                &issuer,
+                &subject,
+                &credential_type,
+                current_nonce,
+            );
             let existing_key = Self::cred_key(&existing_id);
             if let Some(existing) = env.storage().persistent().get::<_, Credential>(&existing_key) {
                 if !existing.revoked {
@@ -571,11 +625,19 @@ impl CredentialManager {
         Ok(id)
     }
 
-    pub fn revoke_credential(env: Env, issuer: Address, credential_id: BytesN<32>) -> Result<(), ContractError> {
+    pub fn revoke_credential(
+        env: Env,
+        issuer: Address,
+        credential_id: BytesN<32>,
+    ) -> Result<(), ContractError> {
         issuer.require_auth();
         Self::require_not_paused(&env)?;
         let key = Self::cred_key(&credential_id);
-        let mut cred: Credential = env.storage().persistent().get(&key).ok_or(ContractError::CredentialNotFound)?;
+        let mut cred: Credential = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::CredentialNotFound)?;
         if cred.issuer != issuer {
             return Err(ContractError::UnauthorizedIssuer);
         }
@@ -636,17 +698,28 @@ impl CredentialManager {
         Ok(())
     }
 
-    pub fn expire_credential(env: Env, caller: Address, credential_id: BytesN<32>) -> Result<(), ContractError> {
+    pub fn expire_credential(
+        env: Env,
+        caller: Address,
+        credential_id: BytesN<32>,
+    ) -> Result<(), ContractError> {
         caller.require_auth();
         let key = Self::cred_key(&credential_id);
-        let mut cred: Credential = env.storage().persistent().get(&key).ok_or(ContractError::CredentialNotFound)?;
+        let mut cred: Credential = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::CredentialNotFound)?;
         if cred.revoked {
             return Err(ContractError::CredentialRevoked);
         }
         if cred.expires_at == 0 || env.ledger().timestamp() <= cred.expires_at {
             return Err(ContractError::CredentialNotExpiredYet);
         }
-        env.events().publish((CRED, symbol_short!("expired")), (EVENT_VERSION, credential_id, caller));
+        env.events().publish(
+            (CRED, symbol_short!("expired")),
+            (EVENT_VERSION, credential_id, caller),
+        );
         let revoked: u32 = env.storage().instance().get(&REVOKED_CNT).unwrap_or(0);
         env.storage().instance().set(&REVOKED_CNT, &(revoked + 1));
         cred.revoked = true;
@@ -746,7 +819,10 @@ impl CredentialManager {
         }
     }
 
-    pub fn get_credential(env: Env, credential_id: BytesN<32>) -> Result<Credential, ContractError> {
+    pub fn get_credential(
+        env: Env,
+        credential_id: BytesN<32>,
+    ) -> Result<Credential, ContractError> {
         let key = Self::cred_key(&credential_id);
         match env.storage().persistent().get::<_, Credential>(&key) {
             None => Err(ContractError::CredentialNotFound),
@@ -844,7 +920,12 @@ impl CredentialManager {
         Self::fetch_revocations(&env, &issuer, &subject)
     }
 
-    pub fn list_issuer_credentials(env: Env, issuer: Address, cursor: Option<u64>, limit: u32) -> CredentialIdsPage {
+    pub fn list_issuer_credentials(
+        env: Env,
+        issuer: Address,
+        cursor: Option<u64>,
+        limit: u32,
+    ) -> CredentialIdsPage {
         let all = Self::fetch_issuer_creds(&env, &issuer);
         let total = all.len();
         let start: u64 = cursor.unwrap_or(0);
@@ -995,7 +1076,10 @@ impl CredentialManager {
     /// Returns a flat `DependencyTree` describing the direct prerequisites of `credential_id`
     /// and whether the root credential itself is valid. Callers can walk the tree recursively
     /// by calling this function for each prerequisite ID.
-    pub fn get_dependency_tree(env: Env, credential_id: BytesN<32>) -> Result<DependencyTree, ContractError> {
+    pub fn get_dependency_tree(
+        env: Env,
+        credential_id: BytesN<32>,
+    ) -> Result<DependencyTree, ContractError> {
         let cred_key = Self::cred_key(&credential_id);
         let cred: Credential = env
             .storage()
@@ -1427,7 +1511,11 @@ impl CredentialManager {
     }
 
     fn require_admin(env: &Env) -> Result<(), ContractError> {
-        let admin: Address = env.storage().instance().get(&ADMIN).ok_or(ContractError::NotInitialized)?;
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(ContractError::NotInitialized)?;
         admin.require_auth();
         Ok(())
     }
@@ -1813,7 +1901,12 @@ mod tests {
         (env, admin, client)
     }
 
-    fn issue_kyc(env: &Env, client: &CredentialManagerClient, issuer: &Address, subject: &Address) -> BytesN<32> {
+    fn issue_kyc(
+        env: &Env,
+        client: &CredentialManagerClient,
+        issuer: &Address,
+        subject: &Address,
+    ) -> BytesN<32> {
         client.issue_credential(
             issuer, subject, &CredentialType::Kyc,
             &Map::new(env), &BytesN::from_array(env, &[1u8; 32]),
@@ -1847,7 +1940,10 @@ mod tests {
         client.add_issuer(&issuer);
         let cred_id = issue_kyc(&env, &client, &issuer, &subject);
         client.revoke_credential(&issuer, &cred_id);
-        assert_eq!(client.try_verify_credential(&cred_id), Err(Ok(ContractError::CredentialRevoked)));
+        assert_eq!(
+            client.try_verify_credential(&cred_id),
+            Err(Ok(ContractError::CredentialRevoked))
+        );
     }
 
     #[test]
@@ -1863,7 +1959,10 @@ mod tests {
             &Bytes::from_array(&env, &[0u8; 64]), &expires_at, &None,
         );
         env.ledger().with_mut(|li| li.timestamp = expires_at + 1);
-        assert_eq!(client.try_verify_credential(&cred_id), Err(Ok(ContractError::CredentialExpired)));
+        assert_eq!(
+            client.try_verify_credential(&cred_id),
+            Err(Ok(ContractError::CredentialExpired))
+        );
     }
 
     #[test]
@@ -1885,7 +1984,10 @@ mod tests {
     fn test_double_initialize_returns_error() {
         let (env, admin, client) = setup();
         let dummy_registry = Address::generate(&env);
-        assert_eq!(client.try_initialize(&admin, &dummy_registry), Err(Ok(ContractError::AlreadyInitialized)));
+        assert_eq!(
+            client.try_initialize(&admin, &dummy_registry),
+            Err(Ok(ContractError::AlreadyInitialized))
+        );
     }
 
     #[test]
@@ -2032,7 +2134,10 @@ mod tests {
         // After expiry succeeds and marks credential expired
         env.ledger().with_mut(|li| li.timestamp = expires_at + 1);
         client.expire_credential(&caller, &cred_id);
-        assert_eq!(client.try_verify_credential(&cred_id), Err(Ok(ContractError::CredentialRevoked)));
+        assert_eq!(
+            client.try_verify_credential(&cred_id),
+            Err(Ok(ContractError::CredentialRevoked))
+        );
     }
 
     #[test]
