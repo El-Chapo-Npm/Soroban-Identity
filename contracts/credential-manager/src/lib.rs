@@ -65,6 +65,22 @@ const CHALLENGE_EXPIRATION_SECS: u64 = 300;
 pub const SIG_SCHEME_ED25519: u32 = 0;
 pub const SIG_SCHEME_SECP256K1: u32 = 1;
 
+// ── Issue #658: multi-signature admin operations ─────────────────────────────
+/// Maps a proposal ID to pending admin action details.
+const ADMIN_ACTION: Symbol = symbol_short!("ADMACT");
+/// Maps a proposal ID to a set of admin addresses that have approved it.
+const ADMIN_APPROVALS: Symbol = symbol_short!("ADMAPV");
+/// Maps a proposal ID to the creation timestamp for expiration tracking.
+const ACTION_TIMESTAMP: Symbol = symbol_short!("ACTTIM");
+/// Sequence number for generating unique proposal IDs.
+const ACTION_SEQ: Symbol = symbol_short!("ACTSEQ");
+/// List of admin addresses authorized to approve actions.
+const ADMIN_SIGNERS: Symbol = symbol_short!("ADMSIG");
+/// Signature threshold required to execute admin actions.
+const SIG_THRESHOLD: Symbol = symbol_short!("SIGTH");
+/// Admin action proposal expiration time in seconds (15 minutes).
+const ADMIN_ACTION_EXPIRATION_SECS: u64 = 900;
+
 #[contracterror]
 #[derive(Clone, Debug, PartialEq, Copy)]
 pub enum ContractError {
@@ -106,6 +122,14 @@ pub enum ContractError {
     InvalidProof = 26,
     /// Issue #659: unsupported signature scheme.
     UnsupportedSignatureScheme = 27,
+    /// Issue #658: admin action proposal not found.
+    AdminActionNotFound = 28,
+    /// Issue #658: admin action already approved by this admin.
+    AlreadyApprovedAction = 29,
+    /// Issue #658: insufficient approvals to execute admin action.
+    InsufficientApprovals = 30,
+    /// Issue #658: admin action has expired.
+    AdminActionExpired = 31,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -178,6 +202,40 @@ pub struct Challenge {
     pub created_at: u64,
     /// Signature scheme required (0=Ed25519, 1=secp256k1).
     pub sig_scheme: u32,
+}
+
+// ── Issue #658: multi-signature admin operations ─────────────────────────────
+
+/// Types of admin actions that require multi-signature approval (#658).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum AdminActionType {
+    /// Add a new issuer to the contract.
+    AddIssuer,
+    /// Remove an issuer from the contract.
+    RemoveIssuer,
+    /// Change the max issuers configuration.
+    ChangeMaxIssuers,
+    /// Set the signature threshold for admin approvals.
+    SetSignatureThreshold,
+}
+
+/// Pending admin action awaiting multi-signature approval (#658).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdminAction {
+    /// Unique proposal ID.
+    pub id: u64,
+    /// Type of action being proposed.
+    pub action_type: AdminActionType,
+    /// Target address for the action (issuer to add/remove, etc).
+    pub target: Address,
+    /// Additional parameter (e.g., new max_issuers value).
+    pub param: u32,
+    /// Timestamp when the action was proposed.
+    pub proposed_at: u64,
+    /// Number of approvals received so far.
+    pub approval_count: u32,
 }
 
 #[contracttype]
@@ -1102,6 +1160,225 @@ impl CredentialManager {
         Ok(())
     }
 
+    // ── Issue #658: Multi-signature admin operations ────────────────────────────
+    /// Initialize multi-signature admin configuration with a set of signers and threshold.
+    /// Only the current admin can call this.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `admin` - The current admin address (must sign).
+    /// * `signers` - Vector of addresses authorized to approve admin actions.
+    /// * `threshold` - Number of approvals required to execute an action.
+    ///
+    /// # Returns
+    /// Ok(()) if configuration is set successfully.
+    pub fn set_admin_signers(
+        env: Env,
+        admin: Address,
+        signers: Vec<Address>,
+        threshold: u32,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::require_admin(&env)?;
+
+        if threshold > signers.len() as u32 || threshold == 0 {
+            return Err(ContractError::InvalidMaxIssuers);
+        }
+
+        env.storage().instance().set(&ADMIN_SIGNERS, &signers);
+        env.storage().instance().set(&SIG_THRESHOLD, &threshold);
+
+        env.events().publish(
+            (ADMIN, symbol_short!("sigcfg")),
+            (EVENT_VERSION, threshold, signers.len() as u32),
+        );
+
+        Ok(())
+    }
+
+    /// Propose a new admin action (add/remove issuer, etc).
+    /// Can be called by any admin signer.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `proposer` - Address proposing the action (must sign and be a signer).
+    /// * `action_type` - Type of admin action (AddIssuer, RemoveIssuer, etc).
+    /// * `target` - Target address for the action.
+    /// * `param` - Additional parameter (e.g., new max_issuers).
+    ///
+    /// # Returns
+    /// The proposal ID if successful.
+    pub fn propose_admin_action(
+        env: Env,
+        proposer: Address,
+        action_type: AdminActionType,
+        target: Address,
+        param: u32,
+    ) -> Result<u64, ContractError> {
+        proposer.require_auth();
+
+        // Verify proposer is an authorized signer
+        let signers: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&ADMIN_SIGNERS)
+            .ok_or(ContractError::NotInitialized)?;
+        if !signers.contains(&proposer) {
+            return Err(ContractError::Unauthorized);
+        }
+
+        // Generate proposal ID
+        let seq: u64 = env.storage().instance().get(&ACTION_SEQ).unwrap_or(0);
+        let proposal_id = seq + 1;
+        env.storage().instance().set(&ACTION_SEQ, &proposal_id);
+
+        let now = env.ledger().timestamp();
+        let action = AdminAction {
+            id: proposal_id,
+            action_type: action_type.clone(),
+            target: target.clone(),
+            param,
+            proposed_at: now,
+            approval_count: 1, // Proposer auto-approves
+        };
+
+        let action_key = (ADMIN_ACTION, proposal_id);
+        env.storage().instance().set(&action_key, &action);
+
+        // Record proposer's approval
+        let approvals_key = (ADMIN_APPROVALS, proposal_id);
+        let mut approvals: Vec<Address> = Vec::new(&env);
+        approvals.push_back(proposer.clone());
+        env.storage().instance().set(&approvals_key, &approvals);
+
+        // Store timestamp for expiration tracking
+        let timestamp_key = (ACTION_TIMESTAMP, proposal_id);
+        env.storage().instance().set(&timestamp_key, &now);
+
+        env.events().publish(
+            (ADMIN, symbol_short!("propact")),
+            (EVENT_VERSION, proposal_id, action_type, target, proposer),
+        );
+
+        Ok(proposal_id)
+    }
+
+    /// Approve a pending admin action. Can be called by any authorized signer.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `approver` - Address approving the action (must sign and be a signer).
+    /// * `proposal_id` - ID of the proposal to approve.
+    ///
+    /// # Returns
+    /// Ok(action) if approved successfully. If threshold is reached, auto-executes
+    /// and returns the executed action details.
+    pub fn approve_admin_action(
+        env: Env,
+        approver: Address,
+        proposal_id: u64,
+    ) -> Result<AdminAction, ContractError> {
+        approver.require_auth();
+
+        // Verify approver is an authorized signer
+        let signers: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&ADMIN_SIGNERS)
+            .ok_or(ContractError::NotInitialized)?;
+        if !signers.contains(&approver) {
+            return Err(ContractError::Unauthorized);
+        }
+
+        // Get the action
+        let action_key = (ADMIN_ACTION, proposal_id);
+        let mut action: AdminAction = env
+            .storage()
+            .instance()
+            .get(&action_key)
+            .ok_or(ContractError::AdminActionNotFound)?;
+
+        // Check expiration
+        let timestamp_key = (ACTION_TIMESTAMP, proposal_id);
+        let proposed_at: u64 = env
+            .storage()
+            .instance()
+            .get(&timestamp_key)
+            .ok_or(ContractError::AdminActionNotFound)?;
+
+        let now = env.ledger().timestamp();
+        if now > proposed_at + ADMIN_ACTION_EXPIRATION_SECS {
+            // Clean up expired action
+            env.storage().instance().remove(&action_key);
+            env.storage().instance().remove(&(ADMIN_APPROVALS, proposal_id));
+            env.storage().instance().remove(&timestamp_key);
+            return Err(ContractError::AdminActionExpired);
+        }
+
+        // Check if already approved by this signer
+        let approvals_key = (ADMIN_APPROVALS, proposal_id);
+        let mut approvals: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&approvals_key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        if approvals.contains(&approver) {
+            return Err(ContractError::AlreadyApprovedAction);
+        }
+
+        // Add approval
+        approvals.push_back(approver.clone());
+        action.approval_count = approvals.len() as u32;
+        env.storage().instance().set(&approvals_key, &approvals);
+        env.storage().instance().set(&action_key, &action);
+
+        env.events().publish(
+            (ADMIN, symbol_short!("appact")),
+            (EVENT_VERSION, proposal_id, approver.clone(), action.approval_count),
+        );
+
+        // Check if threshold is reached
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&SIG_THRESHOLD)
+            .unwrap_or(signers.len() as u32);
+
+        if action.approval_count >= threshold {
+            // Auto-execute the action
+            Self::execute_admin_action_internal(&env, &action)?;
+
+            // Clean up after execution
+            env.storage().instance().remove(&action_key);
+            env.storage().instance().remove(&approvals_key);
+            env.storage().instance().remove(&timestamp_key);
+
+            env.events().publish(
+                (ADMIN, symbol_short!("execact")),
+                (EVENT_VERSION, proposal_id, action.action_type.clone(), action.target.clone()),
+            );
+        }
+
+        Ok(action)
+    }
+
+    /// Get the details of a pending admin action.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `proposal_id` - ID of the proposal.
+    ///
+    /// # Returns
+    /// The AdminAction details if found.
+    pub fn get_admin_action(env: Env, proposal_id: u64) -> Result<AdminAction, ContractError> {
+        let action_key = (ADMIN_ACTION, proposal_id);
+        env.storage()
+            .instance()
+            .get(&action_key)
+            .ok_or(ContractError::AdminActionNotFound)
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /// Core single-credential revocation logic shared by [`Self::revoke_credential`]
@@ -1221,6 +1498,77 @@ impl CredentialManager {
         env.storage().temporary().remove(&challenge_key);
 
         Ok(())
+    }
+
+    /// Issue #658: Execute an admin action after threshold is reached.
+    fn execute_admin_action_internal(env: &Env, action: &AdminAction) -> Result<(), ContractError> {
+        match action.action_type {
+            AdminActionType::AddIssuer => {
+                // Execute add_issuer without requiring additional auth
+                let mut issuers = Self::get_issuers_internal(env);
+                if !issuers.contains(&action.target) {
+                    if issuers.len() >= Self::effective_max_issuers(env) {
+                        return Err(ContractError::MaxIssuersReached);
+                    }
+                    issuers.push_back(action.target.clone());
+                    env.storage().instance().set(&ISSUER, &issuers);
+                    env.events().publish(
+                        (ISSUER, symbol_short!("added")),
+                        (EVENT_VERSION, action.target.clone()),
+                    );
+                }
+                Ok(())
+            }
+            AdminActionType::RemoveIssuer => {
+                // Execute remove_issuer without requiring additional auth
+                let issuers = Self::get_issuers_internal(env);
+                let mut updated = Vec::new(env);
+                for issuer in issuers.iter() {
+                    if issuer != action.target {
+                        updated.push_back(issuer);
+                    }
+                }
+                if updated.len() < issuers.len() {
+                    env.storage().instance().set(&ISSUER, &updated);
+                    env.events().publish(
+                        (ISSUER, symbol_short!("removed")),
+                        (EVENT_VERSION, action.target.clone()),
+                    );
+                }
+                Ok(())
+            }
+            AdminActionType::ChangeMaxIssuers => {
+                // Execute set_max_issuers without requiring additional auth
+                if action.param == 0 || action.param > ABSOLUTE_MAX_ISSUERS {
+                    return Err(ContractError::InvalidMaxIssuers);
+                }
+                let old_max = Self::get_max_issuers_internal(env);
+                env.storage().instance().set(&MAX_ISSUERS_CFG, &action.param);
+                env.events().publish(
+                    (ADMIN, Symbol::new(env, "admin_config_changed")),
+                    (EVENT_VERSION, symbol_short!("max_iss"), old_max, action.param),
+                );
+                Ok(())
+            }
+            AdminActionType::SetSignatureThreshold => {
+                // Execute set_admin_signers threshold update without requiring additional auth
+                let signers: Vec<Address> = env
+                    .storage()
+                    .instance()
+                    .get(&ADMIN_SIGNERS)
+                    .unwrap_or_else(|| Vec::new(env));
+
+                if action.param > signers.len() as u32 || action.param == 0 {
+                    return Err(ContractError::InvalidMaxIssuers);
+                }
+                env.storage().instance().set(&SIG_THRESHOLD, &action.param);
+                env.events().publish(
+                    (ADMIN, symbol_short!("sightr")),
+                    (EVENT_VERSION, action.param),
+                );
+                Ok(())
+            }
+        }
     }
 
     fn get_issuers_internal(env: &Env) -> Vec<Address> {
