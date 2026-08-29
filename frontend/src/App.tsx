@@ -18,6 +18,8 @@ import { useWallet } from "./hooks/useWallet";
 import { useCredentialExpiryCheck } from "./hooks/useCredentialExpiryCheck";
 import { useTheme } from "./context/ThemeContext";
 import { useTheme, cycleTheme, getThemeIcon, getThemeLabel } from "./hooks/useTheme";
+import { useServiceWorker } from "./hooks/useServiceWorker";
+import OfflineIndicator from "./components/OfflineIndicator";
 import {
   DEFAULT_NETWORK,
   NETWORK_CONFIGS,
@@ -54,6 +56,9 @@ export default function App() {
   const [isConnected, setIsConnected] = useState<boolean | null>(null);
   const [uninitializedContracts, setUninitializedContracts] = useState<string[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
+  
+  // Initialize service worker for PWA features
+  useServiceWorker();
 
   // Close the mobile nav drawer on Escape
   useEffect(() => {
@@ -158,6 +163,7 @@ export default function App() {
   return (
     <ToastProvider>
       <Toast />
+      <OfflineIndicator />
       <a className="skip-link" href="#main-content">
         {t("a11y.skipToContent")}
       </a>
