@@ -324,6 +324,15 @@ export function loadConfig(env = process.env) {
       credential: env.CREDENTIAL_CONTRACT_ID ?? env.CREDENTIAL_MANAGER_ID ?? "",
       reputation: env.REPUTATION_ID ?? "",
     },
+    // Jaeger distributed tracing (#714)
+    jaegerEnabled: parseBoolean(env.JAEGER_ENABLED, false),
+    jaegerServiceName: env.JAEGER_SERVICE_NAME ?? "soroban-identity-server",
+    jaegerAgentHost: env.JAEGER_AGENT_HOST ?? "localhost",
+    jaegerAgentPort: parseInteger(env.JAEGER_AGENT_PORT, 6832),
+    jaegerSamplerType: env.JAEGER_SAMPLER_TYPE ?? "const",
+    jaegerSamplerParam: parseFloat(env.JAEGER_SAMPLER_PARAM ?? "1"),
+    jaegerReporterLogSpans: parseBoolean(env.JAEGER_REPORTER_LOG_SPANS, false),
+    jaegerReporterFlushInterval: parseInteger(env.JAEGER_REPORTER_FLUSH_INTERVAL, 1000),
   };
 }
 
@@ -541,6 +550,12 @@ export function logDefaultValues(env = process.env) {
     { key: "CORS_ALLOWED_HEADERS", defaultVal: DEFAULT_CORS_ALLOWED_HEADERS.join(",") },
     { key: "CORS_EXPOSED_HEADERS", defaultVal: DEFAULT_CORS_EXPOSED_HEADERS.join(",") },
     { key: "CORS_MAX_AGE", defaultVal: String(DEFAULT_CORS_MAX_AGE) },
+    { key: "JAEGER_ENABLED", defaultVal: "false" },
+    { key: "JAEGER_SERVICE_NAME", defaultVal: "'soroban-identity-server'" },
+    { key: "JAEGER_AGENT_HOST", defaultVal: "'localhost'" },
+    { key: "JAEGER_AGENT_PORT", defaultVal: "6832" },
+    { key: "JAEGER_SAMPLER_TYPE", defaultVal: "'const'" },
+    { key: "JAEGER_SAMPLER_PARAM", defaultVal: "1" },
   ];
 
   for (const item of defaults) {
