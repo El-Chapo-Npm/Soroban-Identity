@@ -6,10 +6,12 @@ import { validateStellarAddress } from "../../../sdk/src/utils";
 import { getNetworkConfig } from '../network';
 import SkeletonCard from "./SkeletonCard";
 import FormField from "./FormField";
+import CredentialImport from "./CredentialImport";
 import { formatTimestamp } from "../utils/formatDate";
 import { handleError } from "../utils/handleError";
 import { useWalletContext } from "../context/WalletContext";
 import { useToast } from "../context/ToastContext";
+import CredentialTimeline from "./CredentialTimeline";
 
 type VerifyState =
   | "idle"
@@ -253,6 +255,12 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
   const [lastCheckedAt, setLastCheckedAt] = useState<number | null>(null);
   const [verifyCheckedAt, setVerifyCheckedAt] = useState<number | null>(null);
 
+  // Import/Export state
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [exportFormat, setExportFormat] = useState<"json" | "csv" | "pdf">("json");
+  const [isExporting, setIsExporting] = useState(false);
+  const [selectedCredentialsForExport, setSelectedCredentialsForExport] = useState<Set<string>>(new Set());
+
   const handleVerify = async (credentialId?: string, silent = false) => {
   // ── Pagination ──────────────────────────────────────────────────────────
   const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
@@ -474,6 +482,44 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
     setClaims(updated);
   };
 
+  const handleExport = async (format: "json" | "csv" | "pdf") => {
+    try {
+      setIsExporting(true);
+      const credentialsToExport =
+        selectedCredentialsForExport.size > 0
+          ? sortedCredentials.filter((c) => selectedCredentialsForExport.has(c.id))
+          : sortedCredentials;
+
+      if (credentialsToExport.length === 0) {
+        toast.error("No credentials to export");
+        return;
+      }
+
+      const result = await exportCredentialsWithProgress(credentialsToExport, format);
+      downloadExport(result.content, result.filename, result.mimeType);
+      toast.success(`Successfully exported ${credentialsToExport.length} credentials as ${format.toUpperCase()}`);
+      setSelectedCredentialsForExport(new Set());
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Export failed");
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const handleImportCredentials = (credentials: Credential[]) => {
+    toast.success(`Imported ${credentials.length} credentials`);
+  };
+
+  const toggleCredentialSelection = (credentialId: string) => {
+    const newSet = new Set(selectedCredentialsForExport);
+    if (newSet.has(credentialId)) {
+      newSet.delete(credentialId);
+    } else {
+      newSet.add(credentialId);
+    }
+    setSelectedCredentialsForExport(newSet);
+  };
+
   const displayCredentials = fetchedCredentials ?? [];
 
   const filteredCredentials =
@@ -588,7 +634,65 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
     <>
       {/* Filter bar */}
       <div className="card">
-        <h2>Credentials</h2>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+          <h2 style={{ margin: 0 }}>Credentials</h2>
+          <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+            <button
+              onClick={() => setShowImportModal(true)}
+              style={{
+                padding: "0.5rem 1rem",
+                backgroundColor: "var(--accent-light)",
+                color: "white",
+                border: "none",
+                borderRadius: "0.25rem",
+                cursor: "pointer",
+                fontSize: "0.85rem",
+                fontWeight: 500,
+              }}
+              title="Import credentials from JSON or CSV"
+            >
+              📥 Import
+            </button>
+            {displayCredentials.length > 0 && (
+              <div style={{ display: "flex", gap: "0.25rem" }}>
+                <select
+                  value={exportFormat}
+                  onChange={(e) => setExportFormat(e.target.value as "json" | "csv" | "pdf")}
+                  style={{
+                    padding: "0.5rem 0.75rem",
+                    fontSize: "0.85rem",
+                    borderRadius: "0.25rem",
+                    border: "1px solid var(--border-input)",
+                    backgroundColor: "var(--card-bg)",
+                    color: "var(--text)",
+                  }}
+                >
+                  <option value="json">JSON</option>
+                  <option value="csv">CSV</option>
+                  <option value="pdf">PDF</option>
+                </select>
+                <button
+                  onClick={() => handleExport(exportFormat)}
+                  disabled={isExporting}
+                  style={{
+                    padding: "0.5rem 1rem",
+                    backgroundColor: "var(--accent-light)",
+                    color: "white",
+                    border: "none",
+                    borderRadius: "0.25rem",
+                    cursor: isExporting ? "not-allowed" : "pointer",
+                    fontSize: "0.85rem",
+                    fontWeight: 500,
+                    opacity: isExporting ? 0.6 : 1,
+                  }}
+                  title={`Export ${selectedCredentialsForExport.size > 0 ? selectedCredentialsForExport.size : displayCredentials.length} credentials`}
+                >
+                  📤 Export {selectedCredentialsForExport.size > 0 ? `(${selectedCredentialsForExport.size})` : ""}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
 
         {/* Subject search */}
         <div style={{ display: "flex", gap: "0.5rem", marginBottom: "1rem" }}>
@@ -734,6 +838,16 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
                   }}
                   onClick={() => setExpandedCredId(expandedCredId === cred.id ? null : cred.id)}
                 >
+                  <input
+                    type="checkbox"
+                    checked={selectedCredentialsForExport.has(cred.id)}
+                    onChange={(e) => {
+                      e.stopPropagation();
+                      toggleCredentialSelection(cred.id);
+                    }}
+                    style={{ cursor: "pointer" }}
+                    aria-label={`Select credential ${cred.id}`}
+                  />
                   <span style={{ fontSize: "1.2rem", minWidth: "1.5rem" }}>
                     {CREDENTIAL_TYPE_ICONS[cred.credentialType] || "📋"}
                   </span>
@@ -801,6 +915,8 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
                     ) : (
                       <p style={{ margin: 0, color: "var(--text-muted)", fontSize: "0.8rem" }}>No claims</p>
                     )}
+                    {/* Credential lifecycle timeline — closes #707 */}
+                    <CredentialTimeline credential={cred} />
                   </div>
                 )}
               </li>
@@ -1032,6 +1148,14 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
         )}
         {!issuing && issueResult && <pre className="result">{issueResult}</pre>}
       </div>
+
+      {/* Import Modal */}
+      {showImportModal && (
+        <CredentialImport
+          onImport={handleImportCredentials}
+          onClose={() => setShowImportModal(false)}
+        />
+      )}
     </>
   );
 }
