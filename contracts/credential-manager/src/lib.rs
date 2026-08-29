@@ -134,6 +134,20 @@ pub enum ContractError {
 
 // ── Data types ────────────────────────────────────────────────────────────────
 
+/// Issue #663: Upgrade proposal structure with timelock
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct UpgradeProposal {
+    /// Hash of the new contract WASM code
+    pub new_wasm_hash: BytesN<32>,
+    /// Timestamp when this proposal was created
+    pub proposed_at: u64,
+    /// Timelock duration in seconds before upgrade can be executed
+    pub timelock_duration: u32,
+    /// Whether this proposal has been executed
+    pub executed: bool,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct CredentialStorageStats {
@@ -254,6 +268,20 @@ pub struct Credential {
     pub schema_hash: Option<BytesN<32>>,
 }
 
+// ── Issue #661: Storage optimization structures ────────────────────────────────
+/// Packed storage for contract-wide configuration to reduce storage operations.
+/// Combines multiple config fields into a single storage entry for efficiency.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ContractConfig {
+    /// Maximum number of issuers allowed
+    pub max_issuers: u32,
+    /// Whether the contract is paused
+    pub is_paused: bool,
+}
+
+const CONFIG: Symbol = symbol_short!("CFG");
+
 // ── Reentrancy guard (Issue #551) ──────────────────────────────────────────────
 //
 // Cross-contract call order for this contract:
@@ -349,8 +377,70 @@ impl CredentialManager {
         if stored != admin {
             return Err(ContractError::Unauthorized);
         }
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        let timelock = timelock_duration.unwrap_or(DEFAULT_UPGRADE_TIMELOCK);
+        let proposal = UpgradeProposal {
+            new_wasm_hash: new_wasm_hash.clone(),
+            proposed_at: env.ledger().timestamp(),
+            timelock_duration: timelock,
+            executed: false,
+        };
+        env.storage().instance().set(&UPGRADE_PROPOSAL, &proposal);
+        env.events().publish(
+            (ADMIN, symbol_short!("upg_prop")),
+            (EVENT_VERSION, new_wasm_hash, timelock),
+        );
         Ok(())
+    }
+
+    /// Issue #663: Execute a proposed upgrade after timelock expires.
+    /// Only the admin can execute upgrades. The timelock must have expired.
+    pub fn execute_upgrade(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored: Address = env.storage().instance().get(&ADMIN).ok_or(ContractError::NotInitialized)?;
+        if stored != admin {
+            return Err(ContractError::Unauthorized);
+        }
+        let mut proposal: UpgradeProposal = env.storage().instance().get(&UPGRADE_PROPOSAL)
+            .ok_or(ContractError::NoUpgradePending)?;
+        if proposal.executed {
+            return Err(ContractError::UpgradeAlreadyExecuted);
+        }
+        let now = env.ledger().timestamp();
+        let unlock_time = proposal.proposed_at + (proposal.timelock_duration as u64);
+        if now < unlock_time {
+            return Err(ContractError::UpgradeTimelockNotExpired);
+        }
+        proposal.executed = true;
+        env.storage().instance().set(&UPGRADE_PROPOSAL, &proposal);
+        env.deployer().update_current_contract_wasm(proposal.new_wasm_hash.clone());
+        env.events().publish(
+            (ADMIN, symbol_short!("upg_exec")),
+            (EVENT_VERSION, proposal.new_wasm_hash),
+        );
+        Ok(())
+    }
+
+    /// Issue #663: Cancel a pending upgrade proposal.
+    /// Only the admin can cancel upgrades.
+    pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored: Address = env.storage().instance().get(&ADMIN).ok_or(ContractError::NotInitialized)?;
+        if stored != admin {
+            return Err(ContractError::Unauthorized);
+        }
+        let proposal: UpgradeProposal = env.storage().instance().get(&UPGRADE_PROPOSAL)
+            .ok_or(ContractError::NoUpgradePending)?;
+        if proposal.executed {
+            return Err(ContractError::UpgradeAlreadyExecuted);
+        }
+        env.storage().instance().remove(&UPGRADE_PROPOSAL);
+        env.events().publish((ADMIN, symbol_short!("upg_cancel")), EVENT_VERSION);
+        Ok(())
+    }
+
+    /// Issue #663: Get pending upgrade proposal details.
+    pub fn get_upgrade_proposal(env: Env) -> Option<UpgradeProposal> {
+        env.storage().instance().get(&UPGRADE_PROPOSAL)
     }
 
     pub fn pause(env: Env) -> Result<(), ContractError> {
@@ -374,7 +464,7 @@ impl CredentialManager {
     }
 
     pub fn is_paused(env: Env) -> bool {
-        env.storage().instance().get(&PAUSED).unwrap_or(false)
+        Self::get_config(&env).is_paused
     }
 
     pub fn add_issuer(env: Env, issuer: Address) -> Result<(), ContractError> {
@@ -405,8 +495,10 @@ impl CredentialManager {
         if new_max == 0 || new_max > ABSOLUTE_MAX_ISSUERS {
             return Err(ContractError::InvalidMaxIssuers);
         }
-        let old_max = Self::get_max_issuers_internal(&env);
-        env.storage().instance().set(&MAX_ISSUERS_CFG, &new_max);
+        let mut config = Self::get_config(&env);
+        let old_max = config.max_issuers;
+        config.max_issuers = new_max;
+        Self::set_config(&env, &config);
         env.events().publish(
             (ADMIN, Symbol::new(&env, "admin_config_changed")),
             (EVENT_VERSION, symbol_short!("max_iss"), old_max, new_max),
@@ -629,6 +721,28 @@ impl CredentialManager {
             .instance()
             .set(&TOTAL_ISSUED_CNT, &(total_issued + 1));
 
+        // Issue #662: Maintain secondary indexes for efficient metadata queries
+        // Index by credential type for type-based queries
+        let type_key = (CRED_BY_TYPE, credential_type.clone());
+        let mut type_creds: Vec<BytesN<32>> = env.storage().persistent().get(&type_key).unwrap_or_else(|| Vec::new(&env));
+        type_creds.push_back(id.clone());
+        env.storage().persistent().set(&type_key, &type_creds);
+        env.storage().persistent().extend_ttl(&type_key, TTL_MAX, TTL_MAX);
+
+        // Index by issuer for issuer-based queries
+        let issuer_idx_key = (CRED_BY_ISSUER, issuer.clone());
+        let mut issuer_idx: Vec<BytesN<32>> = env.storage().persistent().get(&issuer_idx_key).unwrap_or_else(|| Vec::new(&env));
+        issuer_idx.push_back(id.clone());
+        env.storage().persistent().set(&issuer_idx_key, &issuer_idx);
+        env.storage().persistent().extend_ttl(&issuer_idx_key, TTL_MAX, TTL_MAX);
+
+        // Index by subject for subject-based queries
+        let subject_idx_key = (CRED_BY_SUBJECT, subject.clone());
+        let mut subject_idx: Vec<BytesN<32>> = env.storage().persistent().get(&subject_idx_key).unwrap_or_else(|| Vec::new(&env));
+        subject_idx.push_back(id.clone());
+        env.storage().persistent().set(&subject_idx_key, &subject_idx);
+        env.storage().persistent().extend_ttl(&subject_idx_key, TTL_MAX, TTL_MAX);
+
         env.events().publish(
             (CRED, symbol_short!("issued")),
             (
@@ -677,6 +791,26 @@ impl CredentialManager {
 
         let revoked: u32 = env.storage().instance().get(&REVOKED_CNT).unwrap_or(0);
         env.storage().instance().set(&REVOKED_CNT, &(revoked + 1));
+
+        // Issue #662: Remove from secondary indexes when revoked
+        let type_key = (CRED_BY_TYPE, cred.credential_type.clone());
+        if let Some(mut type_creds) = env.storage().persistent().get::<_, Vec<BytesN<32>>>(&type_key) {
+            type_creds = Self::remove_from_vec(&env, type_creds, &credential_id);
+            env.storage().persistent().set(&type_key, &type_creds);
+        }
+
+        let issuer_idx_key = (CRED_BY_ISSUER, issuer.clone());
+        if let Some(mut issuer_idx) = env.storage().persistent().get::<_, Vec<BytesN<32>>>(&issuer_idx_key) {
+            issuer_idx = Self::remove_from_vec(&env, issuer_idx, &credential_id);
+            env.storage().persistent().set(&issuer_idx_key, &issuer_idx);
+        }
+
+        let subject_idx_key = (CRED_BY_SUBJECT, cred.subject.clone());
+        if let Some(mut subject_idx) = env.storage().persistent().get::<_, Vec<BytesN<32>>>(&subject_idx_key) {
+            subject_idx = Self::remove_from_vec(&env, subject_idx, &credential_id);
+            env.storage().persistent().set(&subject_idx_key, &subject_idx);
+        }
+
         // closes #553: include revocation timestamp so off-chain systems can
         // detect and invalidate cached verify_credential results.
         let revoked_at: u64 = env.ledger().timestamp();
@@ -711,6 +845,7 @@ impl CredentialManager {
         reason: Symbol,
     ) -> Result<(), ContractError> {
         issuer.require_auth();
+        Self::require_not_paused(&env)?;
         if ids.len() > 50 {
             return Err(ContractError::BatchTooLarge);
         }
@@ -726,6 +861,7 @@ impl CredentialManager {
         credential_id: BytesN<32>,
     ) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::require_not_paused(&env)?;
         let key = Self::cred_key(&credential_id);
         let mut cred: Credential = env
             .storage()
@@ -769,6 +905,7 @@ impl CredentialManager {
         new_expires_at: u64,
     ) -> Result<(), ContractError> {
         issuer.require_auth();
+        Self::require_not_paused(&env)?;
 
         let key = Self::cred_key(&credential_id);
         let mut cred: Credential = env
@@ -998,6 +1135,47 @@ impl CredentialManager {
             revoked_credentials: revoked,
             active_credentials: total.saturating_sub(revoked),
         }
+    }
+
+    // ── Issue #662: Credential metadata indexing API ──────────────────────────
+
+    /// Query credentials by type with pagination.
+    /// Returns all non-revoked credentials of the specified type.
+    pub fn get_credentials_by_type(
+        env: Env,
+        credential_type: CredentialType,
+        cursor: Option<u64>,
+        limit: u32,
+    ) -> CredentialIdsPage {
+        let type_key = (CRED_BY_TYPE, credential_type);
+        let all: Vec<BytesN<32>> = env.storage().persistent().get(&type_key).unwrap_or_else(|| Vec::new(&env));
+        Self::paginate_credentials(&env, &all, cursor, limit)
+    }
+
+    /// Query credentials by issuer address with pagination.
+    /// Returns all non-revoked credentials issued by the specified issuer.
+    pub fn get_credentials_by_issuer_index(
+        env: Env,
+        issuer: Address,
+        cursor: Option<u64>,
+        limit: u32,
+    ) -> CredentialIdsPage {
+        let issuer_key = (CRED_BY_ISSUER, issuer);
+        let all: Vec<BytesN<32>> = env.storage().persistent().get(&issuer_key).unwrap_or_else(|| Vec::new(&env));
+        Self::paginate_credentials(&env, &all, cursor, limit)
+    }
+
+    /// Query credentials by subject address with pagination.
+    /// Returns all non-revoked credentials held by the specified subject.
+    pub fn get_credentials_by_subject_index(
+        env: Env,
+        subject: Address,
+        cursor: Option<u64>,
+        limit: u32,
+    ) -> CredentialIdsPage {
+        let subject_key = (CRED_BY_SUBJECT, subject);
+        let all: Vec<BytesN<32>> = env.storage().persistent().get(&subject_key).unwrap_or_else(|| Vec::new(&env));
+        Self::paginate_credentials(&env, &all, cursor, limit)
     }
 
     // ── Issue #732: credential dependency chain API ───────────────────────────
@@ -1574,8 +1752,22 @@ impl CredentialManager {
         Ok(())
     }
 
+    /// Issue #661: Get packed config from storage (optimized single read).
+    fn get_config(env: &Env) -> ContractConfig {
+        env.storage().instance().get(&CONFIG).unwrap_or(ContractConfig {
+            max_issuers: MAX_ISSUERS,
+            is_paused: false,
+        })
+    }
+
+    /// Issue #661: Set packed config to storage (optimized single write).
+    fn set_config(env: &Env, config: &ContractConfig) {
+        env.storage().instance().set(&CONFIG, config);
+    }
+
     fn require_not_paused(env: &Env) -> Result<(), ContractError> {
-        if env.storage().instance().get(&PAUSED).unwrap_or(false) {
+        let config = Self::get_config(env);
+        if config.is_paused {
             return Err(ContractError::ContractPaused);
         }
         Ok(())
@@ -1720,13 +1912,42 @@ impl CredentialManager {
         env.storage().instance().get(&ISSUER).unwrap_or_else(|| Vec::new(env))
     }
 
-    /// Current effective issuer cap.
+    /// Current effective issuer cap (Issue #661: optimized via packed config).
     fn effective_max_issuers(env: &Env) -> u32 {
-        env.storage().instance().get(&MAX_ISSUERS_CFG).unwrap_or(MAX_ISSUERS)
+        Self::get_config(env).max_issuers
     }
 
     fn get_max_issuers_internal(env: &Env) -> u32 {
-        env.storage().instance().get(&MAX_ISSUERS_CFG).unwrap_or(MAX_ISSUERS)
+        Self::get_config(env).max_issuers
+    }
+
+    /// Issue #662: Pagination helper for credential index queries.
+    /// Extracts a page of credentials from a list with cursor-based pagination.
+    fn paginate_credentials(env: &Env, all: &Vec<BytesN<32>>, cursor: Option<u64>, limit: u32) -> CredentialIdsPage {
+        let total = all.len();
+        let start: u64 = cursor.unwrap_or(0);
+        let effective_limit: u32 = if limit == 0 || limit > PAGE_CAP { PAGE_CAP } else { limit };
+        let mut items: Vec<BytesN<32>> = Vec::new(env);
+        let mut next: u64 = start;
+        let mut taken: u32 = 0;
+        while (next as u32) < total && taken < effective_limit {
+            items.push_back(all.get(next as u32).unwrap());
+            next += 1;
+            taken += 1;
+        }
+        let next_cursor = if (next as u32) < total { Some(next) } else { None };
+        CredentialIdsPage { items, next_cursor }
+    }
+
+    /// Issue #662: Helper to remove a credential ID from an index vector.
+    fn remove_from_vec(env: &Env, mut vec: Vec<BytesN<32>>, id: &BytesN<32>) -> Vec<BytesN<32>> {
+        let mut result: Vec<BytesN<32>> = Vec::new(env);
+        for i in vec.iter() {
+            if i != *id {
+                result.push_back(i);
+            }
+        }
+        result
     }
 
     /// Derives the deterministic credential ID as
