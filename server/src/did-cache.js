@@ -39,6 +39,8 @@ export class DidCache {
             maxRetries: config.redisMaxRetries ?? 5,
             retryBaseMs: config.redisRetryBaseMs ?? 200,
             commandTimeoutMs: config.redisCommandTimeoutMs ?? 1000,
+            enableAutoReconnect: config.redisEnableAutoReconnect ?? true,
+            reconnectDelayMs: config.redisReconnectDelayMs ?? 1000,
           })
         : null);
 
