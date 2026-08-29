@@ -1075,13 +1075,17 @@ impl CredentialManager {
             }
             rdeps = updated;
             env.storage().persistent().set(&rdep_key, &rdeps);
-            env.storage().persistent().extend_ttl(&rdep_key, TTL_MAX, TTL_MAX);
+            env.storage()
+                .persistent()
+                .extend_ttl(&rdep_key, TTL_MAX, TTL_MAX);
         }
 
         // Write new forward index.
         let deps_key = (CRED_DEPS, credential_id.clone());
         env.storage().persistent().set(&deps_key, &prerequisites);
-        env.storage().persistent().extend_ttl(&deps_key, TTL_MAX, TTL_MAX);
+        env.storage()
+            .persistent()
+            .extend_ttl(&deps_key, TTL_MAX, TTL_MAX);
 
         // Write new reverse index entries.
         for prereq_id in prerequisites.iter() {
@@ -1095,7 +1099,9 @@ impl CredentialManager {
                 rdeps.push_back(credential_id.clone());
             }
             env.storage().persistent().set(&rdep_key, &rdeps);
-            env.storage().persistent().extend_ttl(&rdep_key, TTL_MAX, TTL_MAX);
+            env.storage()
+                .persistent()
+                .extend_ttl(&rdep_key, TTL_MAX, TTL_MAX);
         }
 
         env.events().publish(
