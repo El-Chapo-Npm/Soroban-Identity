@@ -64,6 +64,7 @@ import { EmailTransport } from "./email.js";
 import { pickQuotaBinding, QuotaTracker, notifyQuotaThresholdOwner } from "./quota.js";
 import { executeBatch } from "./batch.js";
 import { DeprecationRegistry, notifyDeprecatedEndpointOwner } from "./deprecation.js";
+import { createCompressionMiddleware } from "./compression.js";
 const SERVER_VERSION = "0.1.0";
 const MIN_SDK_VERSION = "0.1.0";
 const SERVER_FEATURES = [
@@ -74,6 +75,9 @@ const SERVER_FEATURES = [
   "api_versioning",
   "quota_tracking",
   "deprecation_warnings",
+  "response_compression",
+  "job_queue",
+  "graceful_shutdown",
 ];
 
 export function createApp({
@@ -96,10 +100,16 @@ export function createApp({
   emailTransport = new EmailTransport(config),
   quotaTracker = null,
   deprecationRegistry = null,
+  credentialIssueQueue = null,
+  batchVerificationQueue = null,
 }) {
   // Expose the key service on config so http-utils.requireAuth can validate
   // issued API keys instead of falling back to the single admin key.
   config.apiKeyService = apiKeyService;
+  
+  // Expose job queues on config for route handlers
+  config.credentialIssueQueue = credentialIssueQueue;
+  config.batchVerificationQueue = batchVerificationQueue;
 
   // One limiter per app instance, so its buckets live as long as the server
   // rather than being rebuilt per request.
@@ -182,6 +192,19 @@ export function createApp({
     // can produce a response, so an early return still carries them. The
     // nonce is stashed on the request for the one HTML page we render.
     req.cspNonce = setSecurityHeaders(req, res, config);
+
+    // Apply response compression middleware (#721)
+    if (config.compressionEnabled) {
+      const compression = createCompressionMiddleware({
+        threshold: config.compressionThreshold,
+        gzipLevel: config.compressionGzipLevel,
+        brotliLevel: config.compressionBrotliLevel,
+        enableBrotli: config.compressionEnableBrotli,
+        metrics,
+      });
+      // Apply compression to response
+      await compression.middleware()(req, res);
+    }
 
     // Access logging is attached before any routing so a request that is
     // rejected by CORS, auth, or the rate limiter is still recorded.
