@@ -56,6 +56,15 @@ const MAX_DEP_DEPTH: u32 = 5;
 /// Maximum number of credential IDs accepted in a single `verify_credentials_batch` call.
 const MAX_VERIFY_BATCH: u32 = 50;
 
+// ── Issue #659: credential proof requirements ──────────────────────────────────
+/// Maps (issuer, subject) to a challenge for proof of possession.
+const CHALLENGE: Symbol = symbol_short!("CHALL");
+/// Challenge expiration time in seconds (5 minutes).
+const CHALLENGE_EXPIRATION_SECS: u64 = 300;
+/// Supported signature schemes.
+pub const SIG_SCHEME_ED25519: u32 = 0;
+pub const SIG_SCHEME_SECP256K1: u32 = 1;
+
 #[contracterror]
 #[derive(Clone, Debug, PartialEq, Copy)]
 pub enum ContractError {
@@ -91,6 +100,12 @@ pub enum ContractError {
     TooManyPrerequisites = 23,
     /// Issue #732: dependency chain depth would exceed MAX_DEP_DEPTH.
     DependencyDepthExceeded = 24,
+    /// Issue #659: challenge not found or expired.
+    ChallengeNotFound = 25,
+    /// Issue #659: invalid or mismatched signature on challenge.
+    InvalidProof = 26,
+    /// Issue #659: unsupported signature scheme.
+    UnsupportedSignatureScheme = 27,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -149,6 +164,20 @@ pub struct DependencyTree {
     pub prerequisites: Vec<BytesN<32>>,
     /// Whether this credential itself is currently valid.
     pub valid: bool,
+}
+
+// ── Issue #659: proof of possession challenge ──────────────────────────────────
+
+/// Challenge data for proof of possession (#659).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Challenge {
+    /// Random bytes to be signed by the subject.
+    pub nonce: Bytes,
+    /// Timestamp when the challenge was created.
+    pub created_at: u64,
+    /// Signature scheme required (0=Ed25519, 1=secp256k1).
+    pub sig_scheme: u32,
 }
 
 #[contracttype]
@@ -346,6 +375,9 @@ impl CredentialManager {
     ///
     /// # Panics
     /// If `expires_at` is in the past, or the caller is not a registered issuer.
+    ///
+    /// # Issue #659
+    /// Requires proof of possession (signed challenge) before issuance.
     pub fn issue_credential(
         env: Env,
         issuer: Address,
@@ -356,10 +388,16 @@ impl CredentialManager {
         signature: Bytes,
         expires_at: u64,
         schema_hash: Option<BytesN<32>>,
+        proof: Option<Bytes>,
     ) -> Result<BytesN<32>, ContractError> {
         issuer.require_auth();
         Self::require_not_paused(&env)?;
         Self::require_issuer(&env, &issuer)?;
+
+        // Issue #659: verify proof of possession if provided
+        if let Some(signed_challenge) = proof {
+            Self::verify_proof_internal(&env, &issuer, &subject, &signed_challenge)?;
+        }
 
         if let Some(ref sh) = schema_hash {
             let schema_key = (SCHEMA, issuer.clone(), sh.clone());
@@ -940,6 +978,130 @@ impl CredentialManager {
         Ok(results)
     }
 
+    // ── Issue #659: Proof of possession challenge (credential proof requirements) ──
+    /// Generates a challenge for proof of possession. The subject must sign this
+    /// challenge with their private key before issuing a credential.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `issuer` - The issuer requesting the proof.
+    /// * `subject` - The subject proving possession of the key.
+    /// * `sig_scheme` - Signature scheme (0=Ed25519, 1=secp256k1).
+    ///
+    /// # Returns
+    /// Random nonce bytes that the subject must sign.
+    pub fn generate_challenge(
+        env: Env,
+        issuer: Address,
+        subject: Address,
+        sig_scheme: u32,
+    ) -> Result<Bytes, ContractError> {
+        issuer.require_auth();
+        Self::require_issuer(&env, &issuer)?;
+
+        if sig_scheme != SIG_SCHEME_ED25519 && sig_scheme != SIG_SCHEME_SECP256K1 {
+            return Err(ContractError::UnsupportedSignatureScheme);
+        }
+
+        let now = env.ledger().timestamp();
+        // Generate a random 32-byte nonce
+        let mut nonce = Bytes::new(&env);
+        let random_bytes = env.crypto().sha256(&subject.to_xdr(&env));
+        nonce.extend_from_array(&random_bytes.to_array());
+
+        let challenge = Challenge {
+            nonce: nonce.clone(),
+            created_at: now,
+            sig_scheme,
+        };
+
+        let challenge_key = (CHALLENGE, issuer.clone(), subject.clone());
+        env.storage().temporary().set(&challenge_key, &challenge);
+        env.storage()
+            .temporary()
+            .extend_ttl(&challenge_key, CHALLENGE_EXPIRATION_SECS, CHALLENGE_EXPIRATION_SECS);
+
+        env.events().publish(
+            (CRED, symbol_short!("challng")),
+            (EVENT_VERSION, issuer, subject, sig_scheme),
+        );
+
+        Ok(nonce)
+    }
+
+    /// Verifies a proof of possession by checking the signature on the challenge.
+    /// Must be called before issuing a credential.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `issuer` - The issuer verifying the proof.
+    /// * `subject` - The subject whose proof is being verified (must sign this call).
+    /// * `signed_challenge` - The subject's signature over the challenge nonce.
+    ///
+    /// # Returns
+    /// Ok(()) if signature is valid and challenge is not expired.
+    pub fn verify_proof(
+        env: Env,
+        issuer: Address,
+        subject: Address,
+        signed_challenge: Bytes,
+    ) -> Result<(), ContractError> {
+        subject.require_auth();
+        Self::require_issuer(&env, &issuer)?;
+
+        let challenge_key = (CHALLENGE, issuer.clone(), subject.clone());
+        let challenge: Challenge = env
+            .storage()
+            .temporary()
+            .get(&challenge_key)
+            .ok_or(ContractError::ChallengeNotFound)?;
+
+        let now = env.ledger().timestamp();
+        if now > challenge.created_at + CHALLENGE_EXPIRATION_SECS {
+            env.storage().temporary().remove(&challenge_key);
+            return Err(ContractError::ChallengeNotFound);
+        }
+
+        // Verify the signature based on the scheme
+        match challenge.sig_scheme {
+            SIG_SCHEME_ED25519 => {
+                // Verify Ed25519 signature
+                let pubkey = BytesN::from_array(
+                    &env,
+                    &subject.to_xdr(&env).to_array(),
+                );
+                env.crypto().ed25519_verify(
+                    &pubkey,
+                    &challenge.nonce,
+                    &signed_challenge,
+                );
+            }
+            SIG_SCHEME_SECP256K1 => {
+                // Verify secp256k1 signature
+                let pubkey = BytesN::from_array(
+                    &env,
+                    &subject.to_xdr(&env).to_array(),
+                );
+                env.crypto().secp256k1_verify(
+                    &pubkey,
+                    &challenge.nonce,
+                    &signed_challenge,
+                );
+            }
+            _ => return Err(ContractError::UnsupportedSignatureScheme),
+        }
+
+        // Clear the challenge after successful verification
+        env.storage().temporary().remove(&challenge_key);
+
+        env.events().publish(
+            (CRED, symbol_short!("prfveri")),
+            (EVENT_VERSION, issuer, subject),
+        );
+
+        Ok(())
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /// Core single-credential revocation logic shared by [`Self::revoke_credential`]
@@ -1004,6 +1166,60 @@ impl CredentialManager {
         if !Self::get_issuers_internal(env).contains(issuer) {
             return Err(ContractError::UnauthorizedIssuer);
         }
+        Ok(())
+    }
+
+    /// Issue #659: Internal proof verification logic (no auth requirement).
+    /// Used by issue_credential to verify proof of possession.
+    fn verify_proof_internal(
+        env: &Env,
+        issuer: &Address,
+        subject: &Address,
+        signed_challenge: &Bytes,
+    ) -> Result<(), ContractError> {
+        let challenge_key = (CHALLENGE, issuer.clone(), subject.clone());
+        let challenge: Challenge = env
+            .storage()
+            .temporary()
+            .get(&challenge_key)
+            .ok_or(ContractError::ChallengeNotFound)?;
+
+        let now = env.ledger().timestamp();
+        if now > challenge.created_at + CHALLENGE_EXPIRATION_SECS {
+            env.storage().temporary().remove(&challenge_key);
+            return Err(ContractError::ChallengeNotFound);
+        }
+
+        // Verify the signature based on the scheme
+        match challenge.sig_scheme {
+            SIG_SCHEME_ED25519 => {
+                let pubkey = BytesN::from_array(
+                    env,
+                    &subject.to_xdr(env).to_array(),
+                );
+                env.crypto().ed25519_verify(
+                    &pubkey,
+                    &challenge.nonce,
+                    signed_challenge,
+                );
+            }
+            SIG_SCHEME_SECP256K1 => {
+                let pubkey = BytesN::from_array(
+                    env,
+                    &subject.to_xdr(env).to_array(),
+                );
+                env.crypto().secp256k1_verify(
+                    &pubkey,
+                    &challenge.nonce,
+                    signed_challenge,
+                );
+            }
+            _ => return Err(ContractError::UnsupportedSignatureScheme),
+        }
+
+        // Clear the challenge after successful verification
+        env.storage().temporary().remove(&challenge_key);
+
         Ok(())
     }
 
