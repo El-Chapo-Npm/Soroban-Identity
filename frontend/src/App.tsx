@@ -21,6 +21,8 @@ import { useWallet } from "./hooks/useWallet";
 import { useCredentialExpiryCheck } from "./hooks/useCredentialExpiryCheck";
 import { useTheme } from "./context/ThemeContext";
 import { useTheme, cycleTheme, getThemeIcon, getThemeLabel } from "./hooks/useTheme";
+import { useServiceWorker } from "./hooks/useServiceWorker";
+import OfflineIndicator from "./components/OfflineIndicator";
 import {
   DEFAULT_NETWORK,
   NETWORK_CONFIGS,
