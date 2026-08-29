@@ -531,6 +531,7 @@ impl CredentialManager {
         reason: Symbol,
     ) -> Result<(), ContractError> {
         issuer.require_auth();
+        Self::require_not_paused(&env)?;
         if ids.len() > 50 {
             return Err(ContractError::BatchTooLarge);
         }
@@ -542,6 +543,7 @@ impl CredentialManager {
 
     pub fn expire_credential(env: Env, caller: Address, credential_id: BytesN<32>) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::require_not_paused(&env)?;
         let key = Self::cred_key(&credential_id);
         let mut cred: Credential = env.storage().persistent().get(&key).ok_or(ContractError::CredentialNotFound)?;
         if cred.revoked {
@@ -578,6 +580,7 @@ impl CredentialManager {
         new_expires_at: u64,
     ) -> Result<(), ContractError> {
         issuer.require_auth();
+        Self::require_not_paused(&env)?;
 
         let key = Self::cred_key(&credential_id);
         let mut cred: Credential = env
