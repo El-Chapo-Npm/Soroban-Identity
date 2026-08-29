@@ -35,6 +35,8 @@ import type { Credential } from "../../sdk/src/types";
 const SUPPORTED_LOCALES: { code: string; label: string }[] = [
   { code: "en", label: "EN" },
   { code: "es", label: "ES" },
+  { code: "fr", label: "FR" },
+  { code: "zh", label: "中文" },
 ];
 
 export enum Tab {
