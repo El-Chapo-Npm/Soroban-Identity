@@ -56,7 +56,7 @@ const MAX_DEP_DEPTH: u32 = 5;
 /// Maximum number of credential IDs accepted in a single `verify_credentials_batch` call.
 const MAX_VERIFY_BATCH: u32 = 50;
 
-// ── Issue #659: credential proof requirements ──────────────────────────────────
+// -- Issue #659: credential proof requirements
 /// Maps (issuer, subject) to a challenge for proof of possession.
 const CHALLENGE: Symbol = symbol_short!("CHALL");
 /// Challenge expiration time in seconds (5 minutes).
@@ -65,7 +65,7 @@ const CHALLENGE_EXPIRATION_SECS: u64 = 300;
 pub const SIG_SCHEME_ED25519: u32 = 0;
 pub const SIG_SCHEME_SECP256K1: u32 = 1;
 
-// ── Issue #658: multi-signature admin operations ─────────────────────────────
+// -- Issue #658: multi-signature admin operations
 /// Maps a proposal ID to pending admin action details.
 const ADMIN_ACTION: Symbol = symbol_short!("ADMACT");
 /// Maps a proposal ID to a set of admin addresses that have approved it.
@@ -190,7 +190,7 @@ pub struct DependencyTree {
     pub valid: bool,
 }
 
-// ── Issue #659: proof of possession challenge ──────────────────────────────────
+// -- Issue #659: proof of possession challenge
 
 /// Challenge data for proof of possession (#659).
 #[contracttype]
@@ -204,7 +204,7 @@ pub struct Challenge {
     pub sig_scheme: u32,
 }
 
-// ── Issue #658: multi-signature admin operations ─────────────────────────────
+// -- Issue #658: multi-signature admin operations
 
 /// Types of admin actions that require multi-signature approval (#658).
 #[contracttype]
@@ -1160,7 +1160,7 @@ impl CredentialManager {
         Ok(())
     }
 
-    // ── Issue #658: Multi-signature admin operations ────────────────────────────
+    // -- Issue #658: Multi-signature admin operations
     /// Initialize multi-signature admin configuration with a set of signers and threshold.
     /// Only the current admin can call this.
     ///
