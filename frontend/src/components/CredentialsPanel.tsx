@@ -11,7 +11,7 @@ import { formatTimestamp } from "../utils/formatDate";
 import { handleError } from "../utils/handleError";
 import { useWalletContext } from "../context/WalletContext";
 import { useToast } from "../context/ToastContext";
-import { exportCredentialsAsJSON, exportCredentialsAsCSV, exportCredentialsAsPDF, downloadExport, exportCredentialsWithProgress } from "../utils/exportCredentials";
+import CredentialTimeline from "./CredentialTimeline";
 
 type VerifyState =
   | "idle"
@@ -915,6 +915,8 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
                     ) : (
                       <p style={{ margin: 0, color: "var(--text-muted)", fontSize: "0.8rem" }}>No claims</p>
                     )}
+                    {/* Credential lifecycle timeline — closes #707 */}
+                    <CredentialTimeline credential={cred} />
                   </div>
                 )}
               </li>

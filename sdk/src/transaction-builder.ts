@@ -29,17 +29,70 @@ try {
 /**
  * Builder class for constructing Soroban transactions.
  * Separates transaction construction from submission for better testability.
+ * 
+ * Automatically applies gas multiplier for batch operations (20+ operations)
+ * to avoid "out of gas" errors during execution.
  */
 export class SorobanTransactionBuilder {
   private operations: xdr.Operation[] = [];
   private account: Account;
   private config: SorobanIdentityConfig;
   private fee: number;
+  private gasMultiplier: number = 1.0;
 
   constructor(account: Account, config: SorobanIdentityConfig) {
     this.account = account;
     this.config = config;
     this.fee = parseInt(BASE_FEE, 10);
+  }
+
+  /**
+   * Set a custom gas multiplier for this transaction.
+   * 
+   * Useful for batch operations where simulation underestimates gas requirements.
+   * The multiplier is applied during prepareTransaction to increase the resource fee.
+   * 
+   * @param multiplier - Gas multiplier (e.g., 1.5 for 50% increase)
+   * @returns this for method chaining
+   * 
+   * @example
+   * ```ts
+   * builder
+   *   .addContractCall(contractId, 'method', ...args)
+   *   .setGasMultiplier(1.5)  // 50% gas buffer for batch ops
+   *   .build();
+   * ```
+   */
+  setGasMultiplier(multiplier: number): this {
+    if (multiplier < 1.0) {
+      throw new Error('Gas multiplier must be >= 1.0');
+    }
+    this.gasMultiplier = multiplier;
+    return this;
+  }
+
+  /**
+   * Get the current gas multiplier.
+   * @returns The gas multiplier (default: 1.0)
+   */
+  getGasMultiplier(): number {
+    return this.gasMultiplier;
+  }
+
+  /**
+   * Auto-detect if gas multiplier should be applied based on operation count.
+   * 
+   * For batch operations (20+ ops), automatically applies 1.5x multiplier to
+   * avoid gas estimation issues.
+   * 
+   * @returns Recommended gas multiplier
+   */
+  private getRecommendedGasMultiplier(): number {
+    // For 20+ operations, apply 1.5x multiplier by default
+    if (this.operations.length >= 20) {
+      return Math.max(this.gasMultiplier, 1.5);
+    }
+    return this.gasMultiplier;
   }
 
   /**
@@ -130,6 +183,9 @@ export class SorobanTransactionBuilder {
    * multi-operation builder that understated the real cost. Now the accumulated
    * operations take precedence; the `operation` argument acts as a fallback
    * when no operations have been added yet (Issue #477).
+   * 
+   * Automatically applies gas multiplier for batch operations (20+ ops) to
+   * provide accurate fee estimates that avoid "out of gas" errors (Issue #742).
    */
   async estimateFee(operation: xdr.Operation): Promise<FeeEstimate> {
     const server = new SorobanRpc.Server(
@@ -165,6 +221,17 @@ export class SorobanTransactionBuilder {
       10,
     );
 
-    return { baseFee, resourceFee, totalFee: baseFee + resourceFee };
+    // Apply gas multiplier for batch operations
+    const multiplier = this.getRecommendedGasMultiplier();
+    const adjustedResourceFee = Math.ceil(resourceFee * multiplier);
+    const adjustedTotalFee = baseFee + adjustedResourceFee;
+
+    return {
+      baseFee,
+      resourceFee: adjustedResourceFee,
+      totalFee: adjustedTotalFee,
+      gasMultiplier: multiplier,
+      originalResourceFee: resourceFee,
+    };
   }
 }

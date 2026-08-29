@@ -35,6 +35,9 @@ const COUNTER_DEFINITIONS = {
   did_cache_sets_total: 'Total DID documents written to the cache',
   did_cache_errors_total: 'Total DID cache operation failures',
   did_cache_invalidations_total: 'Total DID cache invalidations',
+  query_cache_hits_total: 'Total query-result cache hits',
+  query_cache_misses_total: 'Total query-result cache misses',
+  query_cache_errors_total: 'Total query-result cache errors',
 };
 
 /**
@@ -159,6 +162,20 @@ export class MetricsService {
       registers: [this.registry],
     });
 
+    this.ddosEvents = new client.Counter({
+      name: 'ddos_events_total',
+      help: 'Total DDoS protection events by type',
+      labelNames: ['type'],
+      registers: [this.registry],
+    });
+    this.queryCacheLatency = new client.Histogram({
+      name: 'query_cache_lookup_latency_seconds',
+      help: 'Query-result cache lookup latency in seconds',
+      labelNames: ['outcome'],
+      buckets: [0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5],
+      registers: [this.registry],
+    });
+
     if (collectDefaultMetrics) {
       client.collectDefaultMetrics({ register: this.registry });
     }
@@ -274,6 +291,14 @@ export class MetricsService {
   observeDeprecatedEndpointUsage(endpoint) {
     this.deprecatedEndpointUsage.inc({ endpoint: endpoint || 'unknown' });
   }
+
+  observeQueryCache(outcome, durationSeconds = undefined) {
+    const name = outcome === 'hit' ? 'query_cache_hits_total' : outcome === 'miss' ? 'query_cache_misses_total' : 'query_cache_errors_total';
+    this._counters[name].inc();
+    if (durationSeconds !== undefined) this.queryCacheLatency.observe({ outcome: outcome || 'unknown' }, durationSeconds);
+  }
+
+  observeDdosEvent(type) { this.ddosEvents.inc({ type: type || 'unknown' }); }
 
   /**
    * Recompute the business gauges from the current credential store contents.
