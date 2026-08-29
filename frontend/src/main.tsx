@@ -4,6 +4,7 @@ import App from "./App";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { WalletProvider } from "./context/WalletContext";
 import { ThemeProvider } from "./context/ThemeContext";
+import { KeyboardShortcutsProvider } from "./context/KeyboardShortcutsContext";
 import "./i18n";
 import "./index.css";
 
@@ -32,7 +33,9 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
     <ErrorBoundary>
       <ThemeProvider>
         <WalletProvider>
-          <App />
+          <KeyboardShortcutsProvider>
+            <App />
+          </KeyboardShortcutsProvider>
         </WalletProvider>
       </ThemeProvider>
     </ErrorBoundary>
