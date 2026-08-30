@@ -18,6 +18,11 @@ pub const MIN_INTERVAL_FLOOR: u32 = 10;
 /// Highest value an admin may configure the rate-limit window to.
 pub const MIN_INTERVAL_CEILING: u32 = 50_000;
 
+// Aliases used by tests and the fuzz harness (#780).
+pub const DEFAULT_RATE_LIMIT_WINDOW: u32 = DEFAULT_MIN_INTERVAL;
+pub const MIN_RATE_LIMIT_WINDOW: u32 = MIN_INTERVAL_FLOOR;
+pub const MAX_RATE_LIMIT_WINDOW: u32 = MIN_INTERVAL_CEILING;
+
 const MIN_SCORE: i64 = 0;
 const TTL_MAX: u32 = 6_312_000;
 const MAX_HISTORY: usize = 50;
@@ -71,6 +76,8 @@ pub enum ContractError {
     DisputeAlreadyOpen     = 13,
     InvalidMinInterval     = 14,
     ContractPaused         = 15,
+    /// Issue #733: batch too large.
+    BatchTooLarge          = 16,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -119,6 +126,15 @@ pub struct ScoreEntriesPage {
 pub struct ReportersPage {
     pub items: Vec<Address>,
     pub next_cursor: Option<u64>,
+}
+
+/// A single score submission entry used in [`Reputation::batch_submit_score`] (#733).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BatchScoreEntry {
+    pub subject: Address,
+    pub delta: i64,
+    pub reason: soroban_sdk::String,
 }
 
 /// A dispute record opened by a subject against a reporter's score delta.
@@ -181,6 +197,11 @@ impl Reputation {
             .unwrap_or(DEFAULT_MIN_INTERVAL)
     }
 
+    /// Alias for `get_min_interval` — used by tests and the fuzz harness (#780).
+    pub fn get_rate_limit_window(env: Env) -> u32 {
+        Self::get_min_interval(env)
+    }
+
     /// Updates the rate-limit window (admin only).
     ///
     /// Returns [`ContractError::InvalidMinInterval`] if `ledgers` is outside
@@ -210,6 +231,15 @@ impl Reputation {
             (EVENT_VERSION, admin, ledgers),
         );
         Ok(())
+    }
+
+    /// Alias for `set_min_interval` — used by tests and the fuzz harness (#780).
+    pub fn set_rate_limit_window(
+        env: Env,
+        admin: Address,
+        ledgers: u32,
+    ) -> Result<(), ContractError> {
+        Self::set_min_interval(env, admin, ledgers)
     }
 
     pub fn propose_admin(
@@ -442,7 +472,9 @@ impl Reputation {
                     .get(&rep_history_key)
                     .unwrap_or_else(|| Vec::new(&env));
                 for entry in rep_history.iter() {
-                    computed_score = computed_score.saturating_add(entry.delta).max(MIN_SCORE);
+                    // Saturating add prevents overflow on extreme deltas (e.g. i64::MIN / i64::MAX).
+                    // Clamp to MIN_SCORE (0) after each step so the running total never goes negative.
+                    computed_score = computed_score.saturating_add(entry.delta).clamp(MIN_SCORE, i64::MAX);
                 }
             }
         }
@@ -680,6 +712,7 @@ impl Reputation {
             if delta_index < history.len() {
                 let disputed_delta = history.get(delta_index).unwrap().delta;
                 history.remove(delta_index);
+                let now = env.ledger().timestamp();
 
                 let rec_key = Self::record_key(&subject);
                 let mut record: ReputationRecord =
@@ -862,7 +895,53 @@ impl Reputation {
         }
     }
 
-    // ── Private helpers ───────────────────────────────────────────────────────
+    // ── Issue #733: batch reputation score submission ─────────────────────────
+
+    /// Submit score deltas for multiple subjects in a single transaction.
+    ///
+    /// Capped at [`MAX_BATCH_SIZE`] (20) entries. The same rate-limit and
+    /// reason-length checks that apply to [`Self::submit_score`] are enforced
+    /// per entry. If any entry fails (e.g. rate-limited, reason too long, or
+    /// reporter not registered) the **entire** batch is rejected — no partial
+    /// writes occur.
+    ///
+    /// # Errors
+    /// - [`ContractError::BatchTooLarge`] – more than `MAX_BATCH_SIZE` entries.
+    /// - Any error that [`Self::submit_score`] can return, applied to the
+    ///   first failing entry.
+    pub fn batch_submit_score(
+        env: Env,
+        reporter: Address,
+        entries: Vec<BatchScoreEntry>,
+    ) -> Result<(), ContractError> {
+        reporter.require_auth();
+        Self::require_not_paused(&env)?;
+        Self::require_reporter(&env, &reporter)?;
+
+        if entries.len() > MAX_BATCH_SIZE {
+            return Err(ContractError::BatchTooLarge);
+        }
+
+        // Pre-validate all entries before writing any state (fail-fast, no partial writes).
+        for entry in entries.iter() {
+            if entry.reason.len() > 256 {
+                return Err(ContractError::ReasonTooLong);
+            }
+            // Rate-limit check (read-only — does not advance the window).
+            Self::check_rate_limit_readonly(&env, &entry.subject, &reporter)?;
+        }
+
+        // All entries valid — write state.
+        for entry in entries.iter() {
+            Self::apply_score_entry(&env, &reporter, &entry.subject, entry.delta, entry.reason.clone())?;
+        }
+
+        env.events().publish(
+            (symbol_short!("SCORE"), symbol_short!("batch")),
+            (EVENT_VERSION, reporter, entries.len()),
+        );
+        Ok(())
+    }
 
     fn require_uninitialized(env: &Env) -> Result<(), ContractError> {
         if env.storage().instance().has(&ADMIN) {
@@ -956,6 +1035,118 @@ impl Reputation {
             .extend_ttl(&rate_key, TTL_MAX, TTL_MAX);
         Ok(())
     }
+
+    /// Read-only rate-limit check used for pre-validation in batch operations.
+    /// Does **not** advance the rate-limit window; call `check_and_set_rate_limit`
+    /// when the entry is actually written.
+    fn check_rate_limit_readonly(
+        env: &Env,
+        subject: &Address,
+        reporter: &Address,
+    ) -> Result<(), ContractError> {
+        let rate_key = Self::rate_key(subject, reporter);
+        let current_ledger = env.ledger().sequence();
+        let min_interval: u32 = env
+            .storage()
+            .instance()
+            .get(&MIN_INTERVAL_KEY)
+            .unwrap_or(DEFAULT_MIN_INTERVAL);
+        if let Some(last_ledger) = env
+            .storage()
+            .persistent()
+            .get::<(Symbol, Address, Address), u32>(&rate_key)
+        {
+            if current_ledger <= last_ledger + min_interval {
+                return Err(ContractError::RateLimitExceeded);
+            }
+        }
+        Ok(())
+    }
+
+    /// Core score-application logic shared by `submit_score` and `batch_submit_score`.
+    /// The caller is responsible for auth and pre-validation (reason length, rate limit).
+    fn apply_score_entry(
+        env: &Env,
+        reporter: &Address,
+        subject: &Address,
+        delta: i64,
+        reason: soroban_sdk::String,
+    ) -> Result<(), ContractError> {
+        // Advance the rate-limit window for this (subject, reporter) pair.
+        Self::check_and_set_rate_limit(env, subject, reporter)?;
+
+        let now = env.ledger().timestamp();
+        let rec_key = Self::record_key(subject);
+        let history_key = Self::history_key(subject, reporter);
+
+        let mut history: Vec<ScoreEntry> = env
+            .storage()
+            .persistent()
+            .get(&history_key)
+            .unwrap_or_else(|| Vec::new(env));
+
+        if history.len() >= MAX_HISTORY as u32 {
+            history.remove(0);
+        }
+        history.push_back(ScoreEntry {
+            reporter: reporter.clone(),
+            delta,
+            reason,
+            submitted_at: now,
+        });
+
+        env.storage().persistent().set(&history_key, &history);
+        env.storage().persistent().extend_ttl(&history_key, TTL_MAX, TTL_MAX);
+
+        let existing_record: Option<ReputationRecord> = env.storage().persistent().get(&rec_key);
+        let is_new_subject = existing_record.is_none();
+
+        let mut computed_score: i64 = 0;
+        let mut reporter_count: u32 = 0;
+        let all_reporters = Self::get_reporters(env);
+
+        for rep in all_reporters.iter() {
+            let rep_history_key = Self::history_key(subject, &rep);
+            if env.storage().persistent().has(&rep_history_key) {
+                reporter_count += 1;
+                let rep_history: Vec<ScoreEntry> = env
+                    .storage()
+                    .persistent()
+                    .get(&rep_history_key)
+                    .unwrap_or_else(|| Vec::new(env));
+                for entry in rep_history.iter() {
+                    // Saturating add prevents overflow on extreme deltas (e.g. i64::MIN / i64::MAX).
+                    // Clamp to MIN_SCORE (0) after each step so the running total never goes negative.
+                    computed_score = computed_score.saturating_add(entry.delta).clamp(MIN_SCORE, i64::MAX);
+                }
+            }
+        }
+
+        let mut record: ReputationRecord = existing_record.unwrap_or(ReputationRecord {
+            subject: subject.clone(),
+            score: 0,
+            reporter_count: 0,
+            updated_at: now,
+        });
+
+        record.score = computed_score;
+        record.reporter_count = reporter_count;
+        record.updated_at = now;
+
+        env.storage().persistent().set(&rec_key, &record);
+        env.storage().persistent().extend_ttl(&rec_key, TTL_MAX, TTL_MAX);
+
+        if is_new_subject {
+            let cnt: u32 = env.storage().instance().get(&SUBJECT_CNT).unwrap_or(0);
+            env.storage().instance().set(&SUBJECT_CNT, &(cnt + 1));
+        }
+
+        env.events().publish(
+            (symbol_short!("SCORE"), symbol_short!("updated")),
+            (EVENT_VERSION, reporter.clone(), subject.clone(), delta),
+        );
+        Ok(())
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1003,7 +1194,7 @@ mod tests {
         client.add_reporter(&reporter);
         let reason = String::from_str(&env, "completed KYC");
         client.submit_score(&reporter, &subject, &50, &reason);
-        env.ledger().with_mut(|li| li.sequence_number += DEFAULT_MIN_INTERVAL + 1);
+        env.ledger().with_mut(|li| li.sequence_number += DEFAULT_RATE_LIMIT_WINDOW + 1);
         client.submit_score(&reporter, &subject, &25, &reason);
         let rec = client.get_reputation(&subject);
         assert_eq!(rec.score, 75);

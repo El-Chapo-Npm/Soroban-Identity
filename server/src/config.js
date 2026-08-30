@@ -232,11 +232,22 @@ export function loadConfig(env = process.env) {
       .filter(Boolean),
     rateLimitMaxBuckets: parseInteger(env.RATE_LIMIT_MAX_BUCKETS, 10000),
     trustProxy: env.TRUST_PROXY === "true",
+    ddosProtectionEnabled: parseBoolean(env.DDOS_PROTECTION_ENABLED, false),
+    ddosWindowMs: parseInteger(env.DDOS_WINDOW_MS, 60_000),
+    ddosMaxRequestsPerIp: parseInteger(env.DDOS_MAX_REQUESTS_PER_IP, 120),
+    ddosMaxConnectionsPerIp: parseInteger(env.DDOS_MAX_CONNECTIONS_PER_IP, 20),
+    ddosSuspiciousThreshold: parseInteger(env.DDOS_SUSPICIOUS_THRESHOLD, 96),
+    ddosCaptchaEnabled: parseBoolean(env.DDOS_CAPTCHA_ENABLED, false),
+    ddosCaptchaSecret: env.DDOS_CAPTCHA_SECRET ?? "",
+    ddosCaptchaUrl: env.DDOS_CAPTCHA_URL ?? "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+    ddosBlockedRegions: parseList(env.DDOS_BLOCKED_REGIONS, []),
     redisUrl: env.REDIS_URL ?? "",
     didCacheTtlMs: parseInteger(env.DID_CACHE_TTL_MS, 60 * 1000),
     redisMaxRetries: parseInteger(env.REDIS_MAX_RETRIES, 5),
     redisRetryBaseMs: parseInteger(env.REDIS_RETRY_BASE_MS, 200),
     redisCommandTimeoutMs: parseInteger(env.REDIS_COMMAND_TIMEOUT_MS, 1000),
+    redisEnableAutoReconnect: env.REDIS_ENABLE_AUTO_RECONNECT !== "false",
+    redisReconnectDelayMs: parseInteger(env.REDIS_RECONNECT_DELAY_MS, 1000),
     cacheFailureThreshold: parseInteger(env.CACHE_FAILURE_THRESHOLD, 3),
     didCacheWarmList: (env.DID_CACHE_WARM_LIST ?? "")
       .split(",")
@@ -283,12 +294,24 @@ export function loadConfig(env = process.env) {
     network: env.STELLAR_NETWORK ?? "testnet",
     rpcUrl: env.STELLAR_RPC_URL ?? env.RPC_URL ?? "https://soroban-testnet.stellar.org",
     rpcCacheTtlMs: parseInteger(env.RPC_CACHE_TTL_MS, 5000),
+    queryCacheEnabled: parseBoolean(env.QUERY_CACHE_ENABLED, true),
+    queryCacheDefaultTtlMs: parseInteger(env.QUERY_CACHE_DEFAULT_TTL_MS, 5000),
+    queryCacheTtlVolatileMs: parseInteger(env.QUERY_CACHE_TTL_VOLATILE_MS, 1000),
+    queryCacheTtlStableMs: parseInteger(env.QUERY_CACHE_TTL_STABLE_MS, 60_000),
+    queryCacheWarmQueries: parseJson(env.QUERY_CACHE_WARM_QUERIES, []),
     // RPC_MAX_RETRIES=0 disables retries (allowZero: true)
     rpcMaxRetries: parseInteger(env.RPC_MAX_RETRIES, 3, true),
     rpcRetryBaseMs: parseInteger(env.RPC_RETRY_BASE_MS, 500),
     rpcRetryBackoff: parseInteger(env.RPC_RETRY_BACKOFF, 2),
     // EVENT_POLL_INTERVAL_MS=0 disables the event poller (allowZero: true)
     eventPollIntervalMs: parseInteger(env.EVENT_POLL_INTERVAL_MS, 5000, true),
+    // #750: GET /events/poll long-polling. Timeout is clamped to
+    // [1s, longPollMaxTimeoutMs] regardless of what a caller requests.
+    longPollDefaultTimeoutMs: parseInteger(env.LONG_POLL_DEFAULT_TIMEOUT_MS, 30_000),
+    longPollMaxTimeoutMs: parseInteger(env.LONG_POLL_MAX_TIMEOUT_MS, 60_000),
+    // #748: whether a request over its daily/monthly quota is rejected
+    // ("block") or let through flagged as overage ("allow").
+    quotaOverageMode: (env.QUOTA_OVERAGE_MODE ?? "block").toLowerCase() === "allow" ? "allow" : "block",
     // WS_ENABLED=false turns the WebSocket endpoint off entirely
     wsEnabled: (env.WS_ENABLED ?? "true").toLowerCase() !== "false",
     wsPath: env.WS_PATH ?? "/ws",
@@ -296,11 +319,43 @@ export function loadConfig(env = process.env) {
     wsMessageWindowMs: parseInteger(env.WS_MESSAGE_WINDOW_MS, 60_000),
     // WS_HEARTBEAT_INTERVAL_MS=0 disables heartbeats (allowZero: true)
     wsHeartbeatIntervalMs: parseInteger(env.WS_HEARTBEAT_INTERVAL_MS, 30_000, true),
+    // Response compression (#721)
+    compressionEnabled: parseBoolean(env.COMPRESSION_ENABLED, true),
+    compressionThreshold: parseInteger(env.COMPRESSION_THRESHOLD, 1024),
+    compressionGzipLevel: parseInteger(env.COMPRESSION_GZIP_LEVEL, 6),
+    compressionBrotliLevel: parseInteger(env.COMPRESSION_BROTLI_LEVEL, 4),
+    compressionEnableBrotli: parseBoolean(env.COMPRESSION_ENABLE_BROTLI, true),
+    // Graceful shutdown (#722)
+    shutdownTimeoutMs: parseInteger(env.SHUTDOWN_TIMEOUT_MS, 30000),
+    // Database connection pooling (#718)
+    dbPoolMinSize: parseInteger(env.DB_POOL_MIN_SIZE, 2),
+    dbPoolMaxSize: parseInteger(env.DB_POOL_MAX_SIZE, 10),
+    dbPoolConnectionTimeoutMs: parseInteger(env.DB_POOL_CONNECTION_TIMEOUT_MS, 5000),
+    dbPoolIdleTimeoutMs: parseInteger(env.DB_POOL_IDLE_TIMEOUT_MS, 30000),
+    dbPoolMaxConnectionAgeMs: parseInteger(env.DB_POOL_MAX_CONNECTION_AGE_MS, 3600000),
+    dbPoolHealthCheckIntervalMs: parseInteger(env.DB_POOL_HEALTH_CHECK_INTERVAL_MS, 30000),
+    // Job queue for async processing (#716)
+    jobQueueEnabled: parseBoolean(env.JOB_QUEUE_ENABLED, true),
+    jobQueueConcurrency: parseInteger(env.JOB_QUEUE_CONCURRENCY, 4),
+    jobQueueMaxRetries: parseInteger(env.JOB_QUEUE_MAX_RETRIES, 3),
+    jobQueueRetryBackoffMs: parseInteger(env.JOB_QUEUE_RETRY_BACKOFF_MS, 1000),
+    jobQueueProcessingTimeoutMs: parseInteger(env.JOB_QUEUE_PROCESSING_TIMEOUT_MS, 30000),
+    credentialIssueQueueEnabled: parseBoolean(env.CREDENTIAL_ISSUE_QUEUE_ENABLED, true),
+    batchVerificationQueueEnabled: parseBoolean(env.BATCH_VERIFICATION_QUEUE_ENABLED, true),
     contracts: {
       identity: env.IDENTITY_REGISTRY_ID ?? "",
       credential: env.CREDENTIAL_CONTRACT_ID ?? env.CREDENTIAL_MANAGER_ID ?? "",
       reputation: env.REPUTATION_ID ?? "",
     },
+    // Jaeger distributed tracing (#714)
+    jaegerEnabled: parseBoolean(env.JAEGER_ENABLED, false),
+    jaegerServiceName: env.JAEGER_SERVICE_NAME ?? "soroban-identity-server",
+    jaegerAgentHost: env.JAEGER_AGENT_HOST ?? "localhost",
+    jaegerAgentPort: parseInteger(env.JAEGER_AGENT_PORT, 6832),
+    jaegerSamplerType: env.JAEGER_SAMPLER_TYPE ?? "const",
+    jaegerSamplerParam: parseFloat(env.JAEGER_SAMPLER_PARAM ?? "1"),
+    jaegerReporterLogSpans: parseBoolean(env.JAEGER_REPORTER_LOG_SPANS, false),
+    jaegerReporterFlushInterval: parseInteger(env.JAEGER_REPORTER_FLUSH_INTERVAL, 1000),
   };
 }
 
@@ -345,6 +400,8 @@ export function validateConfig(env = process.env) {
     { key: "RPC_RETRY_BASE_MS", desc: "must be a valid integer" },
     { key: "RPC_RETRY_BACKOFF", desc: "must be a valid integer" },
     { key: "EVENT_POLL_INTERVAL_MS", desc: "must be a valid integer" },
+    { key: "LONG_POLL_DEFAULT_TIMEOUT_MS", desc: "must be a valid integer" },
+    { key: "LONG_POLL_MAX_TIMEOUT_MS", desc: "must be a valid integer" },
     { key: "RATE_LIMIT_MAX_BUCKETS", desc: "must be a valid integer" },
     { key: "CORS_MAX_AGE", desc: "must be a valid integer" },
     { key: "ACCESS_LOG_MAX_BYTES", desc: "must be a valid integer" },
@@ -507,12 +564,21 @@ export function logDefaultValues(env = process.env) {
     { key: "RPC_RETRY_BASE_MS", defaultVal: "500" },
     { key: "RPC_RETRY_BACKOFF", defaultVal: "2" },
     { key: "EVENT_POLL_INTERVAL_MS", defaultVal: "5000" },
+    { key: "LONG_POLL_DEFAULT_TIMEOUT_MS", defaultVal: "30000" },
+    { key: "LONG_POLL_MAX_TIMEOUT_MS", defaultVal: "60000" },
+    { key: "QUOTA_OVERAGE_MODE", defaultVal: "'block'" },
     { key: "CORS_ORIGIN", defaultVal: "'*' in development, none in production" },
     { key: "CORS_CREDENTIALS", defaultVal: "false" },
     { key: "CORS_METHODS", defaultVal: DEFAULT_CORS_METHODS.join(",") },
     { key: "CORS_ALLOWED_HEADERS", defaultVal: DEFAULT_CORS_ALLOWED_HEADERS.join(",") },
     { key: "CORS_EXPOSED_HEADERS", defaultVal: DEFAULT_CORS_EXPOSED_HEADERS.join(",") },
     { key: "CORS_MAX_AGE", defaultVal: String(DEFAULT_CORS_MAX_AGE) },
+    { key: "JAEGER_ENABLED", defaultVal: "false" },
+    { key: "JAEGER_SERVICE_NAME", defaultVal: "'soroban-identity-server'" },
+    { key: "JAEGER_AGENT_HOST", defaultVal: "'localhost'" },
+    { key: "JAEGER_AGENT_PORT", defaultVal: "6832" },
+    { key: "JAEGER_SAMPLER_TYPE", defaultVal: "'const'" },
+    { key: "JAEGER_SAMPLER_PARAM", defaultVal: "1" },
   ];
 
   for (const item of defaults) {
