@@ -98,6 +98,32 @@ if (process.env.DISABLE_EXPIRY_JOB !== 'true') expiryJob.start();
 
 const apiKeyService = new ApiKeyService(config);
 
+// Initialize job queues for async processing (#716)
+let credentialIssueQueue = null;
+let batchVerificationQueue = null;
+
+if (config.jobQueueEnabled && config.redisUrl) {
+  try {
+    credentialIssueQueue = createCredentialIssueQueue(didCache.client, {
+      metrics,
+      maxRetries: config.jobQueueMaxRetries,
+      retryBackoffMs: config.jobQueueRetryBackoffMs,
+      processingTimeoutMs: config.jobQueueProcessingTimeoutMs,
+    });
+
+    batchVerificationQueue = createBatchVerificationQueue(didCache.client, {
+      metrics,
+      maxRetries: config.jobQueueMaxRetries,
+      retryBackoffMs: config.jobQueueRetryBackoffMs,
+      processingTimeoutMs: config.jobQueueProcessingTimeoutMs,
+    });
+
+    logger.info('Job queues initialized for async credential processing');
+  } catch (error) {
+    logger.error({ error: error.message }, 'Failed to initialize job queues');
+  }
+}
+
 // The hub is created before the app so credential and DID changes can be
 // pushed to subscribers from the same handlers that fire webhooks.
 const realtime = config.wsEnabled
@@ -139,6 +165,18 @@ const server = http.createServer(
   }),
 );
 
+// Apply response compression middleware (#721)
+if (config.compressionEnabled) {
+  const compression = createCompressionMiddleware({
+    threshold: config.compressionThreshold,
+    gzipLevel: config.compressionGzipLevel,
+    brotliLevel: config.compressionBrotliLevel,
+    enableBrotli: config.compressionEnableBrotli,
+    metrics,
+  });
+  // Note: Compression is applied in app.js via middleware pattern
+}
+
 if (realtime) {
   realtime.attach(server);
   logger.info({ path: config.wsPath }, 'WebSocket endpoint enabled');
@@ -168,16 +206,61 @@ function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
 
-  logger.info({ signal }, 'Shutting down');
+  logger.info({ signal }, 'Shutting down gracefully');
 
-  if (process.env.DISABLE_EXPIRY_JOB !== 'true') {
-    expiryJob.stop();
-  }
-  vaultManager.stop();
+  // Stop accepting new requests
+  server.close(async () => {
+    try {
+      // Stop job processing (#716)
+      if (credentialIssueQueue) {
+        logger.info('Stopping credential issuance queue');
+        await credentialIssueQueue.stop();
+      }
+      if (batchVerificationQueue) {
+        logger.info('Stopping batch verification queue');
+        await batchVerificationQueue.stop();
+      }
 
-  const timeoutMs = Number.parseInt(process.env.SHUTDOWN_TIMEOUT_MS ?? '10000', 10);
+      // Stop expiry job
+      if (process.env.DISABLE_EXPIRY_JOB !== 'true') {
+        expiryJob.stop();
+      }
+
+      // Stop vault manager
+      vaultManager.stop();
+
+      // Close WebSocket hub
+      if (realtime) {
+        logger.info('Closing WebSocket connections');
+        await realtime.close();
+      }
+
+      // Drain services
+      logger.info('Draining webhook service');
+      webhookService.drain();
+
+      logger.info('Draining Soroban client');
+      await soroban.drain();
+
+      // Close access log sink
+      if (accessLogSink) {
+        logger.info('Closing access log sink');
+        await accessLogSink.close();
+      }
+
+      logger.info('Shutdown complete');
+      process.exit(0);
+    } catch (error) {
+      logger.error({ error: error.message, stack: error.stack }, 'Error during graceful shutdown');
+      process.exit(1);
+    }
+  });
+
+  // Set shutdown timeout to force exit if graceful shutdown takes too long (#722)
+  const timeoutMs = config.shutdownTimeoutMs ?? 30000;
   const timer = setTimeout(() => {
-    logger.warn({ timeoutMs }, 'Graceful shutdown timed out, forcing exit');
+    logger.warn({ timeoutMs }, 'Graceful shutdown timeout exceeded, forcing exit');
+    // Destroy all active connections
     for (const socket of connections) {
       socket.destroy();
     }
@@ -185,20 +268,22 @@ function shutdown(signal) {
   }, timeoutMs);
   timer.unref();
 
-  server.close(async () => {
-    clearTimeout(timer);
-    try {
-      if (realtime) await realtime.close();
-      webhookService.drain();
-      await soroban.drain();
-      if (accessLogSink) await accessLogSink.close();
-    } catch (error) {
-      logger.error({ error: error.message, stack: error.stack }, 'Error during drain');
-    }
-    logger.info('Shutdown complete');
-    process.exit(0);
-  });
+  // Don't wait for lingering connections
+  server.closeAllConnections?.();
 }
 
+const connections = new Set();
+server.on('connection', (socket) => {
+  connections.add(socket);
+  socket.on('close', () => {
+    connections.delete(socket);
+  });
+});
+
+server.listen(config.port, () => {
+  logger.info({ port: config.port }, 'Soroban Identity server listening');
+});
+
+// Register signal handlers
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
