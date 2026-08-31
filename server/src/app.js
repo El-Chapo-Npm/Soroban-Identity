@@ -1303,15 +1303,18 @@ export function createApp({
 
         return notFound(res);
       } catch (error) {
-        if (error.name === "SorobanError") {
+        if (error.name === "SorobanError" || error.name === "SorobanUnavailableError") {
+          const isUnavailable = error.name === "SorobanUnavailableError" || error.category === "rpc_unavailable";
+          const statusCode = isUnavailable ? 503 : 500;
           logger.error({ 
-            error: error.category, 
-            message: error.publicMessage,
-            internalDetail: error.internalDetail 
+            error: error.category || "rpc_unavailable", 
+            message: error.publicMessage || error.message,
+            internalDetail: error.internalDetail || error.message 
           }, 'Soroban error occurred');
-          return sendJson(res, 500, {
-            error: error.category,
-            message: error.publicMessage,
+          return sendJson(res, statusCode, {
+            error: error.category || "rpc_unavailable",
+            message: error.publicMessage || error.message,
+            ...(soroban?.circuitBreaker ? { circuitBreakerState: soroban.circuitBreaker.state } : {}),
           });
         }
         logger.error({ error: error.message, stack: error.stack }, 'Internal server error');

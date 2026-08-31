@@ -303,6 +303,12 @@ export function loadConfig(env = process.env) {
     rpcMaxRetries: parseInteger(env.RPC_MAX_RETRIES, 3, true),
     rpcRetryBaseMs: parseInteger(env.RPC_RETRY_BASE_MS, 500),
     rpcRetryBackoff: parseInteger(env.RPC_RETRY_BACKOFF, 2),
+    // Circuit breaker configuration (#715)
+    circuitBreakerFailureThreshold: parseInteger(env.CIRCUIT_BREAKER_FAILURE_THRESHOLD, 5),
+    circuitBreakerSuccessThreshold: parseInteger(env.CIRCUIT_BREAKER_SUCCESS_THRESHOLD, 2),
+    circuitBreakerOpenDurationMs: parseInteger(env.CIRCUIT_BREAKER_OPEN_DURATION_MS, 30_000),
+    circuitBreakerTimeoutMs: parseInteger(env.CIRCUIT_BREAKER_TIMEOUT_MS, 10_000, true),
+    circuitBreakerEnabled: parseBoolean(env.CIRCUIT_BREAKER_ENABLED, true),
     // EVENT_POLL_INTERVAL_MS=0 disables the event poller (allowZero: true)
     eventPollIntervalMs: parseInteger(env.EVENT_POLL_INTERVAL_MS, 5000, true),
     // #750: GET /events/poll long-polling. Timeout is clamped to
