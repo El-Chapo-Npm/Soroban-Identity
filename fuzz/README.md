@@ -70,15 +70,43 @@ cargo +nightly fuzz run fuzz_submit_score -- -max_total_time=60
 
 ## Running All Targets
 
-To run all fuzz targets sequentially with a time budget of 60 seconds each:
+`run_fuzz.sh` seeds the corpus, runs each target, and reports crashes:
 
 ```bash
 cd fuzz
-for target in fuzz_create_did fuzz_issue_credential fuzz_submit_score; do
-  echo "Running $target..."
-  cargo +nightly fuzz run $target -- -max_total_time=60 || true
-done
+./run_fuzz.sh 60                     # every target, 60s each
+./run_fuzz.sh 3600                   # the nightly CI budget
+./run_fuzz.sh 300 fuzz_create_did    # one target, 5 minutes
 ```
+
+## Coverage
+
+Fuzzing covers all three deployable contracts. The other crates under
+`contracts/` — `shared-errors` and `soroban-identity-interface` — are `rlib`
+support crates with no entry points of their own, and are exercised through the
+contracts that depend on them.
+
+| Contract | Target | Entry points reached |
+| --- | --- | --- |
+| `identity-registry` | `fuzz_create_did` | `create_did`, `update_did`, `resolve_did`, `did_exists`, `has_active_did`, `deactivate_did` |
+| `credential-manager` | `fuzz_issue_credential` | `issue_credential`, `revoke_credential`, `verify_credential` |
+| `reputation` | `fuzz_submit_score` | `submit_score`, `get_score`, `get_history`, sybil threshold checks |
+
+Each target also asserts invariants rather than only looking for panics — for
+example that `did_exists` is true after a successful `create_did` and false
+after a failed one. A contract that returns a wrong answer without crashing is
+a bug the fuzzer would otherwise walk straight past.
+
+Beyond reachability, generate a line-level report for a specific target with
+the [coverage instructions](#coverage-reports) below.
+
+### Known gaps
+
+- Administrative entry points (issuer allow-listing, admin transfer) are
+  covered by unit tests but not fuzzed.
+- Each target drives one contract in isolation; cross-contract sequences — a
+  credential issued against a DID that is deactivated mid-flight — are not yet
+  modelled.
 
 ## Interpreting Results
 
@@ -132,48 +160,46 @@ Open `coverage.html` in a browser to see line-by-line coverage for the contract 
 
 ## CI Integration
 
-Add fuzz targets to your CI pipeline with a time-boxed budget (e.g., 60 seconds per target) to catch regressions:
+`.github/workflows/fuzz.yml` runs each contract's target on its own matrix job.
+The time budget depends on what triggered the run:
 
-**.github/workflows/fuzz.yml**:
+| Trigger | Budget per contract |
+| --- | --- |
+| Pull request / push to `main` | 120s |
+| Nightly schedule (02:00 UTC) | 1 hour |
+| Manual dispatch | 1 hour, or whatever you pass |
 
-```yaml
-name: Fuzz Testing
-on: [push, pull_request]
+Two budgets rather than one because they answer different questions. A pull
+request needs a fast answer to "did this change break something obvious", and
+an hour-long check nobody waits for is a check nobody reads. Finding genuinely
+novel inputs takes far longer than any pull request should block for, so that
+work happens nightly.
 
-jobs:
-  fuzz:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - uses: dtolnay/rust-toolchain@nightly
-      - run: cargo install cargo-fuzz
-      - name: Fuzz create_did
-        run: cd fuzz && cargo +nightly fuzz run fuzz_create_did -- -max_total_time=60 -rss_limit_mb=2048
-      - name: Fuzz issue_credential
-        run: cd fuzz && cargo +nightly fuzz run fuzz_issue_credential -- -max_total_time=60 -rss_limit_mb=2048
-      - name: Fuzz submit_score
-        run: cd fuzz && cargo +nightly fuzz run fuzz_submit_score -- -max_total_time=60 -rss_limit_mb=2048
-      - name: Upload artifacts on failure
-        if: failure()
-        uses: actions/upload-artifact@v3
-        with:
-          name: fuzz-artifacts
-          path: fuzz/artifacts/
-```
+The nightly run is also the one nobody is watching, so a crash there **opens a
+GitHub issue** labelled `fuzzing` — reusing the existing open issue for the
+same target rather than filing a fresh one every night. Pull request failures
+appear in the checks list and need no such prompting. Either way the reproducer
+is uploaded as the `fuzz-crash-<target>` artifact.
 
 ## Corpus Management
 
-libFuzzer builds a corpus of interesting inputs as it runs. The corpus is stored in `fuzz/corpus/<target>/` and can be re-used across runs to maintain coverage:
+libFuzzer builds a corpus of interesting inputs as it runs, stored in
+`fuzz/corpus/<target>/`. That directory is gitignored — it is generated and
+churns on every run. Committed starting inputs live in `fuzz/seeds/<target>/`
+instead, and are copied into the corpus before each run; see
+[`seeds/README.md`](seeds/README.md) for what they cover and how to add one.
+
+In CI the corpus is cached between runs, so each night starts from the inputs
+previous nights found interesting rather than rediscovering the shallow paths
+every time. Coverage compounds instead of resetting.
+
+To keep an input that found a bug, minimize it and add it to the seeds so the
+regression stays covered:
 
 ```bash
-# Run with existing corpus
-cargo +nightly fuzz run fuzz_create_did
-
-# Add seed inputs (e.g., hand-crafted edge cases)
-echo "your-seed-input" > fuzz/corpus/fuzz_create_did/seed1
+cargo +nightly fuzz tmin fuzz_create_did artifacts/fuzz_create_did/crash-abc123
+cp artifacts/fuzz_create_did/minimized-from-abc123 seeds/fuzz_create_did/regression-issue-755
 ```
-
-Commit useful corpus entries to version control so that future runs start with better coverage.
 
 ## Troubleshooting
 

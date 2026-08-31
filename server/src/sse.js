@@ -67,7 +67,8 @@ function safeStringify(value) {
   }
 }
 
-function eventMatchesFilter(event, { contractId, topics }) {
+/** Shared by the SSE stream and the long-poll endpoint (long-poll.js, #750). */
+export function eventMatchesFilter(event, { contractId, topics }) {
   if (contractId && event.contractId !== contractId) return false;
   if (topics && topics.length > 0) {
     return topics.every((expected, i) => expected === '' || event.topic[i] === expected);

@@ -506,13 +506,22 @@ function selectSubFields(target, subFieldsRaw) {
 /**
  * Render GraphiQL Playground HTML page for dev mode.
  */
-export function renderGraphiQLPlayground() {
+/**
+ * Render the playground page.
+ *
+ * @param {string|null} [cspNonce] - Per-response CSP nonce. The page's inline
+ *   <style> and <script> carry it so they run under a policy that does not
+ *   allow 'unsafe-inline'; without it a strict CSP would blank the page.
+ */
+export function renderGraphiQLPlayground(cspNonce = null) {
+  const nonceAttr = cspNonce ? ` nonce="${cspNonce}"` : '';
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <title>Soroban Identity GraphQL Playground</title>
-  <style>
+  <style${nonceAttr}>
     body {
       margin: 0;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
@@ -618,7 +627,7 @@ export function renderGraphiQLPlayground() {
       <pre id="output">Click "Run Query" to execute...</pre>
     </div>
   </div>
-  <script>
+  <script${nonceAttr}>
     document.getElementById('runBtn').addEventListener('click', async () => {
       const query = document.getElementById('query').value;
       let variables = {};
