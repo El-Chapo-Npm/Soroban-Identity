@@ -42,6 +42,8 @@ import {
   buildGetIssuerCredentialsArgs,
   buildListIssuerCredentialsArgs,
   buildGetRevocationsArgs,
+  buildCancelActivationArgs,
+  buildGetPendingActivationsArgs,
 } from "./contract-args";
 
 const PROBE_ADDRESS = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
@@ -82,6 +84,8 @@ export function toCredentialExpiry(dateOrMs: Date | number): number {
 const CREDENTIAL_NOT_FOUND_CODE = 3;
 const CREDENTIAL_REVOKED_CODE = 4;
 const CREDENTIAL_EXPIRED_CODE = 9;
+/** #731: credential has not yet reached its activation_time. */
+const CREDENTIAL_NOT_YET_ACTIVE_CODE = 22;
 
 /**
  * Client for the credential-manager contract.
@@ -483,6 +487,116 @@ export class CredentialClient extends BaseClient {
     }
   }
 
+  /**
+   * Cancel the pending time-locked activation for a credential. #731
+   *
+   * Only the original issuer may call this. The credential's `activation_time`
+   * must not yet have been reached. Once cancelled the credential is
+   * permanently inactive — it cannot be reactivated.
+   *
+   * @param issuerKeypair  Keypair of the registered issuer that issued the credential.
+   * @param credentialId   Hex-encoded credential ID (32 bytes).
+   * @param options        Per-call overrides.
+   * @returns `{ txHash }` — the on-chain transaction hash.
+   *
+   * @throws {SorobanIdentityError} with code `NOT_FOUND` if the credential does not exist,
+   *   `UNAUTHORIZED` if the caller is not the issuer,
+   *   `VALIDATION_ERROR` if the credential is revoked or already cancelled, or
+   *   `INVALID_ARGUMENT` if `activation_time` has already passed.
+   */
+  async cancelActivation(
+    issuerKeypair: Keypair,
+    credentialId: string,
+    options?: CallOptions
+  ): Promise<{ txHash: string }> {
+    const account = await this.server.getAccount(issuerKeypair.publicKey());
+    const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
+    const idBytes = Buffer.from(credentialId, 'hex');
+
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        this.contract.call(
+          'cancel_activation',
+          ...buildCancelActivationArgs({ issuer: issuerKeypair.publicKey(), credentialId: idBytes })
+        )
+      )
+      .setTimeout(timeout)
+      .build();
+
+    try {
+      const prepared = await retryWithBackoff(() => this.server.prepareTransaction(tx));
+      prepared.sign(issuerKeypair);
+
+      const result = await retryWithBackoff(() => this.server.sendTransaction(prepared));
+      this.debug('sdk.submission_outcome', { operation: 'credentials.cancelActivation', status: result.status });
+      if (result.status !== 'PENDING') {
+        throw new SorobanIdentityError(`Transaction failed: ${result.status}`, 'CONTRACT_ERROR');
+      }
+
+      const txHash = result.hash;
+      await pollTransactionStatus(this.server, txHash);
+      return { txHash };
+    } catch (e) {
+      throw wrapError(e);
+    }
+  }
+
+  /**
+   * Return the credential IDs of all pending time-locked credentials for a
+   * subject — those whose `activation_time` is set, still in the future, and
+   * not yet cancelled. #731
+   *
+   * This is a read-only simulation call and does not require signing.
+   *
+   * @param callerAddress  Any valid Stellar address (used for fee estimation only).
+   * @param subjectAddress Stellar address of the credential subject.
+   * @param options        Per-call overrides.
+   * @returns Array of hex-encoded credential IDs with pending activations.
+   */
+  async getPendingActivations(
+    callerAddress: string,
+    subjectAddress: string,
+    options?: CallOptions
+  ): Promise<string[]> {
+    validateStellarAddress(callerAddress);
+    validateStellarAddress(subjectAddress);
+    const account = new Account(callerAddress, '0');
+    const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
+
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        this.contract.call(
+          'get_pending_activations',
+          ...buildGetPendingActivationsArgs({ subject: subjectAddress })
+        )
+      )
+      .setTimeout(timeout)
+      .build();
+
+    const result = await retryWithBackoff(() => this.server.simulateTransaction(tx));
+    if (SorobanRpc.Api.isSimulationError(result)) {
+      const errMsg = (result as { error: string }).error ?? '';
+      const contractErr = ContractError.extract(errMsg, CREDENTIAL_MANAGER_ERRORS);
+      if (contractErr) throw contractErr;
+      throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, 'CONTRACT_ERROR');
+    }
+
+    const retval = scValToNative(
+      (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
+    );
+
+    if (!Array.isArray(retval)) return [];
+    return retval.map((raw: unknown) =>
+      Buffer.from(raw as Uint8Array).toString('hex')
+    );
+  }
+
   private async _validateClaimsAgainstSchema(
     schemaId: string,
     claims: Record<string, string>
@@ -581,6 +695,8 @@ export class CredentialClient extends BaseClient {
           if (contractErr.code === CREDENTIAL_REVOKED_CODE) return { valid: false, reason: 'revoked' };
           if (contractErr.code === CREDENTIAL_EXPIRED_CODE) return { valid: false, reason: 'expired' };
           if (contractErr.code === CREDENTIAL_NOT_FOUND_CODE) return { valid: false, reason: 'not_found' };
+          // #731: credential has not yet reached its activation_time
+          if (contractErr.code === CREDENTIAL_NOT_YET_ACTIVE_CODE) return { valid: false, reason: 'not_yet_active' };
           return { valid: false, reason: 'unknown' };
         }
 

@@ -263,6 +263,9 @@ pub struct Credential {
     pub claims_hash: BytesN<32>,
     pub signature: Bytes,
     pub issued_at: u64,
+    /// Unix timestamp after which the credential is considered active.
+    /// `0` means immediately active (no time-lock). Implements issue #731.
+    pub activation_time: u64,
     pub expires_at: u64,
     pub revoked: bool,
     /// All-zero when no schema was supplied at issuance — mirrors the
@@ -696,6 +699,9 @@ impl CredentialManager {
     /// * `claims_hash` - SHA-256 of off-chain claims (32 bytes).
     /// * `signature` - Issuer signature (64 bytes).
     /// * `expires_at` - Unix seconds; `0` means no expiry.
+    /// * `schema_hash` - Optional registered schema hash.
+    /// * `activation_time` - Unix seconds before which the credential is inactive.
+    ///   `0` means the credential is immediately active (no time-lock). #731
     ///
     /// # Returns
     /// The 32-byte credential ID.
@@ -703,6 +709,8 @@ impl CredentialManager {
     /// # Errors
     /// [`ContractError::CredentialAlreadyExists`] if an active credential with the same
     /// issuer + subject + type exists.
+    /// [`ContractError::ActivationTimeNotFuture`] if `activation_time` is non-zero and
+    /// not strictly in the future.
     ///
     /// # Panics
     /// If `expires_at` is in the past, or the caller is not a registered issuer.
@@ -737,6 +745,12 @@ impl CredentialManager {
             }
         }
 
+        // #731: activation_time must be strictly in the future when set
+        let now = env.ledger().timestamp();
+        if activation_time != 0 && activation_time <= now {
+            return Err(ContractError::ActivationTimeNotFuture);
+        }
+
         // Issue #551: guard the cross-contract call into identity-registry.
         let _guard = ReentrancyGuard::acquire(&env)?;
 
@@ -762,7 +776,6 @@ impl CredentialManager {
             return Err(ContractError::SubjectHasNoDid);
         }
 
-        let now = env.ledger().timestamp();
         if expires_at != 0 && expires_at <= now {
             return Err(ContractError::CredentialExpired);
         }
@@ -801,6 +814,7 @@ impl CredentialManager {
             claims_hash,
             signature,
             issued_at: now,
+            activation_time,
             expires_at,
             revoked: false,
             schema_hash: schema_hash.unwrap_or_else(|| BytesN::from_array(&env, &[0u8; 32])),
@@ -877,6 +891,15 @@ impl CredentialManager {
         subject_idx.push_back(id.clone());
         env.storage().persistent().set(&subject_idx_key, &subject_idx);
         env.storage().persistent().extend_ttl(&subject_idx_key, TTL_MAX, TTL_MAX);
+
+        // #731: emit a time-lock event when activation_time is set so
+        // off-chain indexers can schedule an "activated" notification.
+        if activation_time != 0 {
+            env.events().publish(
+                (CRED, symbol_short!("timelockd")),
+                (EVENT_VERSION, id.clone(), subject.clone(), issuer.clone(), activation_time),
+            );
+        }
 
         env.events().publish(
             (CRED, symbol_short!("issued")),
@@ -1092,7 +1115,15 @@ impl CredentialManager {
                 if cred.revoked {
                     return Err(ContractError::CredentialRevoked);
                 }
+                // #731: a cancelled time-locked activation is permanently inactive.
+                if cred.activation_cancelled {
+                    return Err(ContractError::CredentialRevoked);
+                }
                 let now = env.ledger().timestamp();
+                // #731: credential must have reached its activation_time.
+                if cred.activation_time != 0 && now < cred.activation_time {
+                    return Err(ContractError::CredentialNotYetActive);
+                }
                 if cred.expires_at > 0 && now > cred.expires_at {
                     return Err(ContractError::CredentialExpired);
                 }
