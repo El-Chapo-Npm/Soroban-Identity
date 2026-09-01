@@ -2,7 +2,16 @@ import { URL } from "node:url";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { appendAuditLog, readCredentials, writeCredentials, createAndPersistCredential, revokeAndPersistCredential, DuplicateCredentialError } from "./storage.js";
+import {
+  appendAuditLog,
+  readCredentials,
+  writeCredentials,
+  createAndPersistCredential,
+  revokeAndPersistCredential,
+  updateAndPersistCredential,
+  DuplicateCredentialError,
+  ConcurrencyConflictError,
+} from "./storage.js";
 import { findExpiringCredentials, paginate, paginateCursor } from "./expiry.js";
 import {
   createWebhookRecord,
@@ -77,6 +86,9 @@ const SERVER_FEATURES = [
   "api_versioning",
   "quota_tracking",
   "deprecation_warnings",
+  "response_compression",
+  "job_queue",
+  "graceful_shutdown",
 ];
 
 export function createApp({ config, soroban, metrics, metricsAggregator, analytics = new AnalyticsService() }) {
@@ -107,6 +119,10 @@ export function createApp({
   // Expose the key service on config so http-utils.requireAuth can validate
   // issued API keys instead of falling back to the single admin key.
   config.apiKeyService = apiKeyService;
+  
+  // Expose job queues on config for route handlers
+  config.credentialIssueQueue = credentialIssueQueue;
+  config.batchVerificationQueue = batchVerificationQueue;
 
   // One limiter per app instance, so its buckets live as long as the server
   // rather than being rebuilt per request.
@@ -198,6 +214,19 @@ export function createApp({
     // can produce a response, so an early return still carries them. The
     // nonce is stashed on the request for the one HTML page we render.
     req.cspNonce = setSecurityHeaders(req, res, config);
+
+    // Apply response compression middleware (#721)
+    if (config.compressionEnabled) {
+      const compression = createCompressionMiddleware({
+        threshold: config.compressionThreshold,
+        gzipLevel: config.compressionGzipLevel,
+        brotliLevel: config.compressionBrotliLevel,
+        enableBrotli: config.compressionEnableBrotli,
+        metrics,
+      });
+      // Apply compression to response
+      await compression.middleware()(req, res);
+    }
 
     // Access logging is attached before any routing so a request that is
     // rejected by CORS, auth, or the rate limiter is still recorded.
@@ -887,6 +916,43 @@ export function createApp({
           return sendJson(res, 200, { revoked: true, credential: revoked });
         }
 
+        // Credential update: PUT /credentials/:id or PATCH /credentials/:id with optimistic concurrency
+        const updateMatch = pathname.match(/^\/credentials\/([^/]+)$/);
+        if ((req.method === "PUT" || req.method === "PATCH") && updateMatch) {
+          if (!await requireAuth(req, res, config, ['credentials:write'])) return;
+          if (validateContentType(req, res)) return;
+          const credentialId = decodeURIComponent(updateMatch[1]);
+          const body = await readJson(req, config);
+          if (body.__payloadTooLarge)
+            return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+
+          // Check version from If-Match header or body
+          const ifMatchHeader = req.headers['if-match'];
+          const expectedVersion = ifMatchHeader
+            ? ifMatchHeader.replace(/^"|"$/g, '')
+            : (body.version ?? body.expectedVersion);
+
+          try {
+            const updated = await updateAndPersistCredential(config, credentialId, body, expectedVersion);
+            if (!updated) return notFound(res);
+            await appendAuditLog(config, { action: "update_credential", credentialId });
+            webhookService.trigger("credential.updated", updated).catch(() => {});
+            realtime?.emitCredentialEvent("updated", updated);
+            return sendJson(res, 200, updated, { ETag: `"${updated.version}"` });
+          } catch (err) {
+            if (err instanceof ConcurrencyConflictError) {
+              return sendJson(res, 409, {
+                code: "CONCURRENCY_CONFLICT",
+                message: err.message,
+                details: [
+                  { field: "version", expected: err.expectedVersion, current: err.currentVersion },
+                ],
+              });
+            }
+            throw err;
+          }
+        }
+
         // ── Batch Operations (#749) ─────────────────────────────────────
         if (req.method === "POST" && pathname === "/batch") {
           if (validateContentType(req, res)) return;
@@ -1386,15 +1452,18 @@ export function createApp({
 
         return notFound(res);
       } catch (error) {
-        if (error.name === "SorobanError") {
+        if (error.name === "SorobanError" || error.name === "SorobanUnavailableError") {
+          const isUnavailable = error.name === "SorobanUnavailableError" || error.category === "rpc_unavailable";
+          const statusCode = isUnavailable ? 503 : 500;
           logger.error({ 
-            error: error.category, 
-            message: error.publicMessage,
-            internalDetail: error.internalDetail 
+            error: error.category || "rpc_unavailable", 
+            message: error.publicMessage || error.message,
+            internalDetail: error.internalDetail || error.message 
           }, 'Soroban error occurred');
-          return sendFormatted(req, res, 500, {
-            error: error.category,
-            message: error.publicMessage,
+          return sendJson(res, statusCode, {
+            error: error.category || "rpc_unavailable",
+            message: error.publicMessage || error.message,
+            ...(soroban?.circuitBreaker ? { circuitBreakerState: soroban.circuitBreaker.state } : {}),
           });
         }
         logger.error({ error: error.message, stack: error.stack }, 'Internal server error');

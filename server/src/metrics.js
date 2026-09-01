@@ -176,6 +176,44 @@ export class MetricsService {
       registers: [this.registry],
     });
 
+    this.circuitBreakerState = new client.Gauge({
+      name: 'soroban_circuit_breaker_state',
+      help: 'Current state of the Soroban circuit breaker (0=CLOSED, 1=OPEN, 2=HALF_OPEN)',
+      registers: [this.registry],
+    });
+    this.circuitBreakerState.set(0);
+
+    this.circuitBreakerStateChanges = new client.Counter({
+      name: 'soroban_circuit_breaker_state_changes_total',
+      help: 'Total circuit breaker state changes by from and to state',
+      labelNames: ['from', 'to'],
+      registers: [this.registry],
+    });
+
+    this.circuitBreakerBreaks = new client.Counter({
+      name: 'soroban_circuit_breaker_breaks_total',
+      help: 'Total number of times the circuit breaker tripped OPEN',
+      registers: [this.registry],
+    });
+
+    this.circuitBreakerFailures = new client.Counter({
+      name: 'soroban_circuit_breaker_failures_total',
+      help: 'Total number of RPC failures recorded by circuit breaker',
+      registers: [this.registry],
+    });
+
+    this.circuitBreakerRejects = new client.Counter({
+      name: 'soroban_circuit_breaker_rejects_total',
+      help: 'Total number of RPC calls rejected fast by open circuit breaker',
+      registers: [this.registry],
+    });
+
+    this.circuitBreakerFallbacks = new client.Counter({
+      name: 'soroban_circuit_breaker_fallbacks_total',
+      help: 'Total number of fallback responses served by circuit breaker',
+      registers: [this.registry],
+    });
+
     if (collectDefaultMetrics) {
       client.collectDefaultMetrics({ register: this.registry });
     }
@@ -299,6 +337,25 @@ export class MetricsService {
   }
 
   observeDdosEvent(type) { this.ddosEvents.inc({ type: type || 'unknown' }); }
+
+  observeCircuitBreakerState(toState, fromState) {
+    const map = { CLOSED: 0, OPEN: 1, HALF_OPEN: 2 };
+    const num = map[String(toState).toUpperCase()] ?? 0;
+    this.circuitBreakerState.set(num);
+    if (fromState && toState) {
+      this.circuitBreakerStateChanges.inc({
+        from: String(fromState).toUpperCase(),
+        to: String(toState).toUpperCase(),
+      });
+    }
+  }
+
+  observeCircuitBreakerEvent(event) {
+    if (event === 'break') this.circuitBreakerBreaks.inc();
+    else if (event === 'failure') this.circuitBreakerFailures.inc();
+    else if (event === 'reject') this.circuitBreakerRejects.inc();
+    else if (event === 'fallback') this.circuitBreakerFallbacks.inc();
+  }
 
   /**
    * Recompute the business gauges from the current credential store contents.

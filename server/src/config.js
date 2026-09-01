@@ -303,6 +303,12 @@ export function loadConfig(env = process.env) {
     rpcMaxRetries: parseInteger(env.RPC_MAX_RETRIES, 3, true),
     rpcRetryBaseMs: parseInteger(env.RPC_RETRY_BASE_MS, 500),
     rpcRetryBackoff: parseInteger(env.RPC_RETRY_BACKOFF, 2),
+    // Circuit breaker configuration (#715)
+    circuitBreakerFailureThreshold: parseInteger(env.CIRCUIT_BREAKER_FAILURE_THRESHOLD, 5),
+    circuitBreakerSuccessThreshold: parseInteger(env.CIRCUIT_BREAKER_SUCCESS_THRESHOLD, 2),
+    circuitBreakerOpenDurationMs: parseInteger(env.CIRCUIT_BREAKER_OPEN_DURATION_MS, 30_000),
+    circuitBreakerTimeoutMs: parseInteger(env.CIRCUIT_BREAKER_TIMEOUT_MS, 10_000, true),
+    circuitBreakerEnabled: parseBoolean(env.CIRCUIT_BREAKER_ENABLED, true),
     // EVENT_POLL_INTERVAL_MS=0 disables the event poller (allowZero: true)
     eventPollIntervalMs: parseInteger(env.EVENT_POLL_INTERVAL_MS, 5000, true),
     // #750: GET /events/poll long-polling. Timeout is clamped to
@@ -319,6 +325,29 @@ export function loadConfig(env = process.env) {
     wsMessageWindowMs: parseInteger(env.WS_MESSAGE_WINDOW_MS, 60_000),
     // WS_HEARTBEAT_INTERVAL_MS=0 disables heartbeats (allowZero: true)
     wsHeartbeatIntervalMs: parseInteger(env.WS_HEARTBEAT_INTERVAL_MS, 30_000, true),
+    // Response compression (#721)
+    compressionEnabled: parseBoolean(env.COMPRESSION_ENABLED, true),
+    compressionThreshold: parseInteger(env.COMPRESSION_THRESHOLD, 1024),
+    compressionGzipLevel: parseInteger(env.COMPRESSION_GZIP_LEVEL, 6),
+    compressionBrotliLevel: parseInteger(env.COMPRESSION_BROTLI_LEVEL, 4),
+    compressionEnableBrotli: parseBoolean(env.COMPRESSION_ENABLE_BROTLI, true),
+    // Graceful shutdown (#722)
+    shutdownTimeoutMs: parseInteger(env.SHUTDOWN_TIMEOUT_MS, 30000),
+    // Database connection pooling (#718)
+    dbPoolMinSize: parseInteger(env.DB_POOL_MIN_SIZE, 2),
+    dbPoolMaxSize: parseInteger(env.DB_POOL_MAX_SIZE, 10),
+    dbPoolConnectionTimeoutMs: parseInteger(env.DB_POOL_CONNECTION_TIMEOUT_MS, 5000),
+    dbPoolIdleTimeoutMs: parseInteger(env.DB_POOL_IDLE_TIMEOUT_MS, 30000),
+    dbPoolMaxConnectionAgeMs: parseInteger(env.DB_POOL_MAX_CONNECTION_AGE_MS, 3600000),
+    dbPoolHealthCheckIntervalMs: parseInteger(env.DB_POOL_HEALTH_CHECK_INTERVAL_MS, 30000),
+    // Job queue for async processing (#716)
+    jobQueueEnabled: parseBoolean(env.JOB_QUEUE_ENABLED, true),
+    jobQueueConcurrency: parseInteger(env.JOB_QUEUE_CONCURRENCY, 4),
+    jobQueueMaxRetries: parseInteger(env.JOB_QUEUE_MAX_RETRIES, 3),
+    jobQueueRetryBackoffMs: parseInteger(env.JOB_QUEUE_RETRY_BACKOFF_MS, 1000),
+    jobQueueProcessingTimeoutMs: parseInteger(env.JOB_QUEUE_PROCESSING_TIMEOUT_MS, 30000),
+    credentialIssueQueueEnabled: parseBoolean(env.CREDENTIAL_ISSUE_QUEUE_ENABLED, true),
+    batchVerificationQueueEnabled: parseBoolean(env.BATCH_VERIFICATION_QUEUE_ENABLED, true),
     contracts: {
       identity: env.IDENTITY_REGISTRY_ID ?? "",
       credential: env.CREDENTIAL_CONTRACT_ID ?? env.CREDENTIAL_MANAGER_ID ?? "",

@@ -3,7 +3,19 @@ import test from 'node:test';
 import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
-import { appendAuditLog, ensureDataDir, upsertCredential } from '../src/storage.js';
+import {
+  appendAuditLog,
+  ensureDataDir,
+  upsertCredential,
+  writeAtomic,
+  recoverOrphanedFile,
+  writeCredentials,
+  readCredentials,
+  clearCredentialCache,
+  updateAndPersistCredential,
+  createAndPersistCredential,
+  ConcurrencyConflictError,
+} from '../src/storage.js';
 
 // Simple date mock
 const OriginalDate = global.Date;
@@ -134,8 +146,6 @@ test('upsertCredential non-updated entries are also distinct references', () => 
   // But its data is preserved
   assert.deepEqual(result[1], original[1]);
 });
-
-import { writeAtomic, recoverOrphanedFile, writeCredentials, readCredentials } from '../src/storage.js';
 
 test('writeAtomic creates temporary file before atomic rename', async () => {
   const testFilePath = path.join(testDataDir, 'test-atomic.json');
@@ -273,8 +283,6 @@ test('ensureDataDir recovers orphaned .tmp files on startup', async () => {
   assert.equal(credentials[0].name, 'Recovered Credential');
 });
 
-import { clearCredentialCache } from '../src/storage.js';
-
 // ── Cache isolation tests (#484) ─────────────────────────────────────────────
 
 test('cache is isolated per credentialStorePath — two configs never share cached data', async (t) => {
@@ -411,3 +419,59 @@ test('clearCredentialCache with config only clears the targeted path', async (t)
   const fromA = await readCredentials(configA);
   assert.equal(fromA[0].id, 'a1', 'Config A should re-read from disk after cache clear');
 });
+
+test('updateAndPersistCredential updates credential and increments version', async () => {
+  const dir = path.resolve(process.cwd(), 'test-data-concurrency');
+  const testConfig = {
+    dataDir: dir,
+    auditLogPath: path.join(dir, 'audit'),
+    credentialStorePath: path.join(dir, 'credentials.json'),
+    auditLogRetentionDays: 3,
+  };
+  await ensureDataDir(testConfig);
+  try {
+    await createAndPersistCredential(testConfig, { id: 'cred-sync-1', status: 'pending', version: 1 });
+    const updated = await updateAndPersistCredential(testConfig, 'cred-sync-1', { status: 'active' }, 1);
+    assert.equal(updated.status, 'active');
+    assert.equal(updated.version, 2);
+
+    // Re-read confirms persistence
+    const current = await readCredentials(testConfig);
+    const cred = current.find((c) => c.id === 'cred-sync-1');
+    assert.equal(cred.status, 'active');
+    assert.equal(cred.version, 2);
+  } finally {
+    await fsPromises.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('updateAndPersistCredential throws ConcurrencyConflictError on stale expectedVersion', async () => {
+  const dir = path.resolve(process.cwd(), 'test-data-conflict');
+  const testConfig = {
+    dataDir: dir,
+    auditLogPath: path.join(dir, 'audit'),
+    credentialStorePath: path.join(dir, 'credentials.json'),
+    auditLogRetentionDays: 3,
+  };
+  await ensureDataDir(testConfig);
+  try {
+    await createAndPersistCredential(testConfig, { id: 'cred-conflict-1', status: 'pending', version: 2 });
+    
+    await assert.rejects(
+      async () => {
+        // Expected version is 1, but current version is 2
+        await updateAndPersistCredential(testConfig, 'cred-conflict-1', { status: 'active' }, 1);
+      },
+      (err) => {
+        assert.ok(err instanceof ConcurrencyConflictError);
+        assert.equal(err.id, 'cred-conflict-1');
+        assert.equal(err.expectedVersion, 1);
+        assert.equal(err.currentVersion, 2);
+        return true;
+      }
+    );
+  } finally {
+    await fsPromises.rm(dir, { recursive: true, force: true });
+  }
+});
+
