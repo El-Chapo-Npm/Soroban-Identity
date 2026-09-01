@@ -1,4 +1,5 @@
-import { initTracer } from 'jaeger-client';
+import jaegerClient from 'jaeger-client';
+const { initTracer } = jaegerClient;
 import { logger } from './logger.js';
 
 /**
