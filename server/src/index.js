@@ -4,6 +4,7 @@ import { createApp } from './app.js';
 import { ensureDataDir } from './storage.js';
 import { ExpiryNotificationJob } from './expiry.js';
 import { MetricsAggregator, MetricsService } from './metrics.js';
+import { AnalyticsService } from './analytics.js';
 import { SorobanClient } from './soroban.js';
 import { DidCache } from './did-cache.js';
 import { WebhookDeliveryService } from './webhooks.js';
@@ -71,6 +72,8 @@ if (!getFlag('new_credential_types')) {
   });
 }
 const metrics = new MetricsService();
+const analytics = new AnalyticsService();
+const soroban = new SorobanClient(config, metrics);
 const didCache = new DidCache(config, { metrics });
 const queryCache = new QueryResultCache(config, { redisClient: didCache.client, metrics });
 const ddosProtection = new DdosProtection(config, { onAlert: async (event) => { metrics.observeDdosEvent(event.type); logger.warn(event, 'DDoS protection event'); } });
@@ -96,6 +99,7 @@ const expiryJob = new ExpiryNotificationJob(config, soroban);
 
 if (process.env.DISABLE_EXPIRY_JOB !== 'true') expiryJob.start();
 
+const server = http.createServer(createApp({ config, soroban, metrics, metricsAggregator, analytics }));
 const apiKeyService = new ApiKeyService(config);
 
 // Initialize job queues for async processing (#716)

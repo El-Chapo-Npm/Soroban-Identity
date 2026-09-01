@@ -37,6 +37,7 @@ import {
   readRawBody,
   requireAdmin,
   requireAuth,
+  sendFormatted,
   sendJson,
   sendText,
   setCorsHeaders,
@@ -67,6 +68,7 @@ import { requestContextStore } from "./request-context.js";
 import { handleEventsRequest } from "./sse.js";
 import { handleLongPollRequest } from "./long-poll.js";
 import { logger } from "./logger.js";
+import { AnalyticsService, detectCountry } from "./analytics.js";
 import { TieredRateLimiter } from "./rate-limiter.js";
 import { ApiKeyService } from "./api-keys.js";
 import { EmailTransport } from "./email.js";
@@ -89,6 +91,9 @@ const SERVER_FEATURES = [
   "graceful_shutdown",
 ];
 
+export function createApp({ config, soroban, metrics, metricsAggregator, analytics = new AnalyticsService() }) {
+  return function app(req, res) {
+    const startTime = Date.now();
 export function createApp({
   config,
   soroban,
@@ -247,6 +252,29 @@ export function createApp({
       return res.writeHead(204).end();
     }
 
+    // Record analytics when response completes
+    res.on("finish", () => {
+      const durationMs = Math.max(0, Date.now() - startTime);
+      const consumer =
+        req.headers["x-api-key"] ||
+        req.headers.authorization?.replace(/^Bearer\s+/i, "") ||
+        "anonymous";
+      const country = detectCountry(req);
+
+      analytics.recordRequest({
+        method: req.method,
+        path: url.pathname,
+        statusCode: res.statusCode,
+        durationMs,
+        consumer,
+        country,
+      });
+    });
+
+    return requestContextStore.run({ requestId }, async () => {
+      try {
+        if (req.method === "GET" && url.pathname === "/info") {
+          return sendFormatted(req, res, 200, {
     // Validate well-known request headers before any routing or auth work.
     if (!validateRequest(res, schemas.commonHeaders, { headers: req.headers }).ok) {
       return;
@@ -442,6 +470,11 @@ export function createApp({
           });
         }
 
+        if (req.method === "GET" && url.pathname === "/health") {
+          const contracts = await soroban.pingAllContracts();
+          const ok = Object.values(contracts).every(Boolean);
+          return sendFormatted(req, res, ok ? 200 : 503, {
+            status: ok ? "ok" : "degraded",
         // CSP violation reports (#754). Unauthenticated by necessity — the
         // browser posts these on its own behalf, with no credentials — so the
         // handler only ever logs and counts, and never trusts the contents.
@@ -567,6 +600,12 @@ export function createApp({
           return sendText(res, 200, body, metrics.contentType ? { "content-type": metrics.contentType } : {});
         }
 
+        // #390: paginated credential list
+        if (req.method === "GET" && url.pathname === "/credentials") {
+          const limitParam = url.searchParams.get("limit") ?? "50";
+          const limitNum = Number.parseInt(limitParam, 10) || 50;
+          if (limitNum > 200) {
+            return sendFormatted(req, res, 400, { code: "INVALID_REQUEST", message: "limit must not exceed 200" });
         // ── GraphQL Endpoint ─────────────────────────────────────────
         if (pathname === "/graphql") {
           if (req.method === "GET") {
@@ -632,6 +671,7 @@ export function createApp({
             limit: limitNum,
             cursor: validated.data.query.cursor ?? null,
           });
+          return sendFormatted(req, res, 200, { items, nextCursor });
 
           if (wantsJsonLd(req, url)) {
             return sendJson(
@@ -673,6 +713,8 @@ export function createApp({
           }
           const credentials = await readCredentials(config);
           const credential = credentials.find((c) => c.id === credentialId);
+          if (!credential) return notFound(res, req);
+          return sendFormatted(req, res, 200, credential);
           if (!credential) return notFound(res);
 
           // W3C JSON-LD form (#753), opt-in so existing clients keep the
@@ -734,6 +776,16 @@ export function createApp({
           const recordVerification = (result) =>
             metrics?.observeCredentialVerification?.(result);
           if (!credential) {
+            return sendFormatted(req, res, 200, { verified: false, reason: "not_found" });
+          }
+          if (credential.revoked) {
+            return sendFormatted(req, res, 200, { verified: false, reason: "revoked" });
+          }
+          const now = Math.floor(Date.now() / 1000);
+          if (credential.expiresAt > 0 && credential.expiresAt < now) {
+            return sendFormatted(req, res, 200, { verified: false, reason: "expired" });
+          }
+          return sendFormatted(req, res, 200, { verified: true, credential });
             recordVerification("not_found");
             return sendJson(res, 200, { verified: false, reason: "not_found" });
           }
@@ -772,6 +824,47 @@ export function createApp({
         )
           return;
 
+        // Analytics Dashboard
+        if (req.method === "GET" && url.pathname === "/admin/analytics/dashboard") {
+          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+          return res.end(analytics.renderDashboardHtml());
+        }
+
+        // Analytics Export (CSV or JSON)
+        if (req.method === "GET" && url.pathname === "/admin/analytics/export") {
+          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          const format = url.searchParams.get("format")?.toLowerCase();
+          if (format === "json" || req.headers["accept"] === "application/json") {
+            return sendFormatted(req, res, 200, analytics.exportJson(), {
+              "content-disposition": 'attachment; filename="analytics.json"',
+            });
+          }
+          res.writeHead(200, {
+            "content-type": "text/csv; charset=utf-8",
+            "content-disposition": 'attachment; filename="analytics.csv"',
+          });
+          return res.end(analytics.exportCsv());
+        }
+
+        // Analytics Summary Data
+        if (req.method === "GET" && url.pathname === "/admin/analytics") {
+          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          return sendFormatted(req, res, 200, analytics.getSummary());
+        }
+
+        if (req.method === "POST" && url.pathname === "/credentials") {
+          if (!requireAuth(req, res, config, ['credentials:write'])) return;
+          if (validateContentType(req, res)) return;
+          const body = await readJson(req, config);
+          if (body.__payloadTooLarge)
+            return sendFormatted(req, res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+          if (!body.id)
+            return sendFormatted(req, res, 400, { code: "INVALID_REQUEST", message: "Request body must include a credential id." });
+          try {
+            const updated = await createAndPersistCredential(config, body);
+            await appendAuditLog(config, { action: "issue_credential", credentialId: body.id });
+            return sendFormatted(req, res, 201, body);
         if (req.method === "POST" && (pathname === "/credentials" || pathname === "/credentials/issue")) {
           if (!await requireAuth(req, res, config, ['credentials:write'])) return;
           if (validateContentType(req, res)) return;
@@ -797,7 +890,7 @@ export function createApp({
             return sendJson(res, 201, credential);
           } catch (err) {
             if (err instanceof DuplicateCredentialError) {
-              return sendJson(res, 409, {
+              return sendFormatted(req, res, 409, {
                 code: "CREDENTIAL_ALREADY_EXISTS",
                 message: err.message,
                 details: [{ field: "id", value: err.id }],
@@ -1010,13 +1103,17 @@ export function createApp({
           if (!await requireAuth(req, res, config, ['admin:read'])) return;
           
           const issuers = await soroban.getIssuers();
-          return sendJson(res, 200, { issuers });
+          return sendFormatted(req, res, 200, { issuers });
         }
 
         if (req.method === "POST" && pathname === "/admin/issuers") {
           if (validateContentType(req, res)) return;
           const body = await readJson(req, config);
           if (body.__payloadTooLarge)
+            return sendFormatted(req, res, 413, { error: "payload_too_large" });
+          if (!body.issuer)
+            return sendFormatted(req, res, 400, { error: "issuer_required" });
+          await soroban.addIssuer(body.issuer);
             return sendJson(res, 413, { error: "payload_too_large" });
           const validated = validateRequest(res, schemas.addIssuer, { body });
           if (!validated.ok) return;
@@ -1028,6 +1125,7 @@ export function createApp({
             actor: req.headers["x-actor"] ?? config.adminActor,
             issuer,
           });
+          return sendFormatted(req, res, 201, { issuer: body.issuer });
           return sendJson(res, 201, { issuer });
         }
 
@@ -1037,6 +1135,9 @@ export function createApp({
           
           const body = await readJson(req, config);
           if (body.__payloadTooLarge)
+            return sendFormatted(req, res, 413, { error: "payload_too_large" });
+          const issuer = body.issuer ?? url.searchParams.get("issuer");
+          if (!issuer) return sendFormatted(req, res, 400, { error: "issuer_required" });
             return sendJson(res, 413, { error: "payload_too_large" });
           const validated = validateRequest(res, schemas.removeIssuer, {
             body,
@@ -1066,7 +1167,7 @@ export function createApp({
             actor: req.headers["x-actor"] ?? config.adminActor,
             issuer,
           });
-          return sendJson(res, 200, { issuer });
+          return sendFormatted(req, res, 200, { issuer });
         }
 
         if (req.method === "GET" && pathname === "/admin/expiry-report") {
@@ -1083,7 +1184,8 @@ export function createApp({
             windowDays,
             includeNotified: true,
           });
-          return sendJson(
+          return sendFormatted(
+            req,
             res,
             200,
             paginate(expiring, {
@@ -1093,6 +1195,7 @@ export function createApp({
           );
         }
 
+        return notFound(res, req);
         if (req.method === "GET" && (url.pathname === "/admin/expiry-thresholds" || url.pathname === "/expiry/thresholds")) {
           if (!await requireAuth(req, res, config, ['admin:read'])) return;
           return sendJson(res, 200, {
@@ -1364,7 +1467,7 @@ export function createApp({
           });
         }
         logger.error({ error: error.message, stack: error.stack }, 'Internal server error');
-        return sendJson(res, 500, {
+        return sendFormatted(req, res, 500, {
           error: "internal_server_error",
           message: error.message,
         });
