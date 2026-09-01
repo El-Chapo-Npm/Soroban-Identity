@@ -35,6 +35,18 @@ const DISPUTE_WINDOW_SECS: u64 = 86_400;
 /// Ledgers a dispute remains open before it expires automatically (~1 day at 5s/ledger).
 const DISPUTE_WINDOW_LEDGERS: u32 = 17_280;
 
+// ── Score decay (#657) ───────────────────────────────────────────────────────
+
+/// Seconds in one decay period ("day") used by [`Reputation::set_decay_rate`]
+/// and [`Reputation::set_reporter_decay_rate`].
+const DECAY_PERIOD_SECS: u64 = 86_400;
+/// Decay rate is expressed in basis points (1/10000) removed per elapsed
+/// period; 10_000 = 100% decay per period.
+const MAX_DECAY_RATE_BPS: u32 = 10_000;
+/// Caps the exponential-decay compounding loop so a very old, never-touched
+/// record can't blow the view-call instruction budget.
+const MAX_DECAY_PERIODS: u64 = 3_650;
+
 mod keys;
 
 // ── Storage key symbols ───────────────────────────────────────────────────────
@@ -55,6 +67,12 @@ const DISPUTE_CNT: Symbol = symbol_short!("disp_cnt");
 const PAUSED: Symbol = symbol_short!("PAUSED");
 /// Storage key for the configurable rate-limit window (in ledgers).
 const MIN_INTERVAL_KEY: Symbol = symbol_short!("rl_win");
+/// Storage key for the global default decay configuration.
+const DECAY_CFG: Symbol = symbol_short!("DECAYCFG");
+/// Storage key prefix for per-reporter decay configuration overrides.
+const RPT_DECAY: Symbol = symbol_short!("RPTDECAY");
+/// Storage key prefix for the most recent reporter to score each subject.
+const LAST_RPT: Symbol = symbol_short!("LASTRPT");
 
 // ── Error codes ───────────────────────────────────────────────────────────────
 
@@ -96,6 +114,27 @@ pub struct ReputationRecord {
     pub score: i64,
     pub reporter_count: u32,
     pub updated_at: u64,
+}
+
+/// How a score decays toward zero as time passes since `updated_at`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Copy)]
+pub enum DecayMode {
+    /// Removes a fixed fraction of the *original* score per elapsed period.
+    Linear,
+    /// Removes a fixed fraction of the *remaining* score per elapsed period
+    /// (compounding), so the score approaches — but never quite reaches — zero.
+    Exponential,
+}
+
+/// A decay rate plus the curve it's applied with. See [`Reputation::set_decay_rate`]
+/// and [`Reputation::set_reporter_decay_rate`].
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DecayConfig {
+    /// Basis points (1/10000) of decay applied per [`DECAY_PERIOD_SECS`] elapsed.
+    pub rate_bps: u32,
+    pub mode: DecayMode,
 }
 
 #[contracttype]
@@ -405,6 +444,69 @@ impl Reputation {
         Ok(())
     }
 
+    // ── Score decay (#657) ────────────────────────────────────────────────────
+
+    /// Sets the contract-wide default decay rate (admin only); `rate_bps` is
+    /// basis points removed per elapsed day, `0` disables decay (the default).
+    pub fn set_decay_rate(env: Env, admin: Address, rate_bps: u32, mode: DecayMode) -> Result<(), ContractError> {
+        Self::require_admin_caller(&env, &admin)?;
+        if rate_bps > MAX_DECAY_RATE_BPS {
+            return Err(ContractError::InvalidDecayRate);
+        }
+        let cfg = DecayConfig { rate_bps, mode };
+        env.storage().instance().set(&DECAY_CFG, &cfg);
+        env.events().publish(
+            (DECAY_CFG, symbol_short!("updated")),
+            (EVENT_VERSION, admin, rate_bps),
+        );
+        Ok(())
+    }
+
+    /// Returns the current contract-wide default decay configuration.
+    pub fn get_decay_rate(env: Env) -> DecayConfig {
+        Self::default_decay_config(&env)
+    }
+
+    /// Sets a decay-rate override for one reporter (admin only), used when
+    /// that reporter made a subject's most recent `submit_score` call.
+    pub fn set_reporter_decay_rate(
+        env: Env,
+        admin: Address,
+        reporter: Address,
+        rate_bps: u32,
+        mode: DecayMode,
+    ) -> Result<(), ContractError> {
+        Self::require_admin_caller(&env, &admin)?;
+        if rate_bps > MAX_DECAY_RATE_BPS {
+            return Err(ContractError::InvalidDecayRate);
+        }
+        let key = (RPT_DECAY, reporter.clone());
+        env.storage().persistent().set(&key, &DecayConfig { rate_bps, mode });
+        env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+        env.events().publish(
+            (RPT_DECAY, symbol_short!("updated")),
+            (EVENT_VERSION, admin, reporter, rate_bps),
+        );
+        Ok(())
+    }
+
+    /// Removes a reporter's decay-rate override (admin only).
+    pub fn clear_reporter_decay_rate(env: Env, admin: Address, reporter: Address) -> Result<(), ContractError> {
+        Self::require_admin_caller(&env, &admin)?;
+        env.storage().persistent().remove(&(RPT_DECAY, reporter.clone()));
+        env.events().publish(
+            (RPT_DECAY, symbol_short!("cleared")),
+            (EVENT_VERSION, admin, reporter),
+        );
+        Ok(())
+    }
+
+    /// Returns the effective decay configuration for `reporter` — its own
+    /// override if one is set, otherwise the contract-wide default.
+    pub fn get_reporter_decay_rate(env: Env, reporter: Address) -> DecayConfig {
+        Self::decay_config_for_reporter(&env, &reporter)
+    }
+
     pub fn submit_score(
         env: Env,
         reporter: Address,
@@ -516,6 +618,9 @@ impl Reputation {
         Ok(())
     }
 
+    /// Returns the subject's reputation record with `score` decayed for time
+    /// elapsed since `updated_at`; the stored raw score is untouched. With no
+    /// decay configured (the default) this is the raw accumulated score.
     pub fn get_reputation(env: Env, subject: Address) -> ReputationRecord {
         let key = Self::record_key(&subject);
         if env.storage().persistent().has(&key) {
@@ -523,12 +628,15 @@ impl Reputation {
                 .persistent()
                 .extend_ttl(&key, TTL_MAX, TTL_MAX);
         }
-        env.storage().persistent().get(&key).unwrap_or(ReputationRecord {
-            subject: subject.clone(),
-            score: 0,
-            reporter_count: 0,
-            updated_at: 0,
-        })
+        let mut record: ReputationRecord =
+            env.storage().persistent().get(&key).unwrap_or(ReputationRecord {
+                subject: subject.clone(),
+                score: 0,
+                reporter_count: 0,
+                updated_at: 0,
+            });
+        record.score = Self::decayed_score(&env, &record);
+        record
     }
 
     pub fn get_history(
@@ -700,6 +808,7 @@ impl Reputation {
             return Err(ContractError::DisputeExpired);
         }
 
+        let now = env.ledger().timestamp();
         if accepted {
             let now = env.ledger().timestamp();
             let history_key = Self::history_key(&subject, &reporter);
@@ -964,6 +1073,22 @@ impl Reputation {
         Ok(())
     }
 
+    /// Like [`Self::require_admin`], but also checks that the caller-supplied
+    /// `admin` matches the stored admin address (not just that *some* address
+    /// authorized the call) — used by functions that take `admin` explicitly.
+    fn require_admin_caller(env: &Env, admin: &Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(ContractError::NotInitialized)?;
+        if &stored != admin {
+            return Err(ContractError::Unauthorized);
+        }
+        Ok(())
+    }
+
     fn require_reporter(env: &Env, reporter: &Address) -> Result<(), ContractError> {
         if !Self::get_reporters(env).contains(reporter) {
             return Err(ContractError::ReporterNotFound);
@@ -987,6 +1112,74 @@ impl Reputation {
 
     fn record_key(subject: &Address) -> (Symbol, Address) {
         (RECORD, subject.clone())
+    }
+
+    fn last_reporter_key(subject: &Address) -> (Symbol, Address) {
+        (LAST_RPT, subject.clone())
+    }
+
+    fn default_decay_config(env: &Env) -> DecayConfig {
+        env.storage()
+            .instance()
+            .get(&DECAY_CFG)
+            .unwrap_or(DecayConfig { rate_bps: 0, mode: DecayMode::Linear })
+    }
+
+    fn decay_config_for_reporter(env: &Env, reporter: &Address) -> DecayConfig {
+        let key = (RPT_DECAY, reporter.clone());
+        env.storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Self::default_decay_config(env))
+    }
+
+    /// Applies decay to `record.score` for the time elapsed since
+    /// `record.updated_at`, using the decay override of the reporter behind
+    /// the subject's most recent `submit_score` call, if any (else the
+    /// contract-wide default). Never negative; a no-op when the resolved
+    /// rate is `0` (the default) or no time has passed.
+    fn decayed_score(env: &Env, record: &ReputationRecord) -> i64 {
+        if record.score <= 0 {
+            return record.score.max(MIN_SCORE);
+        }
+        let now = env.ledger().timestamp();
+        if now <= record.updated_at {
+            return record.score;
+        }
+        let elapsed_periods = (now - record.updated_at) / DECAY_PERIOD_SECS;
+        if elapsed_periods == 0 {
+            return record.score;
+        }
+        let last_reporter: Option<Address> =
+            env.storage().persistent().get(&Self::last_reporter_key(&record.subject));
+        let cfg = match last_reporter {
+            Some(reporter) => Self::decay_config_for_reporter(env, &reporter),
+            None => Self::default_decay_config(env),
+        };
+        if cfg.rate_bps == 0 {
+            return record.score;
+        }
+        let periods = elapsed_periods.min(MAX_DECAY_PERIODS);
+        let raw = record.score as i128;
+        let bps = cfg.rate_bps.min(MAX_DECAY_RATE_BPS) as i128;
+        match cfg.mode {
+            DecayMode::Linear => {
+                let total_bps = (bps * periods as i128).min(MAX_DECAY_RATE_BPS as i128);
+                let reduction = raw * total_bps / (MAX_DECAY_RATE_BPS as i128);
+                (raw - reduction).max(0) as i64
+            }
+            DecayMode::Exponential => {
+                let retain_bps = MAX_DECAY_RATE_BPS as i128 - bps;
+                let mut value = raw;
+                for _ in 0..periods {
+                    value = value * retain_bps / (MAX_DECAY_RATE_BPS as i128);
+                    if value <= 0 {
+                        return 0;
+                    }
+                }
+                value as i64
+            }
+        }
     }
 
     fn history_key(subject: &Address, reporter: &Address) -> (Symbol, Address, Address) {
@@ -1389,8 +1582,8 @@ mod tests {
         let reporter = Address::generate(&env);
         let subject = Address::generate(&env);
         client.add_reporter(&reporter);
-        client.set_min_interval(&admin, &300);
-        assert_eq!(client.get_min_interval(), 300);
+        client.set_min_interval(&admin, &20);
+        assert_eq!(client.get_min_interval(), 20);
 
         let reason = String::from_str(&env, "activity");
         client.submit_score(&reporter, &subject, &10, &reason);
@@ -1408,7 +1601,7 @@ mod tests {
     }
 
     #[test]
-    fn test_set_rate_limit_window_floor_enforced() {
+    fn test_set_min_interval_floor_enforced() {
         let (_env, admin, client) = setup();
         assert_eq!(
             client.try_set_min_interval(&admin, &(MIN_INTERVAL_FLOOR - 1)),
@@ -1417,7 +1610,7 @@ mod tests {
     }
 
     #[test]
-    fn test_set_rate_limit_window_ceiling_enforced() {
+    fn test_set_min_interval_ceiling_enforced() {
         let (_env, admin, client) = setup();
         assert_eq!(
             client.try_set_min_interval(&admin, &(MIN_INTERVAL_CEILING + 1)),
@@ -1426,7 +1619,7 @@ mod tests {
     }
 
     #[test]
-    fn test_set_rate_limit_window_boundary_values_allowed() {
+    fn test_set_min_interval_boundary_values_allowed() {
         let (_env, admin, client) = setup();
         client.set_min_interval(&admin, &MIN_INTERVAL_FLOOR);
         assert_eq!(client.get_min_interval(), MIN_INTERVAL_FLOOR);
@@ -1539,6 +1732,7 @@ mod tests {
         let keys = [
             ADMIN, REPORTER, DEF_THRESH, SUBJECT_CNT, SCORE_CNT,
             RECORD, HISTORY, RATE_LIMIT, DISPUTE, DISPUTE_CNT, MIN_INTERVAL_KEY,
+            DECAY_CFG, RPT_DECAY,
         ];
         for (i, left) in keys.iter().enumerate() {
             for right in keys.iter().skip(i + 1) {
@@ -1573,5 +1767,149 @@ mod tests {
         assert!(!client.is_paused());
         client.submit_score(&reporter, &subject, &25, &reason);
         assert_eq!(client.get_reputation(&subject).score, 75);
+    }
+
+    // ── Score decay (#657) ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_no_decay_by_default() {
+        let (env, _admin, client) = setup();
+        let reporter = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_reporter(&reporter);
+        let reason = String::from_str(&env, "activity");
+        client.submit_score(&reporter, &subject, &100, &reason);
+
+        env.ledger().with_mut(|li| li.timestamp += 30 * 86_400);
+        assert_eq!(client.get_reputation(&subject).score, 100);
+    }
+
+    #[test]
+    fn test_linear_decay_reduces_score_over_time() {
+        let (env, admin, client) = setup();
+        let reporter = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_reporter(&reporter);
+        client.set_decay_rate(&admin, &1_000, &DecayMode::Linear); // 10%/day
+        let reason = String::from_str(&env, "activity");
+        client.submit_score(&reporter, &subject, &100, &reason);
+
+        env.ledger().with_mut(|li| li.timestamp += 2 * 86_400); // 2 days -> 20% off
+        assert_eq!(client.get_reputation(&subject).score, 80);
+    }
+
+    #[test]
+    fn test_exponential_decay_compounds_differently_than_linear() {
+        let (env, admin, client) = setup();
+        let reporter = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_reporter(&reporter);
+        client.set_decay_rate(&admin, &1_000, &DecayMode::Exponential); // 10%/day compounding
+        let reason = String::from_str(&env, "activity");
+        client.submit_score(&reporter, &subject, &100, &reason);
+
+        env.ledger().with_mut(|li| li.timestamp += 2 * 86_400);
+        // 100 -> 90 (day 1) -> 81 (day 2), strictly above linear's 80.
+        assert_eq!(client.get_reputation(&subject).score, 81);
+    }
+
+    #[test]
+    fn test_decay_floors_at_zero_and_never_negative() {
+        let (env, admin, client) = setup();
+        let reporter = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_reporter(&reporter);
+        client.set_decay_rate(&admin, &5_000, &DecayMode::Linear); // 50%/day
+        let reason = String::from_str(&env, "activity");
+        client.submit_score(&reporter, &subject, &100, &reason);
+
+        env.ledger().with_mut(|li| li.timestamp += 10 * 86_400); // way past 100%
+        assert_eq!(client.get_reputation(&subject).score, 0);
+    }
+
+    #[test]
+    fn test_decayed_read_does_not_mutate_stored_raw_score() {
+        let (env, admin, client) = setup();
+        let reporter = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_reporter(&reporter);
+        client.set_decay_rate(&admin, &1_000, &DecayMode::Linear);
+        let reason = String::from_str(&env, "activity");
+        client.submit_score(&reporter, &subject, &100, &reason);
+
+        env.ledger().with_mut(|li| li.timestamp += 2 * 86_400);
+        assert_eq!(client.get_reputation(&subject).score, 80);
+
+        // A fresh submission accumulates on the raw (undecayed) stored score,
+        // not the decayed value just read.
+        env.ledger().with_mut(|li| li.sequence_number += 101);
+        client.submit_score(&reporter, &subject, &10, &reason);
+        assert_eq!(client.get_reputation(&subject).score, 110);
+    }
+
+    #[test]
+    fn test_reporter_decay_override_takes_precedence_over_default() {
+        let (env, admin, client) = setup();
+        let fast_reporter = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_reporter(&fast_reporter);
+
+        client.set_decay_rate(&admin, &0, &DecayMode::Linear); // default: no decay
+        client.set_reporter_decay_rate(&admin, &fast_reporter, &5_000, &DecayMode::Linear); // 50%/day
+
+        let reason = String::from_str(&env, "activity");
+        client.submit_score(&fast_reporter, &subject, &100, &reason);
+
+        env.ledger().with_mut(|li| li.timestamp += 86_400);
+        // Uses fast_reporter's override, not the zero default.
+        assert_eq!(client.get_reputation(&subject).score, 50);
+    }
+
+    #[test]
+    fn test_clear_reporter_decay_rate_reverts_to_default() {
+        let (env, admin, client) = setup();
+        let reporter = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_reporter(&reporter);
+
+        client.set_reporter_decay_rate(&admin, &reporter, &5_000, &DecayMode::Linear);
+        client.clear_reporter_decay_rate(&admin, &reporter);
+        assert_eq!(client.get_reporter_decay_rate(&reporter), client.get_decay_rate());
+
+        let reason = String::from_str(&env, "activity");
+        client.submit_score(&reporter, &subject, &100, &reason);
+        env.ledger().with_mut(|li| li.timestamp += 86_400);
+        // Default rate is 0, so no decay after clearing the override.
+        assert_eq!(client.get_reputation(&subject).score, 100);
+    }
+
+    #[test]
+    fn test_set_decay_rate_rejects_rate_over_100_percent() {
+        let (_env, admin, client) = setup();
+        assert_eq!(
+            client.try_set_decay_rate(&admin, &10_001, &DecayMode::Linear),
+            Err(Ok(ContractError::InvalidDecayRate))
+        );
+    }
+
+    #[test]
+    fn test_set_decay_rate_rejects_non_admin() {
+        let (env, _admin, client) = setup();
+        let attacker = Address::generate(&env);
+        assert_eq!(
+            client.try_set_decay_rate(&attacker, &1_000, &DecayMode::Linear),
+            Err(Ok(ContractError::Unauthorized))
+        );
+    }
+
+    #[test]
+    fn test_set_reporter_decay_rate_rejects_non_admin() {
+        let (env, _admin, client) = setup();
+        let attacker = Address::generate(&env);
+        let reporter = Address::generate(&env);
+        assert_eq!(
+            client.try_set_reporter_decay_rate(&attacker, &reporter, &1_000, &DecayMode::Linear),
+            Err(Ok(ContractError::Unauthorized))
+        );
     }
 }
