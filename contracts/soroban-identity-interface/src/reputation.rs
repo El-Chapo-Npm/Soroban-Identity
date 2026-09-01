@@ -1,8 +1,8 @@
 //! Stable trait ABI for the `reputation` contract.
 
 use reputation::{
-    ContractError, Reputation, ReportersPage, ReputationRecord, ReputationStorageStats,
-    ScoreEntriesPage, ScoreEntry,
+    ContractError, DecayConfig, DecayMode, Reputation, ReportersPage, ReputationRecord,
+    ReputationStorageStats, ScoreEntriesPage, ScoreEntry,
 };
 use soroban_sdk::{Address, BytesN, Env, String, Vec};
 
@@ -101,6 +101,22 @@ pub trait ReputationInterface {
         delta_index: u32,
         accepted: bool,
     ) -> Result<(), ContractError>;
+
+    fn set_decay_rate(env: Env, admin: Address, rate_bps: u32, mode: DecayMode) -> Result<(), ContractError>;
+
+    fn get_decay_rate(env: Env) -> DecayConfig;
+
+    fn set_reporter_decay_rate(
+        env: Env,
+        admin: Address,
+        reporter: Address,
+        rate_bps: u32,
+        mode: DecayMode,
+    ) -> Result<(), ContractError>;
+
+    fn clear_reporter_decay_rate(env: Env, admin: Address, reporter: Address) -> Result<(), ContractError>;
+
+    fn get_reporter_decay_rate(env: Env, reporter: Address) -> DecayConfig;
 }
 
 /// Blanket implementation delegating to `Reputation`'s existing
@@ -237,5 +253,31 @@ impl ReputationInterface for Reputation {
         accepted: bool,
     ) -> Result<(), ContractError> {
         Self::resolve_dispute(env, subject, reporter, delta_index, accepted)
+    }
+
+    fn set_decay_rate(env: Env, admin: Address, rate_bps: u32, mode: DecayMode) -> Result<(), ContractError> {
+        Self::set_decay_rate(env, admin, rate_bps, mode)
+    }
+
+    fn get_decay_rate(env: Env) -> DecayConfig {
+        Self::get_decay_rate(env)
+    }
+
+    fn set_reporter_decay_rate(
+        env: Env,
+        admin: Address,
+        reporter: Address,
+        rate_bps: u32,
+        mode: DecayMode,
+    ) -> Result<(), ContractError> {
+        Self::set_reporter_decay_rate(env, admin, reporter, rate_bps, mode)
+    }
+
+    fn clear_reporter_decay_rate(env: Env, admin: Address, reporter: Address) -> Result<(), ContractError> {
+        Self::clear_reporter_decay_rate(env, admin, reporter)
+    }
+
+    fn get_reporter_decay_rate(env: Env, reporter: Address) -> DecayConfig {
+        Self::get_reporter_decay_rate(env, reporter)
     }
 }
