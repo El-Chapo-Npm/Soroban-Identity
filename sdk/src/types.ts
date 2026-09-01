@@ -82,8 +82,19 @@ export interface Credential {
   claimsHash: string;
   signature: string; // hex
   issuedAt: number;
+  /**
+   * Unix timestamp (seconds) before which this credential is inactive.
+   * `0` means the credential is active immediately (no time-lock). #731
+   */
+  activationTime: number;
   expiresAt: number; // 0 = no expiry
   revoked: boolean;
+  /**
+   * `true` when the issuer has cancelled a pending time-locked activation
+   * before the `activationTime` was reached. A cancelled credential is
+   * permanently inactive. #731
+   */
+  activationCancelled: boolean;
 }
 
 /**
@@ -110,11 +121,13 @@ export interface RevokedCredential extends Credential {
  * - `UNKNOWN_ISSUER` — no credential was found for the given ID, or the
  *   credential's issuer is no longer registered.
  * - `INACTIVE_SUBJECT` — the subject's DID has been deactivated.
+ * - `not_yet_active` — the credential's `activationTime` has not been reached yet. #731
  */
 export type VerifyFailReason =
   | 'not_found'
   | 'revoked'
   | 'expired'
+  | 'not_yet_active'
   | 'unknown'
   | 'EXPIRED'
   | 'REVOKED'
@@ -335,10 +348,14 @@ export function validateConfig(
 export interface FeeEstimate {
   /** Base network fee in stroops. */
   baseFee: number;
-  /** Soroban resource fee in stroops. */
+  /** Soroban resource fee in stroops (after applying gas multiplier). */
   resourceFee: number;
   /** Total fee (baseFee + resourceFee) in stroops. */
   totalFee: number;
+  /** Gas multiplier applied to the resource fee (1.0 = no adjustment, 1.5 = 50% increase). */
+  gasMultiplier?: number;
+  /** Original resource fee before multiplier was applied (in stroops). */
+  originalResourceFee?: number;
 }
 
 export class SimulationError extends Error {

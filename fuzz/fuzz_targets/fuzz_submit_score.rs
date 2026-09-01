@@ -46,8 +46,8 @@ libfuzzer_sys::fuzz_target!(|input: SubmitScoreInput| {
     let client = ReputationClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
-    // Initialize with a permissive default threshold (0 score, 0 reporters)
-    let _ = client.try_initialize(&admin, &0, &0);
+    // Initialize with default thresholds
+    let _ = client.try_initialize(&admin);
 
     // Register a reporter
     let reporter = soroban_sdk::Address::generate(&env);
@@ -72,5 +72,5 @@ libfuzzer_sys::fuzz_target!(|input: SubmitScoreInput| {
     let _ = client.try_passes_sybil_check(&subject, &i64::MAX, &100);
 
     // get_history should not panic
-    let _ = client.try_get_history(&subject, &reporter);
+    let _ = client.try_get_history(&subject, &reporter, &0, &10, &None, &None);
 });

@@ -26,6 +26,10 @@ pub enum ContractError {
     ServiceAlreadyExists = 12,
     MaxServicesReached = 13,
     ContractPaused = 14,
+    /// `create_dids_batch` was called with more than [`MAX_BATCH_DIDS`] entries.
+    BatchTooLarge = 15,
+    /// `create_dids_batch` was called with an empty entry list.
+    EmptyBatch = 16,
 }
 
 /// Version returned by `ping` for deployment health checks.
@@ -54,6 +58,10 @@ const TTL_LEDGERS: u32 = 6_312_000;
 /// Maximum number of service endpoints allowed on a DID document.
 /// Exceeding this limit returns [`ContractError::MaxServicesReached`].
 const MAX_SERVICES: u32 = 10;
+
+/// Maximum number of entries accepted by [`IdentityRegistry::create_dids_batch`]
+/// in a single call, chosen to stay well within Soroban instruction limits.
+pub const MAX_BATCH_DIDS: u32 = 50;
 
 // ── Data types ────────────────────────────────────────────────────────────────
 
@@ -232,34 +240,48 @@ impl IdentityRegistry {
     pub fn create_did(env: Env, controller: Address, metadata: Map<String, String>) -> Result<String, ContractError> {
         controller.require_auth();
         Self::require_not_paused(&env)?;
-        let storage = env.storage().persistent();
-        let key = Self::did_key(&env, &controller);
-        if storage.has(&key) {
-            return Err(ContractError::DidAlreadyExists);
-        }
-        Self::validate_metadata(&metadata)?;
-        let did_id = Self::build_did_string(&env, &controller);
-        if !Self::validate_did_format(&env, &did_id) {
-            return Err(ContractError::DidNotFound);
-        }
         let now = env.ledger().timestamp();
-        let doc = DidDocument {
-            id: did_id.clone(),
-            controller: controller.clone(),
-            metadata,
-            created_at: now,
-            updated_at: now,
-            active: true,
-            services: Vec::new(&env),
-        };
-        storage.set(&key, &doc);
-        storage.extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
-        let count: u32 = env.storage().instance().get(&DID_COUNT).unwrap_or(0);
-        env.storage().instance().set(&DID_COUNT, &(count + 1));
-        let total: u32 = env.storage().instance().get(&TOTAL_DIDS).unwrap_or(0);
-        env.storage().instance().set(&TOTAL_DIDS, &(total + 1));
-        env.events().publish((IDENTITY, symbol_short!("created")), (EVENT_VERSION, controller, now));
-        Ok(did_id)
+        Self::create_did_unchecked(&env, &controller, metadata, now)
+    }
+
+    /// Creates multiple DIDs (up to [`MAX_BATCH_DIDS`]) in one transaction;
+    /// every controller must sign. Fully validated before any write, so a
+    /// rejected batch leaves no partial result. Returns ids in entry order.
+    pub fn create_dids_batch(
+        env: Env,
+        entries: Vec<(Address, Map<String, String>)>,
+    ) -> Result<Vec<String>, ContractError> {
+        Self::require_not_paused(&env)?;
+        if entries.is_empty() {
+            return Err(ContractError::EmptyBatch);
+        }
+        if entries.len() > MAX_BATCH_DIDS {
+            return Err(ContractError::BatchTooLarge);
+        }
+
+        // Validate every entry — existence (including duplicates within this
+        // batch), metadata shape, and auth — before writing anything. Duplicate
+        // detection runs before `require_auth` so a repeated controller is
+        // rejected without asking the same address to authorize twice.
+        let storage = env.storage().persistent();
+        let mut seen: Vec<Address> = Vec::new(&env);
+        for (controller, metadata) in entries.iter() {
+            let key = Self::did_key(&env, &controller);
+            if storage.has(&key) || seen.contains(&controller) {
+                return Err(ContractError::DidAlreadyExists);
+            }
+            seen.push_back(controller.clone());
+            controller.require_auth();
+            Self::validate_metadata(&metadata)?;
+        }
+
+        let now = env.ledger().timestamp();
+        let mut created_ids = Vec::new(&env);
+        for (controller, metadata) in entries.iter() {
+            let did_id = Self::create_did_unchecked(&env, &controller, metadata, now)?;
+            created_ids.push_back(did_id);
+        }
+        Ok(created_ids)
     }
 
     /// Appends a service endpoint to an existing DID document.
@@ -507,6 +529,44 @@ impl IdentityRegistry {
             return Err(ContractError::ContractPaused);
         }
         Ok(())
+    }
+
+    /// Core DID-creation logic shared by [`Self::create_did`] and
+    /// [`Self::create_dids_batch`]. Caller must have already authorized
+    /// `controller` (via `require_auth`) and confirmed the contract isn't paused.
+    fn create_did_unchecked(
+        env: &Env,
+        controller: &Address,
+        metadata: Map<String, String>,
+        now: u64,
+    ) -> Result<String, ContractError> {
+        let storage = env.storage().persistent();
+        let key = Self::did_key(env, controller);
+        if storage.has(&key) {
+            return Err(ContractError::DidAlreadyExists);
+        }
+        Self::validate_metadata(&metadata)?;
+        let did_id = Self::build_did_string(env, controller);
+        if !Self::validate_did_format(env, &did_id) {
+            return Err(ContractError::DidNotFound);
+        }
+        let doc = DidDocument {
+            id: did_id.clone(),
+            controller: controller.clone(),
+            metadata,
+            created_at: now,
+            updated_at: now,
+            active: true,
+            services: Vec::new(env),
+        };
+        storage.set(&key, &doc);
+        storage.extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+        let count: u32 = env.storage().instance().get(&DID_COUNT).unwrap_or(0);
+        env.storage().instance().set(&DID_COUNT, &(count + 1));
+        let total: u32 = env.storage().instance().get(&TOTAL_DIDS).unwrap_or(0);
+        env.storage().instance().set(&TOTAL_DIDS, &(total + 1));
+        env.events().publish((IDENTITY, symbol_short!("created")), (EVENT_VERSION, controller.clone(), now));
+        Ok(did_id)
     }
 
     fn validate_metadata(metadata: &Map<String, String>) -> Result<(), ContractError> {
@@ -1067,5 +1127,120 @@ mod tests {
         let id = doc.id.to_string();
         assert!(id.starts_with("did:stellar:"));
         assert_eq!(doc.id.len(), 68);
+    }
+
+    // ── create_dids_batch tests (#654) ────────────────────────────────────────
+
+    #[test]
+    fn test_create_dids_batch_creates_all_and_returns_ids_in_order() {
+        let (env, client) = setup();
+        let u1 = Address::generate(&env);
+        let u2 = Address::generate(&env);
+        let u3 = Address::generate(&env);
+
+        let mut entries = Vec::new(&env);
+        entries.push_back((u1.clone(), Map::new(&env)));
+        entries.push_back((u2.clone(), Map::new(&env)));
+        entries.push_back((u3.clone(), Map::new(&env)));
+
+        let ids = client.create_dids_batch(&entries);
+        assert_eq!(ids.len(), 3);
+
+        assert!(client.has_active_did(&u1));
+        assert!(client.has_active_did(&u2));
+        assert!(client.has_active_did(&u3));
+        assert_eq!(client.get_did_count(), 3);
+
+        let doc1 = client.resolve_did(&u1);
+        assert_eq!(doc1.id, ids.get(0).unwrap());
+    }
+
+    #[test]
+    fn test_create_dids_batch_rejects_empty() {
+        let (env, client) = setup();
+        let entries: Vec<(Address, Map<String, String>)> = Vec::new(&env);
+        assert_eq!(client.try_create_dids_batch(&entries), Err(Ok(ContractError::EmptyBatch)));
+    }
+
+    #[test]
+    fn test_create_dids_batch_enforces_size_cap() {
+        let (env, client) = setup();
+        let mut entries = Vec::new(&env);
+        for _ in 0..(MAX_BATCH_DIDS + 1) {
+            entries.push_back((Address::generate(&env), Map::new(&env)));
+        }
+        assert_eq!(client.try_create_dids_batch(&entries), Err(Ok(ContractError::BatchTooLarge)));
+
+        // Exactly MAX_BATCH_DIDS succeeds and nothing was written by the rejected call above.
+        entries.pop_back();
+        let ids = client.create_dids_batch(&entries);
+        assert_eq!(ids.len(), MAX_BATCH_DIDS);
+    }
+
+    #[test]
+    fn test_create_dids_batch_rejects_duplicate_controller_in_batch() {
+        let (env, client) = setup();
+        let user = Address::generate(&env);
+        let mut entries = Vec::new(&env);
+        entries.push_back((user.clone(), Map::new(&env)));
+        entries.push_back((user.clone(), Map::new(&env)));
+
+        let result = client.try_create_dids_batch(&entries);
+        assert_eq!(result, Err(Ok(ContractError::DidAlreadyExists)));
+        // Nothing should have been written — not even the first occurrence.
+        assert!(!client.did_exists(&user));
+    }
+
+    #[test]
+    fn test_create_dids_batch_rejects_controller_with_existing_did() {
+        let (env, client) = setup();
+        let user = Address::generate(&env);
+        client.create_did(&user, &Map::new(&env));
+
+        let other = Address::generate(&env);
+        let mut entries = Vec::new(&env);
+        entries.push_back((other.clone(), Map::new(&env)));
+        entries.push_back((user.clone(), Map::new(&env)));
+
+        let result = client.try_create_dids_batch(&entries);
+        assert_eq!(result, Err(Ok(ContractError::DidAlreadyExists)));
+        // The batch is atomic: `other` must not have been created either.
+        assert!(!client.did_exists(&other));
+    }
+
+    #[test]
+    fn test_create_dids_batch_validates_metadata_before_writing() {
+        let (env, client) = setup();
+        let u1 = Address::generate(&env);
+        let u2 = Address::generate(&env);
+
+        let mut bad_metadata: Map<String, String> = Map::new(&env);
+        bad_metadata.set(
+            String::from_str(&env, "aaaaaaaaaabbbbbbbbbbccccccccccddddddddddeeeeeeeeeefffff1234567890"),
+            String::from_str(&env, "value"),
+        );
+
+        let mut entries = Vec::new(&env);
+        entries.push_back((u1.clone(), Map::new(&env)));
+        entries.push_back((u2.clone(), bad_metadata));
+
+        let result = client.try_create_dids_batch(&entries);
+        assert_eq!(result, Err(Ok(ContractError::MetadataTooLong)));
+        assert!(!client.did_exists(&u1));
+    }
+
+    #[test]
+    fn test_create_dids_batch_blocked_when_paused() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityRegistry);
+        let client = IdentityRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        client.pause(&admin);
+
+        let mut entries = Vec::new(&env);
+        entries.push_back((Address::generate(&env), Map::new(&env)));
+        assert_eq!(client.try_create_dids_batch(&entries), Err(Ok(ContractError::ContractPaused)));
     }
 }

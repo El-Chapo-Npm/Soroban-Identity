@@ -2,6 +2,9 @@ import { lazy, Suspense, useState, useEffect, useCallback, useRef } from "react"
 import { useTranslation } from "react-i18next";
 import { SorobanRpc } from "@stellar/stellar-sdk";
 import LoadingFallback from "./components/LoadingFallback";
+import KeyboardShortcutsModal from "./components/KeyboardShortcutsModal";
+import { useKeyboardShortcuts, useSequentialShortcuts } from "./hooks/useKeyboardShortcuts";
+import { useKeyboardShortcutsContext } from "./context/KeyboardShortcutsContext";
 
 // Tab panels are route-like application surfaces. Keep the initial identity
 // route small and fetch the credentials route only when it is needed.
@@ -16,7 +19,10 @@ import Toast from "./components/Toast";
 import { ToastProvider } from "./context/ToastContext";
 import { useWallet } from "./hooks/useWallet";
 import { useCredentialExpiryCheck } from "./hooks/useCredentialExpiryCheck";
+import { useTheme } from "./context/ThemeContext";
 import { useTheme, cycleTheme, getThemeIcon, getThemeLabel } from "./hooks/useTheme";
+import { useServiceWorker } from "./hooks/useServiceWorker";
+import OfflineIndicator from "./components/OfflineIndicator";
 import {
   DEFAULT_NETWORK,
   NETWORK_CONFIGS,
@@ -31,6 +37,8 @@ import type { Credential } from "../../sdk/src/types";
 const SUPPORTED_LOCALES: { code: string; label: string }[] = [
   { code: "en", label: "EN" },
   { code: "es", label: "ES" },
+  { code: "fr", label: "FR" },
+  { code: "zh", label: "中文" },
 ];
 
 export enum Tab {
@@ -47,10 +55,26 @@ export default function App() {
   const [verifyId, setVerifyId] = useState<string | null>(null);
   const networkConfig = NETWORK_CONFIGS[activeNetwork];
   const wallet = useWallet(networkConfig);
+  const { isDark, toggleTheme } = useTheme();
   const [theme, setTheme, isDarkMode] = useTheme();
   const { t, i18n } = useTranslation();
   const [isConnected, setIsConnected] = useState<boolean | null>(null);
   const [uninitializedContracts, setUninitializedContracts] = useState<string[]>([]);
+  const [menuOpen, setMenuOpen] = useState(false);
+  
+  // Keyboard shortcuts
+  const { enabled: shortcutsEnabled, toggleHelp: toggleShortcutsHelp, showHelp: showShortcutsHelp } = useKeyboardShortcutsContext();
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Close the mobile nav drawer on Escape
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [menuOpen]);
 
   // Check for verify query param on load
   useEffect(() => {
@@ -142,9 +166,90 @@ export default function App() {
     tabRefs.current[nextTab]?.focus();
   };
 
+  // Register keyboard shortcuts
+  useKeyboardShortcuts({
+    enabled: shortcutsEnabled,
+    shortcuts: [
+      {
+        key: 'k',
+        ctrl: true,
+        description: t('shortcuts.search'),
+        category: 'actions',
+        handler: () => {
+          // Focus search input if it exists
+          searchInputRef.current?.focus();
+        },
+      },
+      {
+        key: 'n',
+        ctrl: true,
+        description: t('shortcuts.createCredential'),
+        category: 'actions',
+        handler: () => {
+          // Switch to credentials tab
+          setTab(Tab.Credentials);
+          // Note: Actual credential creation would be triggered in CredentialsPanel
+        },
+      },
+      {
+        key: 't',
+        ctrl: true,
+        shift: true,
+        description: t('shortcuts.toggleTheme'),
+        category: 'ui',
+        handler: () => {
+          setTheme(cycleTheme(theme));
+        },
+      },
+      {
+        key: '?',
+        description: t('shortcuts.showHelp'),
+        category: 'ui',
+        handler: () => {
+          toggleShortcutsHelp();
+        },
+      },
+      {
+        key: '/',
+        ctrl: true,
+        description: t('shortcuts.showHelp'),
+        category: 'ui',
+        handler: () => {
+          toggleShortcutsHelp();
+        },
+      },
+      {
+        key: 'Escape',
+        description: t('shortcuts.closeDialog'),
+        category: 'ui',
+        handler: () => {
+          if (showShortcutsHelp) {
+            toggleShortcutsHelp();
+          } else if (menuOpen) {
+            setMenuOpen(false);
+          }
+        },
+        preventDefault: false,
+      },
+    ],
+  });
+
+  // Sequential shortcuts for navigation (g+d, g+c)
+  useSequentialShortcuts({
+    'g,d': () => {
+      setTab(Tab.Identity);
+      tabRefs.current[Tab.Identity]?.focus();
+    },
+    'g,c': () => {
+      setTab(Tab.Credentials);
+      tabRefs.current[Tab.Credentials]?.focus();
+    },
+  }, { enabled: shortcutsEnabled });
+
   return (
     <ToastProvider>
       <Toast />
+      <KeyboardShortcutsModal isOpen={showShortcutsHelp} onClose={toggleShortcutsHelp} />
       <a className="skip-link" href="#main-content">
         {t("a11y.skipToContent")}
       </a>
@@ -152,7 +257,19 @@ export default function App() {
       <header style={{ position: "relative" }}>
         <h1>{t("app.title")}</h1>
         <p>{t("app.subtitle")}</p>
+        <button
+          type="button"
+          className="hamburger-btn"
+          aria-label={menuOpen ? "Close menu" : "Open menu"}
+          aria-expanded={menuOpen}
+          aria-controls="mobile-header-actions"
+          onClick={() => setMenuOpen((v) => !v)}
+        >
+          <span className={`hamburger-icon${menuOpen ? " open" : ""}`} />
+        </button>
         <div
+          id="mobile-header-actions"
+          className={`header-actions${menuOpen ? " open" : ""}`}
           style={{
             position: "absolute",
             top: "1rem",
@@ -220,6 +337,8 @@ export default function App() {
           </label>
           <button
             className="theme-toggle"
+            onClick={toggleTheme}
+            aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
             onClick={() => setTheme(cycleTheme(theme))}
             aria-label={`Switch theme. Current: ${theme === 'system' ? 'System' : theme === 'light' ? 'Light' : 'Dark'}`}
             title={`Theme: ${theme === 'system' ? 'System' : theme === 'light' ? 'Light' : 'Dark'}`}
@@ -228,6 +347,11 @@ export default function App() {
           </button>
           <WalletButton wallet={wallet} />
         </div>
+        <div
+          className={`mobile-drawer-backdrop${menuOpen ? " open" : ""}`}
+          onClick={() => setMenuOpen(false)}
+          aria-hidden="true"
+        />
       </header>
 
       {uninitializedContracts.length > 0 && (

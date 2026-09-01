@@ -4,6 +4,20 @@ import { SorobanIdentityError, wrapNetworkError } from "./errors";
 export interface TxOptions {
   pollInterval?: number;
   pollRetries?: number;
+  /**
+   * Gas multiplier to apply to the estimated resource fee.
+   * 
+   * Useful for batch operations where simulation tends to underestimate
+   * gas requirements. A value of 1.5 means the fee will be increased by 50%.
+   * 
+   * @default 1.0 (no adjustment)
+   * @example
+   * ```ts
+   * // For batch operations with 20+ items
+   * await executeTransaction(server, tx, signer, { gasMultiplier: 1.5 });
+   * ```
+   */
+  gasMultiplier?: number;
 }
 
 function isNetworkError(err: unknown): boolean {
@@ -27,6 +41,16 @@ export async function executeTransaction(
   let prepared: Transaction;
   try {
     prepared = (await server.prepareTransaction(tx)) as Transaction;
+    
+    // Apply gas multiplier if specified (for batch operations)
+    const gasMultiplier = options?.gasMultiplier ?? 1.0;
+    if (gasMultiplier !== 1.0) {
+      const currentFee = parseInt(prepared.fee, 10);
+      const adjustedFee = Math.ceil(currentFee * gasMultiplier);
+      // Create a new transaction with the adjusted fee
+      prepared = new Transaction(prepared.toEnvelope(), prepared.networkPassphrase);
+      (prepared as any)._fee = adjustedFee.toString();
+    }
   } catch (err) {
     wrapNetworkError(err, rpcUrl, "prepareTransaction");
   }

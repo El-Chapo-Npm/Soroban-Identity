@@ -1,8 +1,8 @@
 //! Stable trait ABI for the `credential-manager` contract.
 
 use credential_manager::{
-    Credential, CredentialIdsPage, CredentialManager, CredentialStorageStats, CredentialType,
-    ContractError, IssuersPage,
+    Credential, CredentialIdsPage, CredentialManager, CredentialStorageStats,
+    CredentialTypeDescriptor, CredentialType, ContractError, IssuersPage,
 };
 use soroban_sdk::{Address, Bytes, BytesN, Env, Map, String, Vec};
 
@@ -50,6 +50,58 @@ pub trait CredentialManagerInterface {
         expires_at: u64,
         schema_hash: Option<BytesN<32>>,
     ) -> Result<BytesN<32>, ContractError>;
+
+    // ── Credential type registry (#656) ─────────────────────────────────────
+
+    fn compute_claims_schema_hash(env: Env, claims: Map<String, String>) -> BytesN<32>;
+
+    fn register_credential_type(
+        env: Env,
+        admin: Address,
+        type_name: String,
+        schema_hash: BytesN<32>,
+        metadata: Map<String, String>,
+    ) -> Result<(), ContractError>;
+
+    fn deactivate_credential_type(env: Env, admin: Address, type_name: String) -> Result<(), ContractError>;
+
+    fn get_credential_type(env: Env, type_name: String) -> Result<CredentialTypeDescriptor, ContractError>;
+
+    fn list_credential_types(env: Env) -> Vec<String>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn issue_typed_credential(
+        env: Env,
+        issuer: Address,
+        subject: Address,
+        type_name: String,
+        credential_type: CredentialType,
+        claims: Map<String, String>,
+        claims_hash: BytesN<32>,
+        signature: Bytes,
+        expires_at: u64,
+    ) -> Result<BytesN<32>, ContractError>;
+
+    // ── Credential delegation (#655) ────────────────────────────────────────
+
+    fn delegate_verification(
+        env: Env,
+        subject: Address,
+        delegate: Address,
+        credential_id: BytesN<32>,
+        expires_at: u64,
+    ) -> Result<(), ContractError>;
+
+    fn revoke_delegation(env: Env, subject: Address, delegate: Address) -> Result<(), ContractError>;
+
+    fn is_delegate_authorized(env: Env, subject: Address, delegate: Address, credential_id: BytesN<32>) -> bool;
+
+    fn verify_credential_as_delegate(
+        env: Env,
+        delegate: Address,
+        subject: Address,
+        credential_id: BytesN<32>,
+    ) -> Result<(), ContractError>;
 
     fn revoke_credential(
         env: Env,
@@ -163,6 +215,75 @@ impl CredentialManagerInterface for CredentialManager {
             expires_at,
             schema_hash,
         )
+    }
+
+    fn compute_claims_schema_hash(env: Env, claims: Map<String, String>) -> BytesN<32> {
+        Self::compute_claims_schema_hash(env, claims)
+    }
+
+    fn register_credential_type(
+        env: Env,
+        admin: Address,
+        type_name: String,
+        schema_hash: BytesN<32>,
+        metadata: Map<String, String>,
+    ) -> Result<(), ContractError> {
+        Self::register_credential_type(env, admin, type_name, schema_hash, metadata)
+    }
+
+    fn deactivate_credential_type(env: Env, admin: Address, type_name: String) -> Result<(), ContractError> {
+        Self::deactivate_credential_type(env, admin, type_name)
+    }
+
+    fn get_credential_type(env: Env, type_name: String) -> Result<CredentialTypeDescriptor, ContractError> {
+        Self::get_credential_type(env, type_name)
+    }
+
+    fn list_credential_types(env: Env) -> Vec<String> {
+        Self::list_credential_types(env)
+    }
+
+    fn issue_typed_credential(
+        env: Env,
+        issuer: Address,
+        subject: Address,
+        type_name: String,
+        credential_type: CredentialType,
+        claims: Map<String, String>,
+        claims_hash: BytesN<32>,
+        signature: Bytes,
+        expires_at: u64,
+    ) -> Result<BytesN<32>, ContractError> {
+        Self::issue_typed_credential(
+            env, issuer, subject, type_name, credential_type, claims, claims_hash, signature, expires_at,
+        )
+    }
+
+    fn delegate_verification(
+        env: Env,
+        subject: Address,
+        delegate: Address,
+        credential_id: BytesN<32>,
+        expires_at: u64,
+    ) -> Result<(), ContractError> {
+        Self::delegate_verification(env, subject, delegate, credential_id, expires_at)
+    }
+
+    fn revoke_delegation(env: Env, subject: Address, delegate: Address) -> Result<(), ContractError> {
+        Self::revoke_delegation(env, subject, delegate)
+    }
+
+    fn is_delegate_authorized(env: Env, subject: Address, delegate: Address, credential_id: BytesN<32>) -> bool {
+        Self::is_delegate_authorized(env, subject, delegate, credential_id)
+    }
+
+    fn verify_credential_as_delegate(
+        env: Env,
+        delegate: Address,
+        subject: Address,
+        credential_id: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        Self::verify_credential_as_delegate(env, delegate, subject, credential_id)
     }
 
     fn revoke_credential(

@@ -88,8 +88,8 @@ export async function recoverOrphanedFile(filePath) {
     throw error;
   }
 
-  // Match files written by the new writeAtomic: <base>.<6-hex-chars>.tmp
-  const tempPattern = new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.[0-9a-f]{6}\\.tmp$`);
+  // Match files written by writeAtomic: <base>.tmp or <base>.<hex>.tmp
+  const tempPattern = new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\.[0-9a-f]{6})?\\.tmp$`);
   const orphans = entries.filter((e) => tempPattern.test(e));
 
   if (orphans.length === 0) return false;
@@ -102,6 +102,7 @@ export async function recoverOrphanedFile(filePath) {
     if (error.code !== 'ENOENT') throw error;
   }
 
+  let recovered = false;
   for (const orphan of orphans) {
     const orphanPath = path.join(dir, orphan);
     if (!canonicalExists) {
@@ -109,13 +110,14 @@ export async function recoverOrphanedFile(filePath) {
       logger.info({ filePath, orphanPath }, 'Recovering orphaned .tmp file');
       await fs.rename(orphanPath, filePath);
       canonicalExists = true;
+      recovered = true;
     } else {
       logger.info({ filePath, orphanPath }, 'Cleaning up orphaned .tmp file (canonical exists)');
       await fs.unlink(orphanPath);
     }
   }
 
-  return true;
+  return recovered;
 }
 
 let lastCheckedDate = null;
@@ -183,7 +185,10 @@ export async function ensureDataDir(config) {
   await cleanOldAuditLogs(config);
   
   // Recover orphaned .tmp files on startup
-  await recoverOrphanedFile(config.credentialStorePath);
+  const recovered = await recoverOrphanedFile(config.credentialStorePath);
+  if (recovered) {
+    clearCredentialCache(config);
+  }
 }
 
 export async function appendAuditLog(config, entry) {
@@ -364,6 +369,60 @@ export async function revokeAndPersistCredential(config, id) {
     release();
   }
 }
+
+export class ConcurrencyConflictError extends Error {
+  constructor(id, expectedVersion, currentVersion) {
+    super(`Conflict updating credential "${id}": expected version ${expectedVersion}, but current version is ${currentVersion}`);
+    this.name = 'ConcurrencyConflictError';
+    this.id = id;
+    this.expectedVersion = expectedVersion;
+    this.currentVersion = currentVersion;
+  }
+}
+
+/**
+ * Atomically update an existing credential under a per-file mutex with optimistic concurrency control.
+ *
+ * @param {object} config
+ * @param {string} id
+ * @param {object} updates
+ * @param {number|string|undefined} expectedVersion
+ * @returns {Promise<object|null>} The updated credential or null if not found
+ */
+export async function updateAndPersistCredential(config, id, updates, expectedVersion = undefined) {
+  const storePath = path.resolve(config.credentialStorePath);
+  const release = await _acquireFileLock(storePath);
+  try {
+    const current = await readCredentials(config);
+    const index = current.findIndex((c) => c.id === id);
+    if (index === -1) return null;
+
+    const existing = current[index];
+    const currentVersion = existing.version ?? existing.updatedAt ?? existing.issuedAt ?? 1;
+
+    if (expectedVersion !== undefined && expectedVersion !== null && String(expectedVersion) !== String(currentVersion)) {
+      throw new ConcurrencyConflictError(id, expectedVersion, currentVersion);
+    }
+
+    const updatedAt = new Date().toISOString();
+    const nextVersion = typeof currentVersion === 'number' ? currentVersion + 1 : (Number.isFinite(Number(currentVersion)) ? Number(currentVersion) + 1 : Date.now());
+    const updated = {
+      ...existing,
+      ...updates,
+      id: existing.id,
+      version: nextVersion,
+      updatedAt,
+    };
+
+    const nextList = [...current];
+    nextList[index] = updated;
+    await writeCredentials(config, nextList);
+    return updated;
+  } finally {
+    release();
+  }
+}
+
 
 
 // ── Expiry scanner watermark persistence ──────────────────────────────────────
