@@ -81,7 +81,18 @@ export function useContractEvents(filter?: ContractEventFilter) {
       setError('Event stream disconnected');
     };
 
+    const handleClose = () => {
+      source.close();
+      sourceRef.current = null;
+      setConnected(false);
+    };
+
+    window.addEventListener('beforeunload', handleClose);
+    window.addEventListener('pagehide', handleClose);
+
     return () => {
+      window.removeEventListener('beforeunload', handleClose);
+      window.removeEventListener('pagehide', handleClose);
       source.close();
       sourceRef.current = null;
       setConnected(false);

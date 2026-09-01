@@ -810,6 +810,7 @@ impl Reputation {
 
         let now = env.ledger().timestamp();
         if accepted {
+            let now = env.ledger().timestamp();
             let history_key = Self::history_key(&subject, &reporter);
             let mut history: Vec<ScoreEntry> = env
                 .storage()
@@ -1371,7 +1372,7 @@ mod tests {
 
     #[test]
     fn test_double_initialize_returns_error() {
-        let (env, admin, client) = setup();
+        let (_env, admin, client) = setup();
         assert_eq!(
             client.try_initialize(&admin),
             Err(Ok(ContractError::AlreadyInitialized))
@@ -1595,7 +1596,7 @@ mod tests {
         );
 
         // Past the new window — accepted
-        env.ledger().with_mut(|li| li.sequence_number += 10);
+        env.ledger().with_mut(|li| li.sequence_number += 300);
         client.submit_score(&reporter, &subject, &10, &reason);
     }
 
@@ -1603,7 +1604,7 @@ mod tests {
     fn test_set_min_interval_floor_enforced() {
         let (_env, admin, client) = setup();
         assert_eq!(
-            client.try_set_rate_limit_window(&admin, &(MIN_RATE_LIMIT_WINDOW - 1)),
+            client.try_set_min_interval(&admin, &(MIN_INTERVAL_FLOOR - 1)),
             Err(Ok(ContractError::InvalidMinInterval))
         );
     }
@@ -1612,7 +1613,7 @@ mod tests {
     fn test_set_min_interval_ceiling_enforced() {
         let (_env, admin, client) = setup();
         assert_eq!(
-            client.try_set_rate_limit_window(&admin, &(MAX_RATE_LIMIT_WINDOW + 1)),
+            client.try_set_min_interval(&admin, &(MIN_INTERVAL_CEILING + 1)),
             Err(Ok(ContractError::InvalidMinInterval))
         );
     }
@@ -1634,6 +1635,23 @@ mod tests {
             client.try_set_min_interval(&attacker, &500),
             Err(Ok(ContractError::Unauthorized))
         );
+    }
+
+    #[test]
+    fn test_reputation_score_overflow_saturates_at_max() {
+        let (env, _admin, client) = setup();
+        let reporter = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_reporter(&reporter);
+        let reason = String::from_str(&env, "large_score");
+        client.submit_score(&reporter, &subject, &i64::MAX, &reason);
+        assert_eq!(client.get_reputation(&subject).score, i64::MAX);
+
+        // Advance past rate limit and add another positive score
+        env.ledger().with_mut(|li| li.sequence_number += 150);
+        client.submit_score(&reporter, &subject, &100, &reason);
+        // Does not overflow to negative; saturates safely at i64::MAX
+        assert_eq!(client.get_reputation(&subject).score, i64::MAX);
     }
 
     #[test]
