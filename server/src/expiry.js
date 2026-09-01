@@ -132,19 +132,69 @@ export function findExpiringCredentials(
 }
 
 /**
- * Cursor-based pagination over an array sorted by `id`.
- * The cursor is the last-seen `id`; pass null/undefined for the first page.
+ * Encode an item id as an opaque cursor. Kept as a thin base64url wrapper
+ * around `{ id }` rather than the raw id, so the value in a response is
+ * clearly a token to pass back verbatim rather than something to parse.
  */
-export function paginateCursor(items, { limit = 50, cursor = null } = {}) {
+export function encodeCursor(id) {
+  return Buffer.from(JSON.stringify({ id }), 'utf8').toString('base64url');
+}
+
+/**
+ * Decode a cursor produced by `encodeCursor`. Falls back to treating the
+ * input as a raw id when it isn't validly-encoded JSON, so a client (or an
+ * older caller) that passes a bare id string still works rather than
+ * silently restarting at the first page.
+ */
+export function decodeCursor(cursor) {
+  if (!cursor) return null;
+  try {
+    const decoded = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+    if (decoded && typeof decoded.id === 'string') return decoded.id;
+  } catch {
+    // Not one of our encoded cursors — fall through and treat it as a raw id.
+  }
+  return cursor;
+}
+
+/**
+ * Cursor-based pagination over an array sorted by `id`.
+ *
+ * `direction: 'next'` (the default) returns the page immediately after the
+ * cursor; `direction: 'prev'` returns the page immediately before it, in the
+ * same forward order, so a client can walk backward through results without
+ * re-deriving an offset. Both directions return both `nextCursor` and
+ * `previousCursor` so a client can page either way from any page.
+ *
+ * An unresolvable cursor (unknown or removed id) is treated as "start of
+ * list" for `next` and "end of list" for `prev`, rather than raising an
+ * error — the cursor may simply refer to an item that has since been
+ * deleted.
+ */
+export function paginateCursor(items, { limit = 50, cursor = null, direction = 'next' } = {}) {
   const safeLimit = Math.min(200, Math.max(1, Number.parseInt(limit, 10) || 50));
-  const startIndex = cursor
-    ? items.findIndex((item) => item.id === cursor) + 1
-    : 0;
+  const decodedId = decodeCursor(cursor);
+  const anchorIndex = decodedId !== null ? items.findIndex((item) => item.id === decodedId) : -1;
+
+  if (direction === 'prev') {
+    const endIndex = anchorIndex === -1 ? items.length : anchorIndex;
+    const startIndex = Math.max(0, endIndex - safeLimit);
+    const page = items.slice(startIndex, endIndex);
+    return {
+      items: page,
+      nextCursor: page.length > 0 ? encodeCursor(page[page.length - 1].id) : null,
+      previousCursor: startIndex > 0 ? encodeCursor(items[startIndex].id) : null,
+    };
+  }
+
+  const startIndex = anchorIndex === -1 ? 0 : anchorIndex + 1;
   const page = items.slice(startIndex, startIndex + safeLimit);
-  const nextCursor = page.length === safeLimit && startIndex + safeLimit < items.length
-    ? page[page.length - 1].id
-    : null;
-  return { items: page, nextCursor };
+  const nextCursor =
+    page.length === safeLimit && startIndex + safeLimit < items.length
+      ? encodeCursor(page[page.length - 1].id)
+      : null;
+  const previousCursor = startIndex > 0 && page.length > 0 ? encodeCursor(page[0].id) : null;
+  return { items: page, nextCursor, previousCursor };
 }
 
 export function paginate(items, { page = 1, pageSize = 50 } = {}) {

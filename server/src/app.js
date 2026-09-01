@@ -106,6 +106,7 @@ export function createApp({
   redisClient = didCache?.client ?? null,
   webhookService = new WebhookDeliveryService(config),
   apiKeyService = new ApiKeyService(config),
+  oauthService = new OAuthService(config),
   rateLimiter = null,
   accessLogSink = null,
   realtime = null,
@@ -659,7 +660,8 @@ export function createApp({
         }
 
 
-        // #390: paginated credential list
+        // #390: paginated credential list. #746: opaque cursors, walkable in
+        // either direction. #747: optional `?fields=` projection.
         if (req.method === "GET" && pathname === "/credentials") {
           const validated = validateRequest(res, schemas.listCredentials, {
             query: url.searchParams,
@@ -667,9 +669,10 @@ export function createApp({
           if (!validated.ok) return;
           const limitNum = validated.data.query.limit ?? 50;
           const credentials = await readCredentials(config);
-          const { items, nextCursor } = paginateCursor(credentials, {
+          const { items, nextCursor, previousCursor } = paginateCursor(credentials, {
             limit: limitNum,
             cursor: validated.data.query.cursor ?? null,
+            direction: validated.data.query.direction ?? "next",
           });
           return sendFormatted(req, res, 200, { items, nextCursor });
 
@@ -680,37 +683,73 @@ export function createApp({
               {
                 items: items.map((item) => vcSerializer.serialize(item)),
                 nextCursor,
+                previousCursor,
               },
               { "content-type": "application/ld+json; charset=utf-8" },
             );
           }
 
-          if (version === "v2") {
-            return sendJson(res, 200, {
-              apiVersion: "v2",
-              data: {
-                items,
-                pageInfo: {
-                  nextCursor,
-                  hasNextPage: Boolean(nextCursor),
-                  count: items.length,
-                },
-              },
-              meta: {
-                timestamp: new Date().toISOString(),
-              },
+          const fieldsResult = applyFieldFiltering(items, validated.data.query.fields, CREDENTIAL_FIELDS);
+          if (fieldsResult.error) {
+            return sendJson(res, 400, {
+              error: "validation_failed",
+              code: "VALIDATION_FAILED",
+              message: fieldsResult.error,
+              errors: [{ field: "fields", source: "query", message: fieldsResult.error, code: "unknown_field" }],
             });
           }
-          return sendJson(res, 200, { items, nextCursor });
+          const projectedItems = fieldsResult.data;
+
+          // Weak: paging through the same query twice can return a
+          // representation that differs (a credential issued in between),
+          // which the collection ETag should not treat as a hard mismatch.
+          const collectionEtag = computeEtag({ items: projectedItems, nextCursor, previousCursor }, { weak: true });
+          if (matchesIfNoneMatch(req.headers["if-none-match"], collectionEtag)) {
+            res.setHeader("ETag", collectionEtag);
+            return res.writeHead(304).end();
+          }
+
+          if (version === "v2") {
+            return sendJson(
+              res,
+              200,
+              {
+                apiVersion: "v2",
+                data: {
+                  items: projectedItems,
+                  pageInfo: {
+                    nextCursor,
+                    previousCursor,
+                    hasNextPage: Boolean(nextCursor),
+                    hasPreviousPage: Boolean(previousCursor),
+                    count: projectedItems.length,
+                  },
+                },
+                meta: {
+                  timestamp: new Date().toISOString(),
+                },
+              },
+              { ETag: collectionEtag },
+            );
+          }
+          return sendJson(
+            res,
+            200,
+            { items: projectedItems, nextCursor, previousCursor },
+            { ETag: collectionEtag },
+          );
         }
 
-        // Single-item GET /credentials/:id
+        // Single-item GET /credentials/:id. #745: strong ETag + conditional
+        // GET. #747: optional `?fields=` projection.
         const credentialIdMatch = pathname.match(/^\/credentials\/([^/]+)$/);
         if (req.method === "GET" && credentialIdMatch) {
           const credentialId = decodeURIComponent(credentialIdMatch[1]);
-          if (!validateRequest(res, schemas.credentialByIdParams, { params: { credentialId } }).ok) {
-            return;
-          }
+          const validated = validateRequest(res, schemas.credentialByIdParams, {
+            params: { credentialId },
+            query: url.searchParams,
+          });
+          if (!validated.ok) return;
           const credentials = await readCredentials(config);
           const credential = credentials.find((c) => c.id === credentialId);
           if (!credential) return notFound(res, req);
@@ -730,13 +769,38 @@ export function createApp({
             );
           }
 
-          if (version === "v2") {
-            return sendJson(res, 200, {
-              apiVersion: "v2",
-              data: credential,
+          const fieldsResult = applyFieldFiltering(credential, validated.data.query?.fields, CREDENTIAL_FIELDS);
+          if (fieldsResult.error) {
+            return sendJson(res, 400, {
+              error: "validation_failed",
+              code: "VALIDATION_FAILED",
+              message: fieldsResult.error,
+              errors: [{ field: "fields", source: "query", message: fieldsResult.error, code: "unknown_field" }],
             });
           }
-          return sendJson(res, 200, credential);
+          const projectedCredential = fieldsResult.data;
+
+          // Strong: computed from the canonical (unfiltered) credential, not
+          // whatever `fields` this particular request asked for — so the
+          // ETag identifies the resource's state consistently regardless of
+          // which representation a client happens to request, and stays
+          // valid in an If-Match precondition on a later write (which always
+          // compares against the canonical object; see the revoke handler).
+          const etag = computeEtag(credential);
+          if (matchesIfNoneMatch(req.headers["if-none-match"], etag)) {
+            res.setHeader("ETag", etag);
+            return res.writeHead(304).end();
+          }
+
+          if (version === "v2") {
+            return sendJson(
+              res,
+              200,
+              { apiVersion: "v2", data: projectedCredential },
+              { ETag: etag },
+            );
+          }
+          return sendJson(res, 200, projectedCredential, { ETag: etag });
         }
 
         // Credential status (#753). Referenced by every credential's
@@ -815,6 +879,140 @@ export function createApp({
             } catch (err) {
               return sendJson(res, 500, { error: "openapi_spec_unavailable", message: err.message });
             }
+          }
+        }
+
+        // ── OAuth 2.0 Authorization Server (#744) ───────────────────────
+        if (req.method === "POST" && pathname === "/oauth/clients") {
+          if (!await requireAuth(req, res, config, ['admin:write'])) return;
+          if (validateContentType(req, res)) return;
+          const body = await readJson(req, config);
+          if (body.__payloadTooLarge) {
+            return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+          }
+          const validated = validateRequest(res, schemas.registerOAuthClient, { body });
+          if (!validated.ok) return;
+          try {
+            const client = await oauthService.registerClient(validated.data.body);
+            await appendAuditLog(config, {
+              action: "register_oauth_client",
+              actor: req.headers["x-actor"] ?? config.adminActor,
+              clientId: client.clientId,
+            });
+            return sendJson(res, 201, client);
+          } catch (err) {
+            if (err instanceof OAuthError) {
+              return sendJson(res, err.status, { error: err.code, message: err.message });
+            }
+            throw err;
+          }
+        }
+
+        if (req.method === "GET" && pathname === "/oauth/authorize") {
+          const validated = validateRequest(res, schemas.oauthAuthorizeQuery, { query: url.searchParams });
+          if (!validated.ok) return;
+          // The "resource owner" is whoever is already authenticated on this
+          // request; there is no separate login/consent page (see oauth.js).
+          if (!await requireAuth(req, res, config, [])) return;
+          const { client_id: clientId, redirect_uri: redirectUri, scope, state } = validated.data.query;
+          try {
+            const { code, redirectUri: destination, state: echoedState } = await oauthService.authorize({
+              clientId,
+              redirectUri,
+              scope,
+              state,
+              subject: req.apiKeyId ?? null,
+              ownerScopes: req.apiKeyScopes ?? [],
+            });
+            const target = new URL(destination);
+            target.searchParams.set("code", code);
+            if (echoedState !== null) target.searchParams.set("state", echoedState);
+            res.writeHead(302, { Location: target.toString() });
+            return res.end();
+          } catch (err) {
+            if (err instanceof OAuthError) {
+              return sendJson(res, err.status, { error: err.code, error_description: err.message });
+            }
+            throw err;
+          }
+        }
+
+        if (req.method === "POST" && pathname === "/oauth/token") {
+          if (validateContentType(req, res)) return;
+          const body = await readJson(req, config);
+          if (body.__payloadTooLarge) {
+            return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+          }
+          const validated = validateRequest(res, schemas.oauthToken, { body });
+          if (!validated.ok) return;
+          const input = validated.data.body;
+          try {
+            const tokens =
+              input.grant_type === "authorization_code"
+                ? await oauthService.exchangeAuthorizationCode({
+                    code: input.code,
+                    clientId: input.client_id,
+                    clientSecret: input.client_secret,
+                    redirectUri: input.redirect_uri,
+                  })
+                : await oauthService.exchangeRefreshToken({
+                    refreshToken: input.refresh_token,
+                    clientId: input.client_id,
+                    clientSecret: input.client_secret,
+                    scope: input.scope,
+                  });
+            return sendJson(res, 200, tokens);
+          } catch (err) {
+            if (err instanceof OAuthError) {
+              return sendJson(res, err.status, { error: err.code, error_description: err.message });
+            }
+            throw err;
+          }
+        }
+
+        if (req.method === "POST" && pathname === "/oauth/introspect") {
+          if (validateContentType(req, res)) return;
+          const body = await readJson(req, config);
+          if (body.__payloadTooLarge) {
+            return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+          }
+          const validated = validateRequest(res, schemas.oauthIntrospect, { body });
+          if (!validated.ok) return;
+          const { token, client_id: clientId, client_secret: clientSecret } = validated.data.body;
+          // RFC 7662: the endpoint must itself be protected. A caller either
+          // authenticates as the OAuth client the token was issued to, or as
+          // an admin.
+          if (!clientId && !await requireAuth(req, res, config, ['admin:read'])) return;
+          try {
+            const result = await oauthService.introspect(token, { clientId, clientSecret });
+            return sendJson(res, 200, result);
+          } catch (err) {
+            if (err instanceof OAuthError) {
+              return sendJson(res, err.status, { error: err.code, error_description: err.message });
+            }
+            throw err;
+          }
+        }
+
+        if (req.method === "POST" && pathname === "/oauth/revoke") {
+          if (validateContentType(req, res)) return;
+          const body = await readJson(req, config);
+          if (body.__payloadTooLarge) {
+            return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+          }
+          const validated = validateRequest(res, schemas.oauthRevoke, { body });
+          if (!validated.ok) return;
+          const { token, client_id: clientId, client_secret: clientSecret } = validated.data.body;
+          if (!clientId && !await requireAuth(req, res, config, ['admin:write'])) return;
+          try {
+            await oauthService.revoke(token, { clientId, clientSecret });
+            // RFC 7009: always 200, whether or not the token was known.
+            return sendJson(res, 200, { revoked: true });
+          } catch (err) {
+            if (err instanceof OAuthError) {
+              return sendJson(res, err.status, { error: err.code, error_description: err.message });
+            }
+            throw err;
           }
         }
 
@@ -908,6 +1106,23 @@ export function createApp({
           if (!validateRequest(res, schemas.credentialByIdParams, { params: { credentialId } }).ok) {
             return;
           }
+
+          // Optimistic concurrency (#745): If-Match lets a caller refuse to
+          // revoke a credential it has not actually seen the current state
+          // of — e.g. it read the credential, another client already revoked
+          // it, and this request was built from the stale copy.
+          const ifMatch = req.headers["if-match"];
+          if (ifMatch) {
+            const existing = (await readCredentials(config)).find((c) => c.id === credentialId);
+            if (!existing) return notFound(res);
+            if (!matchesIfMatch(ifMatch, computeEtag(existing))) {
+              return sendJson(res, 412, {
+                code: "PRECONDITION_FAILED",
+                message: "If-Match header does not match the current credential state.",
+              });
+            }
+          }
+
           const revoked = await revokeAndPersistCredential(config, credentialId);
           if (!revoked) return notFound(res);
           await appendAuditLog(config, { action: "revoke_credential", credentialId });

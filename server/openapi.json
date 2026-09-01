@@ -39,6 +39,10 @@
     {
       "name": "system",
       "description": "Liveness probes, Prometheus metrics, and server metadata"
+    },
+    {
+      "name": "oauth",
+      "description": "OAuth 2.0 client registration, authorization code grant, token introspection and revocation"
     }
   ],
   "paths": {
@@ -155,7 +159,7 @@
       "get": {
         "tags": ["credentials"],
         "summary": "List credentials (cursor-paginated)",
-        "description": "Retrieves paginated list of credentials with optional limit and cursor.",
+        "description": "Retrieves a cursor-paginated list of credentials. Cursors are opaque tokens returned as nextCursor/previousCursor; pass one back as `cursor` (with `direction=next` or `direction=prev`) to continue paging. The response also carries a weak ETag; a matching If-None-Match returns 304.",
         "parameters": [
           {
             "name": "limit",
@@ -175,12 +179,40 @@
             "schema": {
               "type": "string"
             },
-            "description": "Pagination cursor (ID of the last item from previous page)"
+            "description": "Opaque pagination cursor from a previous response's nextCursor/previousCursor"
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["next", "prev"],
+              "default": "next"
+            },
+            "description": "Direction to page in relative to cursor. 'prev' walks backward through results in the same forward order."
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated list of fields to include in each returned credential, e.g. 'id,subject,claims.tier'. Omit to receive the full object."
           }
         ],
         "responses": {
           "200": {
             "description": "List of credentials",
+            "headers": {
+              "ETag": {
+                "description": "Weak entity tag for this page. Send back via If-None-Match to revalidate.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -196,10 +228,14 @@
                       "revoked": false
                     }
                   ],
-                  "nextCursor": "cred-001"
+                  "nextCursor": "eyJpZCI6ImNyZWQtMDAxIn0",
+                  "previousCursor": null
                 }
               }
             }
+          },
+          "304": {
+            "description": "Not Modified - the caller's If-None-Match matches the current page."
           },
           "400": {
             "description": "Invalid query parameters",
@@ -426,9 +462,37 @@
         "tags": ["credentials"],
         "summary": "Get credential by ID",
         "description": "Retrieves the full record of an existing credential.",
+        "parameters": [
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated list of fields to include in the response, e.g. 'id,claims.tier'. Supports dotted paths into nested objects."
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Conditional GET. When it matches the current strong ETag, the server returns 304 with no body."
+          }
+        ],
         "responses": {
           "200": {
             "description": "Credential found",
+            "headers": {
+              "ETag": {
+                "description": "Strong entity tag for the canonical credential state (computed the same way regardless of any `fields` filtering). Reuse it in If-Match on a later write.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -444,6 +508,9 @@
                 }
               }
             }
+          },
+          "304": {
+            "description": "Not Modified - If-None-Match matched the current ETag."
           },
           "404": {
             "description": "Credential not found",
@@ -470,6 +537,17 @@
           },
           {
             "BearerAuth": ["credentials:write"]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optimistic concurrency. When present, the revoke is rejected with 412 unless it matches the credential's current ETag."
           }
         ],
         "responses": {
@@ -515,6 +593,16 @@
           },
           "404": {
             "description": "Credential not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "Precondition Failed - If-Match did not match the credential's current ETag.",
             "content": {
               "application/json": {
                 "schema": {
@@ -941,6 +1029,323 @@
           },
           "400": { "description": "Invalid DID format" },
           "502": { "description": "Upstream RPC failure" }
+        }
+      }
+    },
+    "/oauth/clients": {
+      "post": {
+        "tags": ["oauth"],
+        "summary": "Register an OAuth 2.0 client",
+        "description": "Dynamically registers a client for the authorization code grant. The client_secret is returned only in this response and cannot be retrieved again.",
+        "security": [
+          {
+            "ApiKeyAuth": ["admin:write"]
+          },
+          {
+            "BearerAuth": ["admin:write"]
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["redirectUris"],
+                "properties": {
+                  "name": { "type": "string" },
+                  "redirectUris": {
+                    "type": "array",
+                    "items": { "type": "string", "format": "uri" },
+                    "minItems": 1
+                  },
+                  "scopes": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Subset of the API's scopes this client may ever be granted."
+                  },
+                  "grantTypes": {
+                    "type": "array",
+                    "items": { "type": "string", "enum": ["authorization_code", "refresh_token"] }
+                  }
+                }
+              },
+              "example": {
+                "name": "Partner Dashboard",
+                "redirectUris": ["https://partner.example.com/callback"],
+                "scopes": ["credentials:read"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Client registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "clientId": { "type": "string" },
+                    "clientSecret": { "type": "string" },
+                    "name": { "type": "string" },
+                    "redirectUris": { "type": "array", "items": { "type": "string" } },
+                    "scopes": { "type": "array", "items": { "type": "string" } },
+                    "grantTypes": { "type": "array", "items": { "type": "string" } },
+                    "createdAt": { "type": "string", "format": "date-time" }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid registration request",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          },
+          "403": {
+            "description": "Missing admin:write scope",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          }
+        }
+      }
+    },
+    "/oauth/authorize": {
+      "get": {
+        "tags": ["oauth"],
+        "summary": "Authorization endpoint (authorization code grant)",
+        "description": "Issues a short-lived authorization code and redirects to redirect_uri. There is no separate login/consent page: the resource owner is whoever this request is already authenticated as, and a requested scope can never exceed both the client's registered scopes and the caller's own.",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "response_type",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "enum": ["code"] }
+          },
+          {
+            "name": "client_id",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "redirect_uri",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "format": "uri" }
+          },
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "Space-delimited scopes. Defaults to the client's full registered scope set."
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "Opaque value echoed back unchanged, to protect against CSRF."
+          }
+        ],
+        "responses": {
+          "302": { "description": "Redirect to redirect_uri with code and state query parameters." },
+          "400": {
+            "description": "Invalid request, unknown client, or unregistered redirect_uri",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          },
+          "403": {
+            "description": "Caller does not hold a requested scope",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          }
+        }
+      }
+    },
+    "/oauth/token": {
+      "post": {
+        "tags": ["oauth"],
+        "summary": "Token endpoint",
+        "description": "Exchanges an authorization code, or a refresh token, for an access token. Accepts a JSON body (not the RFC 6749 form-encoding) to match the rest of this API.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["grant_type", "client_id", "client_secret"],
+                "properties": {
+                  "grant_type": { "type": "string", "enum": ["authorization_code", "refresh_token"] },
+                  "code": { "type": "string", "description": "Required for grant_type=authorization_code" },
+                  "redirect_uri": { "type": "string", "format": "uri", "description": "Required for grant_type=authorization_code; must match the value used at /oauth/authorize" },
+                  "refresh_token": { "type": "string", "description": "Required for grant_type=refresh_token" },
+                  "client_id": { "type": "string" },
+                  "client_secret": { "type": "string" },
+                  "scope": { "type": "string", "description": "Optional on refresh; may only narrow the original grant" }
+                }
+              },
+              "example": {
+                "grant_type": "authorization_code",
+                "code": "ac_...",
+                "redirect_uri": "https://partner.example.com/callback",
+                "client_id": "client_...",
+                "client_secret": "secret_..."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Token issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "access_token": { "type": "string" },
+                    "token_type": { "type": "string", "example": "Bearer" },
+                    "expires_in": { "type": "integer", "description": "Seconds until access_token expires" },
+                    "refresh_token": { "type": "string" },
+                    "scope": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_request / invalid_grant / invalid_scope",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          },
+          "401": {
+            "description": "invalid_client",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          }
+        }
+      }
+    },
+    "/oauth/introspect": {
+      "post": {
+        "tags": ["oauth"],
+        "summary": "Token introspection (RFC 7662)",
+        "description": "Reports whether a token is currently active. Callers authenticate either as the OAuth client the token was issued to (client_id/client_secret in the body) or as an admin (admin:read).",
+        "security": [
+          {
+            "ApiKeyAuth": ["admin:read"]
+          },
+          {
+            "BearerAuth": ["admin:read"]
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["token"],
+                "properties": {
+                  "token": { "type": "string" },
+                  "token_type_hint": { "type": "string", "enum": ["access_token", "refresh_token"] },
+                  "client_id": { "type": "string" },
+                  "client_secret": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Introspection result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "active": { "type": "boolean" },
+                    "scope": { "type": "string" },
+                    "client_id": { "type": "string" },
+                    "token_type": { "type": "string" },
+                    "exp": { "type": "integer" },
+                    "iat": { "type": "integer" },
+                    "sub": { "type": "string" }
+                  }
+                },
+                "example": {
+                  "active": true,
+                  "scope": "credentials:read",
+                  "client_id": "client_abc",
+                  "token_type": "Bearer",
+                  "exp": 1893456000,
+                  "iat": 1893452400
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          }
+        }
+      }
+    },
+    "/oauth/revoke": {
+      "post": {
+        "tags": ["oauth"],
+        "summary": "Token revocation (RFC 7009)",
+        "description": "Revokes an access or refresh token. Always responds 200 once the caller's own credentials check out, whether or not the token was recognized, so a caller cannot use this endpoint to probe for valid tokens.",
+        "security": [
+          {
+            "ApiKeyAuth": ["admin:write"]
+          },
+          {
+            "BearerAuth": ["admin:write"]
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["token"],
+                "properties": {
+                  "token": { "type": "string" },
+                  "token_type_hint": { "type": "string", "enum": ["access_token", "refresh_token"] },
+                  "client_id": { "type": "string" },
+                  "client_secret": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Revoked (or already inactive)",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "properties": { "revoked": { "type": "boolean" } } }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          }
         }
       }
     }

@@ -446,6 +446,39 @@ export async function requireAuth(req, res, config, requiredScopes = []) {
     }
   }
 
+  // 2. Fall back to an OAuth 2.0 access token (#744), issued via
+  // /oauth/token. Checked after API keys so an operator can migrate a
+  // deployment to OAuth without breaking existing API-key clients.
+  if (config.oauthService) {
+    const grant = await config.oauthService.validateAccessToken(token);
+    if (grant) {
+      req.apiKeyId = grant.id;
+      req.apiKeyScopes = grant.scopes.length > 0 ? grant.scopes : ['*'];
+      req.userTier = grant.tier;
+      req.auth = { oauth: grant };
+
+      if (requiredScopes.length > 0) {
+        const hasWildcard = req.apiKeyScopes.includes('*');
+        const hasAllScopes = requiredScopes.every((required) =>
+          hasWildcard || req.apiKeyScopes.includes(required)
+        );
+
+        if (!hasAllScopes) {
+          const missingScopes = requiredScopes.filter((s) => !req.apiKeyScopes.includes(s));
+          sendJson(res, 403, {
+            error: "forbidden",
+            code: "INSUFFICIENT_SCOPE",
+            message: "OAuth token does not have required permissions",
+            requiredScopes,
+            missingScopes
+          });
+          return false;
+        }
+      }
+      return true;
+    }
+  }
+
   if (!config.adminApiKey) {
     sendJson(res, 503, { 
       error: "admin_api_key_not_configured",

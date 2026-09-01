@@ -413,6 +413,9 @@ export function validateConfig(env = process.env) {
     { key: "ACCESS_LOG_MAX_BYTES", desc: "must be a valid integer" },
     { key: "ACCESS_LOG_MAX_FILES", desc: "must be a valid integer" },
     { key: "LOG_PAYLOAD_MAX_BYTES", desc: "must be a valid integer" },
+    { key: "OAUTH_AUTH_CODE_TTL_MS", desc: "must be a valid integer" },
+    { key: "OAUTH_ACCESS_TOKEN_TTL_MS", desc: "must be a valid integer" },
+    { key: "OAUTH_REFRESH_TOKEN_TTL_MS", desc: "must be a valid integer" },
   ];
 
   for (const item of numericVars) {
