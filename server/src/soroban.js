@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { RpcCache } from './rpc-cache.js';
 import { CircuitBreaker, SorobanUnavailableError } from './circuit-breaker.js';
 import { logger } from './logger.js';
+import { QueryResultCache } from './query-cache.js';
 
 export class SorobanError extends Error {
   constructor(category, publicMessage, internalDetail) {
@@ -22,18 +23,31 @@ export class SorobanTimeoutError extends Error {
 }
 
 export class SorobanClient {
-  constructor(config, metrics, { didCache = null } = {}) {
+  constructor(config, metrics, { didCache = null, queryCache = null } = {}) {
     this.config = config;
     this.metrics = metrics;
     this.cache = new RpcCache(config.rpcCacheTtlMs);
     // Optional Redis-backed DID cache. When absent, resolution falls straight
     // through to the contract, so the client works uncached unchanged.
     this.didCache = didCache;
+    this.queryCache = queryCache ?? new QueryResultCache(config, { redisClient: didCache?.client ?? null, metrics });
     this.circuitBreaker = new CircuitBreaker({
-      failureThreshold: 5,
-      successThreshold: 2,
-      openDurationMs: 30_000,
+      failureThreshold: config?.circuitBreakerFailureThreshold ?? 5,
+      successThreshold: config?.circuitBreakerSuccessThreshold ?? 2,
+      openDurationMs: config?.circuitBreakerOpenDurationMs ?? 30_000,
+      timeoutMs: config?.circuitBreakerTimeoutMs ?? 10_000,
+      enabled: config?.circuitBreakerEnabled ?? true,
     });
+
+    if (this.metrics) {
+      this.circuitBreaker.on('stateChange', ({ to, from }) => {
+        this.metrics.observeCircuitBreakerState(to, from);
+      });
+      this.circuitBreaker.on('break', () => this.metrics.observeCircuitBreakerEvent('break'));
+      this.circuitBreaker.on('failure', () => this.metrics.observeCircuitBreakerEvent('failure'));
+      this.circuitBreaker.on('reject', () => this.metrics.observeCircuitBreakerEvent('reject'));
+      this.circuitBreaker.on('fallback', () => this.metrics.observeCircuitBreakerEvent('fallback'));
+    }
 
     let interval = this.config.eventPollIntervalMs;
     if (interval !== 0) {
@@ -55,7 +69,7 @@ export class SorobanClient {
     }
   }
 
-  async invoke(contractId, method, args = []) {
+  async invoke(contractId, method, args = [], options = {}) {
     if (!contractId) throw new Error('Contract ID is not configured');
     if (!this.config.sourceAccount) throw new Error('STELLAR_SOURCE_ACCOUNT or STELLAR_SECRET_KEY is required');
     const commandArgs = [
@@ -128,7 +142,7 @@ export class SorobanClient {
           throw new SorobanError(category, publicMessage, error.message);
         }
       }
-    }).catch((error) => {
+    }, options).catch((error) => {
       // Convert SorobanUnavailableError from circuit breaker to SorobanError
       if (error instanceof SorobanUnavailableError) {
         throw new SorobanError('rpc_unavailable', 'The Soroban RPC node is currently unavailable.', error.message);
@@ -195,6 +209,8 @@ export class SorobanClient {
 
   async getIssuers() {
     const key = `${this.config.contracts.credential}:get_issuers:[]`;
+    const distributed = await this.queryCache.get('get_issuers');
+    if (distributed !== null) return distributed;
     const cached = this.cache.get(key);
     if (cached !== null) {
       if (this.metrics && typeof this.metrics.counters === 'object') {
@@ -208,44 +224,54 @@ export class SorobanClient {
     const raw = await this.invoke(this.config.contracts.credential, 'get_issuers');
     const result = parseAddressList(raw);
     this.cache.set(key, result);
+    await this.queryCache.set('get_issuers', [], result, 'stable');
     return result;
   }
 
   async addIssuer(issuer) {
     this.cache.delete(`${this.config.contracts.credential}:get_issuers:[]`);
+    await this.queryCache.invalidate('get_issuers');
     return this.invoke(this.config.contracts.credential, 'add_issuer', ['--issuer', issuer]);
   }
 
   async removeIssuer(issuer) {
     this.cache.delete(`${this.config.contracts.credential}:get_issuers:[]`);
+    await this.queryCache.invalidate('get_issuers');
     return this.invoke(this.config.contracts.credential, 'remove_issuer', ['--issuer', issuer]);
   }
 
-  async getEvents(startLedger) {
-    const started = performance.now();
-    try {
-      const body = {
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'getEvents',
-        params: {
-          startLedger,
-          filters: [{ type: 'contract' }],
-          limit: 200,
-        },
-      };
-      const response = await fetch(this.config.rpcUrl, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (!response.ok) throw new Error(`RPC getEvents failed with HTTP ${response.status}`);
-      const payload = await response.json();
-      if (payload.error) throw new Error(payload.error.message ?? 'RPC getEvents failed');
-      return payload.result?.events ?? [];
-    } finally {
-      this.metrics?.observeRpcLatency((performance.now() - started) / 1000);
-    }
+  async getEvents(startLedger, { fallbackFn = null } = {}) {
+    return this.circuitBreaker.call(async () => {
+      const started = performance.now();
+      try {
+        const body = {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'getEvents',
+          params: {
+            startLedger,
+            filters: [{ type: 'contract' }],
+            limit: 200,
+          },
+        };
+        const response = await fetch(this.config.rpcUrl, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!response.ok) throw new Error(`RPC getEvents failed with HTTP ${response.status}`);
+        const payload = await response.json();
+        if (payload.error) throw new Error(payload.error.message ?? 'RPC getEvents failed');
+        return payload.result?.events ?? [];
+      } finally {
+        this.metrics?.observeRpcLatency((performance.now() - started) / 1000);
+      }
+    }, { fallbackFn }).catch((error) => {
+      if (error instanceof SorobanUnavailableError) {
+        throw new SorobanError('rpc_unavailable', 'The Soroban RPC node is currently unavailable.', error.message);
+      }
+      throw error;
+    });
   }
 
   /** Gracefully drain the worker pool before shutdown. */

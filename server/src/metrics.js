@@ -35,6 +35,9 @@ const COUNTER_DEFINITIONS = {
   did_cache_sets_total: 'Total DID documents written to the cache',
   did_cache_errors_total: 'Total DID cache operation failures',
   did_cache_invalidations_total: 'Total DID cache invalidations',
+  query_cache_hits_total: 'Total query-result cache hits',
+  query_cache_misses_total: 'Total query-result cache misses',
+  query_cache_errors_total: 'Total query-result cache errors',
 };
 
 /**
@@ -131,6 +134,86 @@ export class MetricsService {
       registers: [this.registry],
     });
 
+    this.batchOperations = new client.Counter({
+      name: 'batch_operations_total',
+      help: 'Total batch sub-operations processed via POST /batch, by operation type and result',
+      labelNames: ['type', 'result'],
+      registers: [this.registry],
+    });
+
+    this.batchRequests = new client.Counter({
+      name: 'batch_requests_total',
+      help: 'Total POST /batch requests, by atomic mode and whether the batch aborted early',
+      labelNames: ['atomic', 'aborted'],
+      registers: [this.registry],
+    });
+
+    this.quotaThresholdEvents = new client.Counter({
+      name: 'quota_threshold_events_total',
+      help: 'Total quota threshold crossings (80%/100% of a daily or monthly quota), by tier, period and threshold',
+      labelNames: ['tier', 'period', 'threshold'],
+      registers: [this.registry],
+    });
+
+    this.deprecatedEndpointUsage = new client.Counter({
+      name: 'deprecated_endpoint_usage_total',
+      help: 'Total requests to endpoints marked deprecated, by endpoint rule name',
+      labelNames: ['endpoint'],
+      registers: [this.registry],
+    });
+
+    this.ddosEvents = new client.Counter({
+      name: 'ddos_events_total',
+      help: 'Total DDoS protection events by type',
+      labelNames: ['type'],
+      registers: [this.registry],
+    });
+    this.queryCacheLatency = new client.Histogram({
+      name: 'query_cache_lookup_latency_seconds',
+      help: 'Query-result cache lookup latency in seconds',
+      labelNames: ['outcome'],
+      buckets: [0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5],
+      registers: [this.registry],
+    });
+
+    this.circuitBreakerState = new client.Gauge({
+      name: 'soroban_circuit_breaker_state',
+      help: 'Current state of the Soroban circuit breaker (0=CLOSED, 1=OPEN, 2=HALF_OPEN)',
+      registers: [this.registry],
+    });
+    this.circuitBreakerState.set(0);
+
+    this.circuitBreakerStateChanges = new client.Counter({
+      name: 'soroban_circuit_breaker_state_changes_total',
+      help: 'Total circuit breaker state changes by from and to state',
+      labelNames: ['from', 'to'],
+      registers: [this.registry],
+    });
+
+    this.circuitBreakerBreaks = new client.Counter({
+      name: 'soroban_circuit_breaker_breaks_total',
+      help: 'Total number of times the circuit breaker tripped OPEN',
+      registers: [this.registry],
+    });
+
+    this.circuitBreakerFailures = new client.Counter({
+      name: 'soroban_circuit_breaker_failures_total',
+      help: 'Total number of RPC failures recorded by circuit breaker',
+      registers: [this.registry],
+    });
+
+    this.circuitBreakerRejects = new client.Counter({
+      name: 'soroban_circuit_breaker_rejects_total',
+      help: 'Total number of RPC calls rejected fast by open circuit breaker',
+      registers: [this.registry],
+    });
+
+    this.circuitBreakerFallbacks = new client.Counter({
+      name: 'soroban_circuit_breaker_fallbacks_total',
+      help: 'Total number of fallback responses served by circuit breaker',
+      registers: [this.registry],
+    });
+
     if (collectDefaultMetrics) {
       client.collectDefaultMetrics({ register: this.registry });
     }
@@ -206,6 +289,72 @@ export class MetricsService {
    */
   observeCspViolation(directive) {
     this.cspViolations.inc({ directive: directive || 'unknown' });
+  }
+
+  /**
+   * Record one batch sub-operation's outcome (#749).
+   * @param {object} sample
+   * @param {'issue'|'verify'|'revoke'} sample.type
+   * @param {'success'|'failed'} sample.result
+   */
+  observeBatchOperation({ type, result }) {
+    this.batchOperations.inc({ type: type || 'unknown', result: result || 'unknown' });
+  }
+
+  /**
+   * Record one completed POST /batch request (#749).
+   * @param {object} sample
+   * @param {boolean} sample.atomic
+   * @param {boolean} sample.aborted
+   */
+  observeBatchRequest({ atomic, aborted }) {
+    this.batchRequests.inc({ atomic: String(Boolean(atomic)), aborted: String(Boolean(aborted)) });
+  }
+
+  /**
+   * Record a quota threshold crossing (#748).
+   * @param {object} sample
+   * @param {string} sample.tier
+   * @param {'daily'|'monthly'} sample.period
+   * @param {number} sample.threshold - e.g. 0.8 or 1
+   */
+  observeQuotaThreshold({ tier, period, threshold }) {
+    this.quotaThresholdEvents.inc({ tier: tier || 'unknown', period: period || 'unknown', threshold: String(threshold) });
+  }
+
+  /**
+   * Record a request to a deprecated endpoint (#751).
+   * @param {string} endpoint - Deprecation rule name
+   */
+  observeDeprecatedEndpointUsage(endpoint) {
+    this.deprecatedEndpointUsage.inc({ endpoint: endpoint || 'unknown' });
+  }
+
+  observeQueryCache(outcome, durationSeconds = undefined) {
+    const name = outcome === 'hit' ? 'query_cache_hits_total' : outcome === 'miss' ? 'query_cache_misses_total' : 'query_cache_errors_total';
+    this._counters[name].inc();
+    if (durationSeconds !== undefined) this.queryCacheLatency.observe({ outcome: outcome || 'unknown' }, durationSeconds);
+  }
+
+  observeDdosEvent(type) { this.ddosEvents.inc({ type: type || 'unknown' }); }
+
+  observeCircuitBreakerState(toState, fromState) {
+    const map = { CLOSED: 0, OPEN: 1, HALF_OPEN: 2 };
+    const num = map[String(toState).toUpperCase()] ?? 0;
+    this.circuitBreakerState.set(num);
+    if (fromState && toState) {
+      this.circuitBreakerStateChanges.inc({
+        from: String(fromState).toUpperCase(),
+        to: String(toState).toUpperCase(),
+      });
+    }
+  }
+
+  observeCircuitBreakerEvent(event) {
+    if (event === 'break') this.circuitBreakerBreaks.inc();
+    else if (event === 'failure') this.circuitBreakerFailures.inc();
+    else if (event === 'reject') this.circuitBreakerRejects.inc();
+    else if (event === 'fallback') this.circuitBreakerFallbacks.inc();
   }
 
   /**

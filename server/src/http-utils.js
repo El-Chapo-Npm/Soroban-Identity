@@ -32,7 +32,7 @@ export function validateContentType(req, res) {
   if (req.method === "GET" || req.method === "DELETE" || req.method === "OPTIONS") return false;
   const ct = req.headers["content-type"] ?? "";
   if (ct.toLowerCase().startsWith("application/json")) return false;
-  sendJson(res, 415, { code: "UNSUPPORTED_MEDIA_TYPE", message: "Content-Type must be application/json" });
+  sendFormatted(req, res, 415, { code: "UNSUPPORTED_MEDIA_TYPE", message: "Content-Type must be application/json" });
   return true;
 }
 
@@ -122,7 +122,263 @@ export function sendText(res, statusCode, body, headers = {}) {
   res.end(body);
 }
 
-export function notFound(res) {
+export const SUPPORTED_MEDIA_TYPES = [
+  "application/json",
+  "application/xml",
+  "text/xml",
+  "application/yaml",
+  "application/x-yaml",
+  "text/yaml",
+  "text/x-yaml",
+];
+
+/**
+ * Escape XML special characters.
+ */
+export function escapeXml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+/**
+ * Format a JavaScript object / value into an XML document string.
+ */
+export function toXml(data, rootElement = "response") {
+  function serializeNode(value, tagName) {
+    const tag = /^[a-zA-Z_][a-zA-Z0-9_-]*$/.test(tagName) ? tagName : "item";
+    if (value === null || value === undefined) {
+      return `<${tag}/>`;
+    }
+    if (typeof value === "boolean" || typeof value === "number") {
+      return `<${tag}>${value}</${tag}>`;
+    }
+    if (typeof value === "string") {
+      return `<${tag}>${escapeXml(value)}</${tag}>`;
+    }
+    if (Array.isArray(value)) {
+      if (value.length === 0) {
+        return `<${tag}/>`;
+      }
+      const itemTagName = tag.endsWith("s") && tag.length > 1 ? tag.slice(0, -1) : "item";
+      const elements = value.map((item) => serializeNode(item, itemTagName)).join("");
+      return `<${tag}>${elements}</${tag}>`;
+    }
+    if (typeof value === "object") {
+      const keys = Object.keys(value);
+      if (keys.length === 0) {
+        return `<${tag}/>`;
+      }
+      const elements = keys.map((key) => serializeNode(value[key], key)).join("");
+      return `<${tag}>${elements}</${tag}>`;
+    }
+    return `<${tag}>${escapeXml(String(value))}</${tag}>`;
+  }
+
+  let body = "";
+  if (data === null || data === undefined) {
+    body = `<${rootElement}/>`;
+  } else if (Array.isArray(data)) {
+    const elements = data.map((item) => serializeNode(item, "item")).join("");
+    body = `<${rootElement}>${elements}</${rootElement}>`;
+  } else if (typeof data === "object") {
+    const keys = Object.keys(data);
+    const elements = keys.map((key) => serializeNode(data[key], key)).join("");
+    body = `<${rootElement}>${elements}</${rootElement}>`;
+  } else {
+    body = `<${rootElement}>${escapeXml(String(data))}</${rootElement}>`;
+  }
+
+  return `<?xml version="1.0" encoding="UTF-8"?>\n${body}`;
+}
+
+/**
+ * Format a JavaScript object / value into a YAML document string.
+ */
+export function toYaml(data, indent = 0) {
+  const spaces = "  ".repeat(indent);
+
+  if (data === null || data === undefined) {
+    return "null";
+  }
+  if (typeof data === "boolean" || typeof data === "number") {
+    return String(data);
+  }
+  if (typeof data === "string") {
+    if (
+      data === "" ||
+      /[\n\r:#{}[\],&*!|>'%@`\\]/.test(data) ||
+      /^(true|false|null|yes|no|on|off)$/i.test(data) ||
+      /^[-+]?[0-9]+(\.[0-9]+)?$/.test(data)
+    ) {
+      return JSON.stringify(data);
+    }
+    return data;
+  }
+  if (Array.isArray(data)) {
+    if (data.length === 0) return "[]";
+    return data
+      .map((item) => {
+        if (typeof item === "object" && item !== null) {
+          const itemYaml = toYaml(item, indent + 1);
+          const trimmed = itemYaml.trimStart();
+          return `${spaces}- ${trimmed}`;
+        }
+        return `${spaces}- ${toYaml(item, indent + 1)}`;
+      })
+      .join("\n");
+  }
+  if (typeof data === "object") {
+    const entries = Object.entries(data);
+    if (entries.length === 0) return "{}";
+    return entries
+      .map(([key, val]) => {
+        const formattedKey = /^[a-zA-Z0-9_-]+$/.test(key)
+          ? key
+          : JSON.stringify(key);
+        if (
+          typeof val === "object" &&
+          val !== null &&
+          (Array.isArray(val) ? val.length > 0 : Object.keys(val).length > 0)
+        ) {
+          return `${spaces}${formattedKey}:\n${toYaml(val, indent + 1)}`;
+        }
+        return `${spaces}${formattedKey}: ${toYaml(val, indent + 1)}`;
+      })
+      .join("\n");
+  }
+  return String(data);
+}
+
+/**
+ * Negotiate response content-type based on Accept header.
+ * Returns standard media type string ("application/json", "application/xml", "application/yaml"),
+ * or null if no acceptable media type is matched.
+ */
+export function negotiateContentType(acceptHeader) {
+  if (!acceptHeader || acceptHeader.trim() === "") {
+    return "application/json";
+  }
+
+  const parts = acceptHeader.split(",");
+  const preferences = [];
+
+  for (const part of parts) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    const [mediaTypePart, ...params] = trimmed.split(";");
+    const mediaType = mediaTypePart.trim().toLowerCase();
+    let q = 1.0;
+    for (const param of params) {
+      const [k, v] = param.trim().split("=");
+      if (k && k.trim() === "q" && v) {
+        const parsedQ = parseFloat(v.trim());
+        if (!isNaN(parsedQ)) q = parsedQ;
+      }
+    }
+    if (q > 0) {
+      preferences.push({ mediaType, q });
+    }
+  }
+
+  // Sort by q factor descending
+  preferences.sort((a, b) => b.q - a.q);
+
+  for (const { mediaType } of preferences) {
+    if (
+      mediaType === "*/*" ||
+      mediaType === "application/*" ||
+      mediaType === "application/json"
+    ) {
+      return "application/json";
+    }
+    if (mediaType === "application/xml" || mediaType === "text/xml") {
+      return "application/xml";
+    }
+    if (
+      mediaType === "application/yaml" ||
+      mediaType === "application/x-yaml" ||
+      mediaType === "text/yaml" ||
+      mediaType === "text/x-yaml"
+    ) {
+      return "application/yaml";
+    }
+    if (mediaType === "text/*") {
+      return "text/xml";
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Send a formatted response respecting content negotiation (JSON, XML, YAML).
+ * Returns 406 Not Acceptable if client requested an unsupported format.
+ */
+export function sendFormatted(req, res, statusCode, body, headers = {}) {
+  const accept = req?.headers ? req.headers["accept"] : undefined;
+  const matchedFormat = negotiateContentType(accept);
+
+  if (!matchedFormat) {
+    res.writeHead(406, {
+      "content-type": "application/json; charset=utf-8",
+      ...headers,
+    });
+    res.end(
+      JSON.stringify({
+        error: "not_acceptable",
+        code: "NOT_ACCEPTABLE",
+        message:
+          "Unsupported format requested in Accept header. Supported formats: application/json, application/xml, text/xml, application/yaml, text/yaml",
+        supportedFormats: [
+          "application/json",
+          "application/xml",
+          "text/xml",
+          "application/yaml",
+          "text/yaml",
+        ],
+      }),
+    );
+    return;
+  }
+
+  if (matchedFormat === "application/xml" || matchedFormat === "text/xml") {
+    res.writeHead(statusCode, {
+      "content-type": "application/xml; charset=utf-8",
+      ...headers,
+    });
+    res.end(toXml(body));
+    return;
+  }
+
+  if (
+    matchedFormat === "application/yaml" ||
+    matchedFormat === "application/x-yaml" ||
+    matchedFormat === "text/yaml" ||
+    matchedFormat === "text/x-yaml"
+  ) {
+    res.writeHead(statusCode, {
+      "content-type": "application/yaml; charset=utf-8",
+      ...headers,
+    });
+    res.end(toYaml(body));
+    return;
+  }
+
+  res.writeHead(statusCode, {
+    "content-type": "application/json; charset=utf-8",
+    ...headers,
+  });
+  res.end(JSON.stringify(body));
+}
+
+export function notFound(res, req = null) {
+  if (req) {
+    return sendFormatted(req, res, 404, { error: "not_found" });
+  }
   sendJson(res, 404, { error: "not_found" });
 }
 
@@ -135,13 +391,23 @@ export function notFound(res) {
  * @param {string[]} requiredScopes - Array of required scopes (e.g., ['credentials:write'])
  * @returns {boolean} True if authenticated and authorized, false otherwise
  */
+export function requireAuth(req, res, config, requiredScopes = []) {
+  if (!config.adminApiKey) {
+    sendFormatted(req, res, 503, { 
+      error: "admin_api_key_not_configured",
+      code: "SERVICE_UNAVAILABLE",
+      message: "API key authentication is not configured"
+    });
+    return false;
+  }
+  
 export async function requireAuth(req, res, config, requiredScopes = []) {
   const token =
     req.headers["x-api-key"] ||
     req.headers.authorization?.replace(/^Bearer\s+/i, "");
     
   if (!token) {
-    sendJson(res, 401, { 
+    sendFormatted(req, res, 401, { 
       error: "unauthorized",
       code: "UNAUTHORIZED",
       message: "Missing API key"
@@ -210,11 +476,8 @@ export async function requireAuth(req, res, config, requiredScopes = []) {
   req.userTier = userTier;
   
   // Constant-time API key comparison to prevent timing side-channel attacks.
-  // crypto.timingSafeEqual requires equal-length buffers — if lengths differ
-  // we still run the comparison against a dummy buffer of the correct length
-  // so the branch is not observable from timing alone.
   if (!timingSafeCompare(keyPart, config.adminApiKey)) {
-    sendJson(res, 401, { 
+    sendFormatted(req, res, 401, { 
       error: "unauthorized",
       code: "UNAUTHORIZED",
       message: "Invalid API key"
@@ -237,7 +500,7 @@ export async function requireAuth(req, res, config, requiredScopes = []) {
     
     if (!hasAllScopes) {
       const missingScopes = requiredScopes.filter(s => !keyScopes.includes(s));
-      sendJson(res, 403, { 
+      sendFormatted(req, res, 403, { 
         error: "forbidden",
         code: "INSUFFICIENT_SCOPE",
         message: "API key does not have required permissions",

@@ -79,5 +79,28 @@
     "skipToContent": "Skip to main content",
     "switchLanguage": "Switch language",
     "dismissNotification": "Dismiss notification"
+  },
+  "shortcuts": {
+    "title": "Keyboard Shortcuts",
+    "description": "Use keyboard shortcuts to navigate and interact with the application more efficiently.",
+    "close": "Close shortcuts help",
+    "enableShortcuts": "Enable keyboard shortcuts",
+    "hint": "Press ? to view shortcuts anytime. {{key}}+/ also works.",
+    "category": {
+      "navigation": "Navigation",
+      "actions": "Actions",
+      "ui": "User Interface"
+    },
+    "table": {
+      "shortcut": "Shortcut",
+      "description": "Description"
+    },
+    "search": "Open search",
+    "createCredential": "Create new credential",
+    "goToDIDs": "Go to DIDs tab",
+    "goToCredentials": "Go to Credentials tab",
+    "toggleTheme": "Toggle theme",
+    "showHelp": "Show keyboard shortcuts",
+    "closeDialog": "Close dialog or modal"
   }
 }

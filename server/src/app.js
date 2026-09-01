@@ -2,7 +2,16 @@ import { URL } from "node:url";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { appendAuditLog, readCredentials, writeCredentials, createAndPersistCredential, revokeAndPersistCredential, DuplicateCredentialError } from "./storage.js";
+import {
+  appendAuditLog,
+  readCredentials,
+  writeCredentials,
+  createAndPersistCredential,
+  revokeAndPersistCredential,
+  updateAndPersistCredential,
+  DuplicateCredentialError,
+  ConcurrencyConflictError,
+} from "./storage.js";
 import { findExpiringCredentials, paginate, paginateCursor } from "./expiry.js";
 import {
   createWebhookRecord,
@@ -28,6 +37,7 @@ import {
   readRawBody,
   requireAdmin,
   requireAuth,
+  sendFormatted,
   sendJson,
   sendText,
   setCorsHeaders,
@@ -56,9 +66,16 @@ import { schemas, validateRequest } from "./validation.js";
 import { routeLabel } from "./route-label.js";
 import { requestContextStore } from "./request-context.js";
 import { handleEventsRequest } from "./sse.js";
+import { handleLongPollRequest } from "./long-poll.js";
 import { logger } from "./logger.js";
+import { AnalyticsService, detectCountry } from "./analytics.js";
 import { TieredRateLimiter } from "./rate-limiter.js";
 import { ApiKeyService } from "./api-keys.js";
+import { EmailTransport } from "./email.js";
+import { pickQuotaBinding, QuotaTracker, notifyQuotaThresholdOwner } from "./quota.js";
+import { executeBatch } from "./batch.js";
+import { DeprecationRegistry, notifyDeprecatedEndpointOwner } from "./deprecation.js";
+import { DdosProtection, ddosResponse } from "./ddos-protection.js";
 const SERVER_VERSION = "0.1.0";
 const MIN_SDK_VERSION = "0.1.0";
 const SERVER_FEATURES = [
@@ -67,8 +84,16 @@ const SERVER_FEATURES = [
   "event_polling",
   "graphql_api",
   "api_versioning",
+  "quota_tracking",
+  "deprecation_warnings",
+  "response_compression",
+  "job_queue",
+  "graceful_shutdown",
 ];
 
+export function createApp({ config, soroban, metrics, metricsAggregator, analytics = new AnalyticsService() }) {
+  return function app(req, res) {
+    const startTime = Date.now();
 export function createApp({
   config,
   soroban,
@@ -86,10 +111,18 @@ export function createApp({
   realtime = null,
   nonceStore = new NonceStore({ ttlSeconds: config.requestSigningMaxAgeSeconds }),
   vcSerializer = createVcSerializer(config, { logger }),
+  emailTransport = new EmailTransport(config),
+  quotaTracker = null,
+  deprecationRegistry = null,
+  ddosProtection = null,
 }) {
   // Expose the key service on config so http-utils.requireAuth can validate
   // issued API keys instead of falling back to the single admin key.
   config.apiKeyService = apiKeyService;
+  
+  // Expose job queues on config for route handlers
+  config.credentialIssueQueue = credentialIssueQueue;
+  config.batchVerificationQueue = batchVerificationQueue;
 
   // One limiter per app instance, so its buckets live as long as the server
   // rather than being rebuilt per request.
@@ -99,6 +132,42 @@ export function createApp({
       whitelist: config.rateLimitWhitelist ?? [],
       trustProxy: config.trustProxy ?? false,
       maxBuckets: config.rateLimitMaxBuckets ?? 10000,
+    });
+
+  // One quota tracker per app instance (#748), independent of the rate
+  // limiter above: it counts against calendar day/month budgets rather than
+  // a rolling per-minute window.
+  const quota =
+    quotaTracker ??
+    new QuotaTracker({
+      overageMode: config.quotaOverageMode ?? "block",
+      onThreshold: ({ apiKeyId, tier, period, threshold, used, limit }) => {
+        metrics?.observeQuotaThreshold?.({ tier, period, threshold });
+        logger.warn({ apiKeyId, tier, period, threshold, used, limit }, "API quota threshold reached");
+        return notifyQuotaThresholdOwner({ config, apiKeyService, emailTransport, apiKeyId, tier, period, threshold, used, limit });
+      },
+    });
+
+  const ddos =
+    ddosProtection ??
+    new DdosProtection(config, {
+      onAlert: async (event) => {
+        metrics?.observeDdosEvent?.(event.type);
+        logger.warn(event, "DDoS protection event");
+      },
+    });
+
+  // One deprecation registry per app instance (#751).
+  const deprecation =
+    deprecationRegistry ??
+    new DeprecationRegistry({
+      onUsage: ({ rule, req }) => {
+        metrics?.observeDeprecatedEndpointUsage?.(rule.name);
+        logger.warn({ endpoint: rule.name, apiKeyId: req.apiKeyId ?? null, path: req.url }, "Deprecated endpoint used");
+        const apiKeyId = req.apiKeyId ?? req.auth?.apiKey?.id ?? null;
+        if (!apiKeyId || !deprecation.shouldNotify(apiKeyId, rule.name)) return undefined;
+        return notifyDeprecatedEndpointOwner({ config, apiKeyService, emailTransport, apiKeyId, rule });
+      },
     });
 
   return async function app(req, res) {
@@ -146,6 +215,19 @@ export function createApp({
     // nonce is stashed on the request for the one HTML page we render.
     req.cspNonce = setSecurityHeaders(req, res, config);
 
+    // Apply response compression middleware (#721)
+    if (config.compressionEnabled) {
+      const compression = createCompressionMiddleware({
+        threshold: config.compressionThreshold,
+        gzipLevel: config.compressionGzipLevel,
+        brotliLevel: config.compressionBrotliLevel,
+        enableBrotli: config.compressionEnableBrotli,
+        metrics,
+      });
+      // Apply compression to response
+      await compression.middleware()(req, res);
+    }
+
     // Access logging is attached before any routing so a request that is
     // rejected by CORS, auth, or the rate limiter is still recorded.
     if (config.accessLogEnabled && !isMetricsEndpoint) {
@@ -157,12 +239,42 @@ export function createApp({
       res.on("finish", () => finishAccessLog({ requestBody: req.loggedBody ?? null }));
     }
 
+    // Origin-side DDoS controls run before authentication, body parsing, or RPC work.
+    // Health/observability endpoints remain available for load balancers and alerts.
+    if (!isMetricsEndpoint && !["/health", "/ready", "/live"].includes(pathname)) {
+      const trafficResult = await ddos.check(req);
+      if (!trafficResult.allowed) return ddosResponse(res, trafficResult);
+    }
+
     // Apply CORS headers
     if (setCorsHeaders(req, res, config)) {
       // Preflight OPTIONS request
       return res.writeHead(204).end();
     }
 
+    // Record analytics when response completes
+    res.on("finish", () => {
+      const durationMs = Math.max(0, Date.now() - startTime);
+      const consumer =
+        req.headers["x-api-key"] ||
+        req.headers.authorization?.replace(/^Bearer\s+/i, "") ||
+        "anonymous";
+      const country = detectCountry(req);
+
+      analytics.recordRequest({
+        method: req.method,
+        path: url.pathname,
+        statusCode: res.statusCode,
+        durationMs,
+        consumer,
+        country,
+      });
+    });
+
+    return requestContextStore.run({ requestId }, async () => {
+      try {
+        if (req.method === "GET" && url.pathname === "/info") {
+          return sendFormatted(req, res, 200, {
     // Validate well-known request headers before any routing or auth work.
     if (!validateRequest(res, schemas.commonHeaders, { headers: req.headers }).ok) {
       return;
@@ -191,6 +303,13 @@ export function createApp({
     if (req.headers["x-user-tier"]) {
       req.userTier = req.headers["x-user-tier"].toLowerCase();
     }
+
+    // Per-endpoint deprecation warnings (#751), independent of the
+    // per-version deprecation versioning.js already applied above. Runs
+    // after API key extraction so usage logging/notification can be
+    // attributed to the calling key.
+    const deprecationRule = deprecation.match(req.method, pathname);
+    if (deprecationRule) deprecation.handle(req, res, deprecationRule);
 
     // Rate limiting check (exempt /info, /health, /metrics)
     const isExempt = ["/info", "/health", "/ready", "/live", "/metrics"].includes(url.pathname);
@@ -312,6 +431,33 @@ export function createApp({
       }
     }
 
+    // Quota check (#748): a separate budget from the rate limit above,
+    // measured against calendar day/month boundaries rather than a rolling
+    // window. GET /quota itself is exempt so checking your own usage never
+    // consumes it.
+    if (!isExempt && pathname !== "/quota") {
+      const quotaResult = quota.consume(req);
+      const binding = pickQuotaBinding(quotaResult);
+      res.setHeader("X-Quota-Tier", quotaResult.tier);
+      res.setHeader("X-Quota-Period", binding.period);
+      res.setHeader("X-Quota-Limit", String(binding.limit));
+      res.setHeader("X-Quota-Remaining", String(binding.remaining));
+      res.setHeader("X-Quota-Reset", String(binding.resetAt));
+      if (quotaResult.overage) res.setHeader("X-Quota-Overage", "true");
+
+      if (!quotaResult.allowed) {
+        return sendJson(res, 429, {
+          error: "quota_exceeded",
+          code: "QUOTA_EXCEEDED",
+          scope: quotaResult.scope,
+          tier: quotaResult.tier,
+          message: `${quotaResult.scope === "daily" ? "Daily" : "Monthly"} API quota exceeded for tier '${quotaResult.tier}'.`,
+          daily: quotaResult.daily,
+          monthly: quotaResult.monthly,
+        });
+      }
+    }
+
     return requestContextStore.run({ requestId }, async () => {
       try {
         if (req.method === "GET" && pathname === "/info") {
@@ -324,6 +470,11 @@ export function createApp({
           });
         }
 
+        if (req.method === "GET" && url.pathname === "/health") {
+          const contracts = await soroban.pingAllContracts();
+          const ok = Object.values(contracts).every(Boolean);
+          return sendFormatted(req, res, ok ? 200 : 503, {
+            status: ok ? "ok" : "degraded",
         // CSP violation reports (#754). Unauthenticated by necessity — the
         // browser posts these on its own behalf, with no credentials — so the
         // handler only ever logs and counts, and never trusts the contents.
@@ -419,6 +570,16 @@ export function createApp({
           return handleEventsRequest(req, res, url, { config, soroban });
         }
 
+        if (req.method === "GET" && pathname === "/events/poll") {
+          return handleLongPollRequest(req, res, url, { config, soroban });
+        }
+
+        if (req.method === "GET" && pathname === "/quota") {
+          if (!await requireAuth(req, res, config, [])) return;
+          const usage = quota.peek(req);
+          return sendJson(res, 200, { ...usage, overageMode: quota.overageMode });
+        }
+
         if (req.method === "GET" && pathname === "/metrics") {
           if (metricsAggregator)
             await metricsAggregator
@@ -439,6 +600,12 @@ export function createApp({
           return sendText(res, 200, body, metrics.contentType ? { "content-type": metrics.contentType } : {});
         }
 
+        // #390: paginated credential list
+        if (req.method === "GET" && url.pathname === "/credentials") {
+          const limitParam = url.searchParams.get("limit") ?? "50";
+          const limitNum = Number.parseInt(limitParam, 10) || 50;
+          if (limitNum > 200) {
+            return sendFormatted(req, res, 400, { code: "INVALID_REQUEST", message: "limit must not exceed 200" });
         // ── GraphQL Endpoint ─────────────────────────────────────────
         if (pathname === "/graphql") {
           if (req.method === "GET") {
@@ -504,6 +671,7 @@ export function createApp({
             limit: limitNum,
             cursor: validated.data.query.cursor ?? null,
           });
+          return sendFormatted(req, res, 200, { items, nextCursor });
 
           if (wantsJsonLd(req, url)) {
             return sendJson(
@@ -545,6 +713,8 @@ export function createApp({
           }
           const credentials = await readCredentials(config);
           const credential = credentials.find((c) => c.id === credentialId);
+          if (!credential) return notFound(res, req);
+          return sendFormatted(req, res, 200, credential);
           if (!credential) return notFound(res);
 
           // W3C JSON-LD form (#753), opt-in so existing clients keep the
@@ -606,6 +776,16 @@ export function createApp({
           const recordVerification = (result) =>
             metrics?.observeCredentialVerification?.(result);
           if (!credential) {
+            return sendFormatted(req, res, 200, { verified: false, reason: "not_found" });
+          }
+          if (credential.revoked) {
+            return sendFormatted(req, res, 200, { verified: false, reason: "revoked" });
+          }
+          const now = Math.floor(Date.now() / 1000);
+          if (credential.expiresAt > 0 && credential.expiresAt < now) {
+            return sendFormatted(req, res, 200, { verified: false, reason: "expired" });
+          }
+          return sendFormatted(req, res, 200, { verified: true, credential });
             recordVerification("not_found");
             return sendJson(res, 200, { verified: false, reason: "not_found" });
           }
@@ -644,6 +824,47 @@ export function createApp({
         )
           return;
 
+        // Analytics Dashboard
+        if (req.method === "GET" && url.pathname === "/admin/analytics/dashboard") {
+          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+          return res.end(analytics.renderDashboardHtml());
+        }
+
+        // Analytics Export (CSV or JSON)
+        if (req.method === "GET" && url.pathname === "/admin/analytics/export") {
+          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          const format = url.searchParams.get("format")?.toLowerCase();
+          if (format === "json" || req.headers["accept"] === "application/json") {
+            return sendFormatted(req, res, 200, analytics.exportJson(), {
+              "content-disposition": 'attachment; filename="analytics.json"',
+            });
+          }
+          res.writeHead(200, {
+            "content-type": "text/csv; charset=utf-8",
+            "content-disposition": 'attachment; filename="analytics.csv"',
+          });
+          return res.end(analytics.exportCsv());
+        }
+
+        // Analytics Summary Data
+        if (req.method === "GET" && url.pathname === "/admin/analytics") {
+          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          return sendFormatted(req, res, 200, analytics.getSummary());
+        }
+
+        if (req.method === "POST" && url.pathname === "/credentials") {
+          if (!requireAuth(req, res, config, ['credentials:write'])) return;
+          if (validateContentType(req, res)) return;
+          const body = await readJson(req, config);
+          if (body.__payloadTooLarge)
+            return sendFormatted(req, res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+          if (!body.id)
+            return sendFormatted(req, res, 400, { code: "INVALID_REQUEST", message: "Request body must include a credential id." });
+          try {
+            const updated = await createAndPersistCredential(config, body);
+            await appendAuditLog(config, { action: "issue_credential", credentialId: body.id });
+            return sendFormatted(req, res, 201, body);
         if (req.method === "POST" && (pathname === "/credentials" || pathname === "/credentials/issue")) {
           if (!await requireAuth(req, res, config, ['credentials:write'])) return;
           if (validateContentType(req, res)) return;
@@ -669,7 +890,7 @@ export function createApp({
             return sendJson(res, 201, credential);
           } catch (err) {
             if (err instanceof DuplicateCredentialError) {
-              return sendJson(res, 409, {
+              return sendFormatted(req, res, 409, {
                 code: "CREDENTIAL_ALREADY_EXISTS",
                 message: err.message,
                 details: [{ field: "id", value: err.id }],
@@ -693,6 +914,68 @@ export function createApp({
           webhookService.trigger("credential.revoked", { id: credentialId, revokedAt: revoked.revokedAt }).catch(() => {});
           realtime?.emitCredentialEvent("revoked", revoked);
           return sendJson(res, 200, { revoked: true, credential: revoked });
+        }
+
+        // Credential update: PUT /credentials/:id or PATCH /credentials/:id with optimistic concurrency
+        const updateMatch = pathname.match(/^\/credentials\/([^/]+)$/);
+        if ((req.method === "PUT" || req.method === "PATCH") && updateMatch) {
+          if (!await requireAuth(req, res, config, ['credentials:write'])) return;
+          if (validateContentType(req, res)) return;
+          const credentialId = decodeURIComponent(updateMatch[1]);
+          const body = await readJson(req, config);
+          if (body.__payloadTooLarge)
+            return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+
+          // Check version from If-Match header or body
+          const ifMatchHeader = req.headers['if-match'];
+          const expectedVersion = ifMatchHeader
+            ? ifMatchHeader.replace(/^"|"$/g, '')
+            : (body.version ?? body.expectedVersion);
+
+          try {
+            const updated = await updateAndPersistCredential(config, credentialId, body, expectedVersion);
+            if (!updated) return notFound(res);
+            await appendAuditLog(config, { action: "update_credential", credentialId });
+            webhookService.trigger("credential.updated", updated).catch(() => {});
+            realtime?.emitCredentialEvent("updated", updated);
+            return sendJson(res, 200, updated, { ETag: `"${updated.version}"` });
+          } catch (err) {
+            if (err instanceof ConcurrencyConflictError) {
+              return sendJson(res, 409, {
+                code: "CONCURRENCY_CONFLICT",
+                message: err.message,
+                details: [
+                  { field: "version", expected: err.expectedVersion, current: err.currentVersion },
+                ],
+              });
+            }
+            throw err;
+          }
+        }
+
+        // ── Batch Operations (#749) ─────────────────────────────────────
+        if (req.method === "POST" && pathname === "/batch") {
+          if (validateContentType(req, res)) return;
+          const body = await readJson(req, config);
+          if (body.__payloadTooLarge)
+            return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+          const validated = validateRequest(res, schemas.batchOperations, { body });
+          if (!validated.ok) return;
+          const { operations, atomic } = validated.data.body;
+
+          // Auth requirement follows whichever operation types are present:
+          // issue/revoke mutate state and need write scope, verify only reads.
+          const types = new Set(operations.map((op) => op.type));
+          const requiredScopes = [];
+          if (types.has("issue") || types.has("revoke")) requiredScopes.push("credentials:write");
+          if (types.has("verify")) requiredScopes.push("credentials:read");
+          if (!await requireAuth(req, res, config, requiredScopes)) return;
+
+          const batchResult = await executeBatch(
+            { operations, atomic: Boolean(atomic) },
+            { config, webhookService, realtime, metrics },
+          );
+          return sendJson(res, 200, batchResult);
         }
 
         // ── Webhook Endpoints ──────────────────────────────────────────
@@ -820,13 +1103,17 @@ export function createApp({
           if (!await requireAuth(req, res, config, ['admin:read'])) return;
           
           const issuers = await soroban.getIssuers();
-          return sendJson(res, 200, { issuers });
+          return sendFormatted(req, res, 200, { issuers });
         }
 
         if (req.method === "POST" && pathname === "/admin/issuers") {
           if (validateContentType(req, res)) return;
           const body = await readJson(req, config);
           if (body.__payloadTooLarge)
+            return sendFormatted(req, res, 413, { error: "payload_too_large" });
+          if (!body.issuer)
+            return sendFormatted(req, res, 400, { error: "issuer_required" });
+          await soroban.addIssuer(body.issuer);
             return sendJson(res, 413, { error: "payload_too_large" });
           const validated = validateRequest(res, schemas.addIssuer, { body });
           if (!validated.ok) return;
@@ -838,6 +1125,7 @@ export function createApp({
             actor: req.headers["x-actor"] ?? config.adminActor,
             issuer,
           });
+          return sendFormatted(req, res, 201, { issuer: body.issuer });
           return sendJson(res, 201, { issuer });
         }
 
@@ -847,6 +1135,9 @@ export function createApp({
           
           const body = await readJson(req, config);
           if (body.__payloadTooLarge)
+            return sendFormatted(req, res, 413, { error: "payload_too_large" });
+          const issuer = body.issuer ?? url.searchParams.get("issuer");
+          if (!issuer) return sendFormatted(req, res, 400, { error: "issuer_required" });
             return sendJson(res, 413, { error: "payload_too_large" });
           const validated = validateRequest(res, schemas.removeIssuer, {
             body,
@@ -876,7 +1167,7 @@ export function createApp({
             actor: req.headers["x-actor"] ?? config.adminActor,
             issuer,
           });
-          return sendJson(res, 200, { issuer });
+          return sendFormatted(req, res, 200, { issuer });
         }
 
         if (req.method === "GET" && pathname === "/admin/expiry-report") {
@@ -893,7 +1184,8 @@ export function createApp({
             windowDays,
             includeNotified: true,
           });
-          return sendJson(
+          return sendFormatted(
+            req,
             res,
             200,
             paginate(expiring, {
@@ -903,6 +1195,7 @@ export function createApp({
           );
         }
 
+        return notFound(res, req);
         if (req.method === "GET" && (url.pathname === "/admin/expiry-thresholds" || url.pathname === "/expiry/thresholds")) {
           if (!await requireAuth(req, res, config, ['admin:read'])) return;
           return sendJson(res, 200, {
@@ -1013,21 +1306,168 @@ export function createApp({
           return sendJson(res, 200, rotated);
         }
 
+        // ── Audit Log Query API (#720) ─────────────────────────────────
+        // GET /admin/audit-logs — paginated query over daily NDJSON audit log files.
+        // Query params: date (YYYY-MM-DD), action (string), limit (int), offset (int)
+        if (req.method === "GET" && pathname === "/admin/audit-logs") {
+          if (!await requireAuth(req, res, config, ['admin:read'])) return;
+
+          const dateParam  = url.searchParams.get("date")   ?? null;
+          const actionParam = url.searchParams.get("action") ?? null;
+          const limit  = Math.min(Math.max(Number.parseInt(url.searchParams.get("limit")  ?? "50",  10) || 50, 1), 500);
+          const offset = Math.max(Number.parseInt(url.searchParams.get("offset") ?? "0", 10) || 0, 0);
+
+          try {
+            const logDir = path.dirname(config.auditLogPath);
+            const baseName = path.basename(config.auditLogPath);
+
+            // Collect candidate log files
+            let files;
+            try {
+              files = await fs.readdir(logDir);
+            } catch (e) {
+              if (e.code === 'ENOENT') files = [];
+              else throw e;
+            }
+
+            const logPattern = new RegExp(`^${baseName.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')}-(\\d{4}-\\d{2}-\\d{2})\\.ndjson$`);
+            let matchingFiles = files.filter((f) => {
+              const m = f.match(logPattern);
+              if (!m) return false;
+              if (dateParam && m[1] !== dateParam) return false;
+              return true;
+            }).sort(); // ascending date order
+
+            // Parse all matching entries
+            const entries = [];
+            for (const file of matchingFiles) {
+              let raw;
+              try {
+                raw = await fs.readFile(path.join(logDir, file), 'utf8');
+              } catch (e) {
+                if (e.code === 'ENOENT') continue;
+                throw e;
+              }
+              for (const line of raw.split('\n')) {
+                const trimmed = line.trim();
+                if (!trimmed) continue;
+                try {
+                  const entry = JSON.parse(trimmed);
+                  if (actionParam && entry.action !== actionParam) continue;
+                  entries.push(entry);
+                } catch {
+                  // skip malformed lines
+                }
+              }
+            }
+
+            const total = entries.length;
+            const page = entries.slice(offset, offset + limit);
+            return sendJson(res, 200, { total, limit, offset, entries: page });
+          } catch (err) {
+            logger.error({ error: err.message, stack: err.stack }, 'Failed to read audit logs');
+            return sendJson(res, 500, { error: 'audit_log_read_failed', message: err.message });
+          }
+        }
+
+        // GET /admin/audit-logs/export — CSV export of audit log entries.
+        // Supports the same query params as /admin/audit-logs (date, action).
+        if (req.method === "GET" && pathname === "/admin/audit-logs/export") {
+          if (!await requireAuth(req, res, config, ['admin:read'])) return;
+
+          const dateParam   = url.searchParams.get("date")   ?? null;
+          const actionParam = url.searchParams.get("action") ?? null;
+
+          try {
+            const logDir  = path.dirname(config.auditLogPath);
+            const baseName = path.basename(config.auditLogPath);
+
+            let files;
+            try {
+              files = await fs.readdir(logDir);
+            } catch (e) {
+              if (e.code === 'ENOENT') files = [];
+              else throw e;
+            }
+
+            const logPattern = new RegExp(`^${baseName.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')}-(\\d{4}-\\d{2}-\\d{2})\\.ndjson$`);
+            const matchingFiles = files.filter((f) => {
+              const m = f.match(logPattern);
+              if (!m) return false;
+              if (dateParam && m[1] !== dateParam) return false;
+              return true;
+            }).sort();
+
+            // Collect all field names across all entries to build CSV header dynamically
+            const allEntries = [];
+            for (const file of matchingFiles) {
+              let raw;
+              try {
+                raw = await fs.readFile(path.join(logDir, file), 'utf8');
+              } catch (e) {
+                if (e.code === 'ENOENT') continue;
+                throw e;
+              }
+              for (const line of raw.split('\n')) {
+                const trimmed = line.trim();
+                if (!trimmed) continue;
+                try {
+                  const entry = JSON.parse(trimmed);
+                  if (actionParam && entry.action !== actionParam) continue;
+                  allEntries.push(entry);
+                } catch {
+                  // skip malformed lines
+                }
+              }
+            }
+
+            // Derive CSV columns from the union of all entry keys
+            const colSet = new Set();
+            for (const e of allEntries) Object.keys(e).forEach((k) => colSet.add(k));
+            const cols = ['timestamp', 'action', ...Array.from(colSet).filter((c) => c !== 'timestamp' && c !== 'action').sort()];
+
+            const csvEscape = (v) => {
+              if (v === null || v === undefined) return '';
+              const s = typeof v === 'object' ? JSON.stringify(v) : String(v);
+              return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
+            };
+
+            const lines = [cols.join(',')];
+            for (const e of allEntries) {
+              lines.push(cols.map((c) => csvEscape(e[c])).join(','));
+            }
+
+            const csv = lines.join('\n');
+            const exportDate = dateParam ?? new Date().toISOString().split('T')[0];
+            res.writeHead(200, {
+              'content-type': 'text/csv; charset=utf-8',
+              'content-disposition': `attachment; filename="audit-logs-${exportDate}.csv"`,
+            });
+            return res.end(csv);
+          } catch (err) {
+            logger.error({ error: err.message, stack: err.stack }, 'Failed to export audit logs');
+            return sendJson(res, 500, { error: 'audit_log_export_failed', message: err.message });
+          }
+        }
+
         return notFound(res);
       } catch (error) {
-        if (error.name === "SorobanError") {
+        if (error.name === "SorobanError" || error.name === "SorobanUnavailableError") {
+          const isUnavailable = error.name === "SorobanUnavailableError" || error.category === "rpc_unavailable";
+          const statusCode = isUnavailable ? 503 : 500;
           logger.error({ 
-            error: error.category, 
-            message: error.publicMessage,
-            internalDetail: error.internalDetail 
+            error: error.category || "rpc_unavailable", 
+            message: error.publicMessage || error.message,
+            internalDetail: error.internalDetail || error.message 
           }, 'Soroban error occurred');
-          return sendJson(res, 500, {
-            error: error.category,
-            message: error.publicMessage,
+          return sendJson(res, statusCode, {
+            error: error.category || "rpc_unavailable",
+            message: error.publicMessage || error.message,
+            ...(soroban?.circuitBreaker ? { circuitBreakerState: soroban.circuitBreaker.state } : {}),
           });
         }
         logger.error({ error: error.message, stack: error.stack }, 'Internal server error');
-        return sendJson(res, 500, {
+        return sendFormatted(req, res, 500, {
           error: "internal_server_error",
           message: error.message,
         });

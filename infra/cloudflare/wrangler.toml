@@ -6,8 +6,17 @@ workers_dev = false
 [vars]
 CANARY_ENABLED = "false"
 CANARY_PERCENTAGE = "10"
+# Edge DDoS policy; tune through deployment configuration and Cloudflare rules.
+EDGE_REQUESTS_PER_MINUTE = "300"
+BLOCKED_REGIONS = ""
+# Set TURNSTILE_SITE_KEY here; store the secret key with `wrangler secret put TURNSTILE_SECRET_KEY`.
+TURNSTILE_SITE_KEY = ""
 # Set these with `wrangler secret put` or the deployment workflow.
 # STABLE_ORIGIN and CANARY_ORIGIN must be complete https:// origins.
+
+# Configure a Cloudflare dashboard/notification policy for Worker errors,
+# rate-limit responses, and origin failures. Alert delivery is managed in the
+# Cloudflare account rather than in source control.
 
 [observability]
 enabled = true

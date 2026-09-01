@@ -784,9 +784,9 @@ export default function IdentityPanel() {
         )}
 
         {reputationLoading && (
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: '1rem' }}>
-            Loading reputation…
-          </p>
+          <div style={{ marginTop: '1rem' }} aria-label="Loading reputation">
+            <SkeletonCard rows={3} />
+          </div>
         )}
 
         {!reputationLoading && reputation && (

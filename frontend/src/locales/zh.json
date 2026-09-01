@@ -1,0 +1,83 @@
+{
+  "app": {
+    "title": "Soroban 身份",
+    "subtitle": "去中心化身份，构建无需信任的世界",
+    "lightMode": "☀ 浅色",
+    "darkMode": "☾ 深色",
+    "networkOnline": "网络正常",
+    "networkOffline": "网络错误"
+  },
+  "tabs": {
+    "identity": "身份 (DID)",
+    "credentials": "凭证",
+    "label": "导航"
+  },
+  "wallet": {
+    "connect": "连接钱包",
+    "disconnect": "断开连接",
+    "connecting": "连接中…"
+  },
+  "identity": {
+    "resolveDid": "解析 DID",
+    "resolveAddress": "Stellar 地址 (G…)",
+    "resolve": "解析",
+    "resolving": "解析中…",
+    "reputation": "声誉",
+    "score": "积分",
+    "reporters": "报告者",
+    "lastUpdated": "最后更新",
+    "noReputation": "未找到该地址的声誉记录。",
+    "loadingReputation": "正在加载声誉…",
+    "antiSybil": "反女巫检查",
+    "minScore": "最低积分",
+    "minReporters": "最少报告者",
+    "runSybilCheck": "运行女巫检查",
+    "checkingSybil": "检查中…",
+    "passesSybil": "✓ 通过女巫检查",
+    "failsSybil": "✗ 未通过女巫检查",
+    "resolveDIDFirst": "请先在上方解析 DID 以运行反女巫检查。",
+    "createDid": "创建 DID",
+    "creating": "创建中…",
+    "connectToCreate": "连接您的 Freighter 钱包以创建新的链上 DID。",
+    "connectedAs": "已连接为",
+    "showQr": "显示二维码",
+    "hideQr": "隐藏二维码"
+  },
+  "credentials": {
+    "credentials": "凭证",
+    "verifyCredential": "验证凭证",
+    "credentialIdPlaceholder": "凭证 ID（十六进制）",
+    "verify": "验证",
+    "verifying": "验证中…",
+    "valid": "有效",
+    "revokedMsg": "无效 — 凭证已被吊销",
+    "expiredMsg": "无效 — 凭证已过期",
+    "notFoundMsg": "无效 — 未找到凭证",
+    "invalid": "无效",
+    "issueCredential": "颁发凭证",
+    "issuingAs": "以以下身份颁发",
+    "subjectPlaceholder": "主体地址 (G…)",
+    "issueKyc": "颁发 KYC 凭证",
+    "issuing": "颁发中…",
+    "connectToIssue": "连接您的 Freighter 钱包以注册颁发者身份颁发凭证。",
+    "noCredentials": "未找到类型为 {{type}} 的凭证。",
+    "noExpiry": "无到期时间",
+    "expiredDaysAgo": "{{count}} 天前过期",
+    "expiredDaysAgo_plural": "{{count}} 天前过期",
+    "expiredHoursAgo": "{{count}} 小时前过期",
+    "expiredHoursAgo_plural": "{{count}} 小时前过期",
+    "expiredMinsAgo": "{{count}} 分钟前过期",
+    "expiredMinsAgo_plural": "{{count}} 分钟前过期",
+    "expiresInDays": "{{count}} 天后过期",
+    "expiresInDays_plural": "{{count}} 天后过期",
+    "expiresInHours": "{{count}} 小时后过期",
+    "expiresInHours_plural": "{{count}} 小时后过期",
+    "expiresInMins": "{{count}} 分钟后过期",
+    "expiresInMins_plural": "{{count}} 分钟后过期"
+  },
+  "a11y": {
+    "skipToContent": "跳至主内容",
+    "switchLanguage": "切换语言",
+    "dismissNotification": "关闭通知"
+  }
+}
