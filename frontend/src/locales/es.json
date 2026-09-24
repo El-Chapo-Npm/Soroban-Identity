@@ -10,6 +10,7 @@
   "tabs": {
     "identity": "Identidad (DID)",
     "credentials": "Credenciales",
+    "issuerAnalytics": "Analíticas del Emisor",
     "label": "Secciones"
   },
   "wallet": {

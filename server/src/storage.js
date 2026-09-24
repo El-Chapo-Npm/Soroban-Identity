@@ -3,6 +3,16 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { requestContextStore } from './request-context.js';
 import { logger } from './logger.js';
+import { EventStore, createEvent, EventTypes } from './events/index.js';
+
+let _eventStoreInstance = null;
+function getEventStore(config) {
+  if (!_eventStoreInstance) {
+    _eventStoreInstance = new EventStore({ dataDir: `${config?.dataDir || './data'}/events` });
+    void _eventStoreInstance.init();
+  }
+  return _eventStoreInstance;
+}
 
 // ── StorageAdapter interface (#389) ──────────────────────────────────────────
 // Custom adapters must export a default object implementing:
@@ -200,7 +210,9 @@ export async function appendAuditLog(config, entry) {
     lastCheckedDate = dateString;
   }
 
-  const record = { timestamp: new Date().toISOString(), ...entry };
+  const context = requestContextStore.getStore();
+  const tenant_id = entry.tenant_id || context?.tenantId || config?.tenantId || 'default';
+  const record = { timestamp: new Date().toISOString(), tenant_id, ...entry };
   const line = `${JSON.stringify(record)}\n`;
 
   // Acquire a per-file mutex so concurrent callers queue up and each write
@@ -318,6 +330,24 @@ export async function createAndPersistCredential(config, credential) {
     const current = await readCredentials(config);
     const updated = createCredential(current, credential); // throws DuplicateCredentialError
     await writeCredentials(config, updated);
+
+    // Event Sourcing immutable audit log (#802)
+    try {
+      const eventStore = getEventStore(config);
+      const createdItem = updated[updated.length - 1];
+      await eventStore.append(
+        createEvent({
+          type: EventTypes.CREDENTIAL_ISSUED,
+          aggregateId: credential.id,
+          aggregateType: 'Credential',
+          tenantId: createdItem.tenant_id || config.tenantId || 'default',
+          payload: { ...credential },
+        })
+      );
+    } catch (e) {
+      logger.warn({ error: e.message }, 'Failed to append CredentialIssued event');
+    }
+
     return updated;
   } finally {
     release();
@@ -344,7 +374,10 @@ export function createCredential(credentials, credential) {
   if (credentials.some((item) => item.id === credential.id)) {
     throw new DuplicateCredentialError(credential.id);
   }
-  return [...credentials, credential];
+  const context = requestContextStore.getStore();
+  const tenant_id = credential.tenant_id || context?.tenantId || 'default';
+  const itemWithTenant = { tenant_id, ...credential };
+  return [...credentials, itemWithTenant];
 }
 
 /**
@@ -364,6 +397,24 @@ export async function revokeAndPersistCredential(config, id) {
     const revokedAt = new Date().toISOString();
     const updated = current.map((c) => (c.id === id ? { ...c, revoked: true, revokedAt } : { ...c }));
     await writeCredentials(config, updated);
+
+    // Event Sourcing immutable audit log (#802)
+    try {
+      const eventStore = getEventStore(config);
+      const revokedItem = updated[index];
+      await eventStore.append(
+        createEvent({
+          type: EventTypes.CREDENTIAL_REVOKED,
+          aggregateId: id,
+          aggregateType: 'Credential',
+          tenantId: revokedItem.tenant_id || config.tenantId || 'default',
+          payload: { revokedAt },
+        })
+      );
+    } catch (e) {
+      logger.warn({ error: e.message }, 'Failed to append CredentialRevoked event');
+    }
+
     return updated[index];
   } finally {
     release();

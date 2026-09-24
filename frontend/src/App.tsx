@@ -10,6 +10,7 @@ import { useKeyboardShortcutsContext } from "./context/KeyboardShortcutsContext"
 // route small and fetch the credentials route only when it is needed.
 const IdentityPanel = lazy(() => import("./components/IdentityPanel"));
 const CredentialsPanel = lazy(() => import("./components/CredentialsPanel"));
+const IssuerDashboard = lazy(() => import("./pages/IssuerDashboard"));
 const preloadCredentialsPanel = () => {
   void import("./components/CredentialsPanel");
 };
@@ -44,9 +45,10 @@ const SUPPORTED_LOCALES: { code: string; label: string }[] = [
 export enum Tab {
   Identity = "identity",
   Credentials = "credentials",
+  IssuerAnalytics = "issuerAnalytics",
 }
 
-const TAB_ORDER: Tab[] = [Tab.Identity, Tab.Credentials];
+const TAB_ORDER: Tab[] = [Tab.Identity, Tab.Credentials, Tab.IssuerAnalytics];
 
 export default function App() {
   const [tab, setTab] = useState<Tab>(Tab.Identity);
@@ -502,6 +504,14 @@ export default function App() {
                 <CredentialsPanel verifyId={verifyId} />
               </>
             )}
+          </div>
+          <div
+            id={`panel-${Tab.IssuerAnalytics}`}
+            role="tabpanel"
+            aria-labelledby={`tab-${Tab.IssuerAnalytics}`}
+            hidden={tab !== Tab.IssuerAnalytics}
+          >
+            {tab === Tab.IssuerAnalytics && <IssuerDashboard />}
           </div>
           </Suspense>
         </ErrorBoundary>

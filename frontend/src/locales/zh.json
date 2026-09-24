@@ -10,6 +10,7 @@
   "tabs": {
     "identity": "身份 (DID)",
     "credentials": "凭证",
+    "issuerAnalytics": "发证方分析",
     "label": "导航"
   },
   "wallet": {

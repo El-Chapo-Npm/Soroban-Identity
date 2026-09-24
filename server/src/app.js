@@ -73,9 +73,11 @@ import { TieredRateLimiter } from "./rate-limiter.js";
 import { ApiKeyService } from "./api-keys.js";
 import { EmailTransport } from "./email.js";
 import { pickQuotaBinding, QuotaTracker, notifyQuotaThresholdOwner } from "./quota.js";
-import { executeBatch } from "./batch.js";
 import { DeprecationRegistry, notifyDeprecatedEndpointOwner } from "./deprecation.js";
 import { DdosProtection, ddosResponse } from "./ddos-protection.js";
+import { TenantRegistry, handleTenantRoutes, resolveTenantId } from "./tenancy/index.js";
+import { openTelemetryHttpMiddleware } from "./tracing/index.js";
+import { EventStore, EventReplayer, createEvent, EventTypes, handleEventSourcingRoutes } from "./events/index.js";
 const SERVER_VERSION = "0.1.0";
 const MIN_SDK_VERSION = "0.1.0";
 const SERVER_FEATURES = [
@@ -171,6 +173,13 @@ export function createApp({
       },
     });
 
+  const tenantRegistry = new TenantRegistry(config);
+  void tenantRegistry.init();
+
+  const eventStore = new EventStore({ dataDir: `${config.dataDir}/events` });
+  void eventStore.init();
+  const eventReplayer = new EventReplayer(eventStore);
+
   return async function app(req, res) {
     const url = new URL(
       req.url,
@@ -210,6 +219,14 @@ export function createApp({
     if (!isMetricsEndpoint) {
       res.setHeader("X-Request-ID", requestId);
     }
+
+    // Resolve tenant context (#800)
+    const tenantId = resolveTenantId(req);
+    req.tenantId = tenantId;
+    res.setHeader("X-Tenant-ID", tenantId);
+
+    // Distributed Tracing with OpenTelemetry (#801)
+    openTelemetryHttpMiddleware()(req, res);
 
     // CSP and companion security headers (#754). Set before any branch that
     // can produce a response, so an early return still carries them. The
@@ -459,7 +476,7 @@ export function createApp({
       }
     }
 
-    return requestContextStore.run({ requestId }, async () => {
+    return requestContextStore.run({ requestId, tenantId }, async () => {
       try {
         if (req.method === "GET" && pathname === "/info") {
           return sendJson(res, 200, {
@@ -1663,6 +1680,16 @@ export function createApp({
             logger.error({ error: err.message, stack: err.stack }, 'Failed to export audit logs');
             return sendJson(res, 500, { error: 'audit_log_export_failed', message: err.message });
           }
+        }
+
+        // Multi-tenant administration and provisioning endpoints (#800)
+        if (handleTenantRoutes(req, res, url, tenantRegistry, (entry) => appendAuditLog(config, entry))) {
+          return;
+        }
+
+        // Event sourcing audit trail routes (#802)
+        if (handleEventSourcingRoutes(req, res, url, eventStore, eventReplayer)) {
+          return;
         }
 
         return notFound(res);
