@@ -10,6 +10,7 @@
   "tabs": {
     "identity": "Identity (DID)",
     "credentials": "Credentials",
+    "issuerAnalytics": "Issuer Analytics",
     "label": "Sections"
   },
   "wallet": {
