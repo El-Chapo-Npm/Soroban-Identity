@@ -1,0 +1,21 @@
+services:
+  blue:
+    image: ${IMAGE:-soroban-identity:latest}
+    environment:
+      COLOR: blue
+    ports: ["127.0.0.1:3001:3001"]
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:3001/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+  green:
+    image: ${IMAGE:-soroban-identity:latest}
+    environment:
+      COLOR: green
+    ports: ["127.0.0.1:3002:3001"]
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:3001/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
