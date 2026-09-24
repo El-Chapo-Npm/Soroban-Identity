@@ -200,7 +200,9 @@ export async function appendAuditLog(config, entry) {
     lastCheckedDate = dateString;
   }
 
-  const record = { timestamp: new Date().toISOString(), ...entry };
+  const context = requestContextStore.getStore();
+  const tenant_id = entry.tenant_id || context?.tenantId || config?.tenantId || 'default';
+  const record = { timestamp: new Date().toISOString(), tenant_id, ...entry };
   const line = `${JSON.stringify(record)}\n`;
 
   // Acquire a per-file mutex so concurrent callers queue up and each write
@@ -344,7 +346,10 @@ export function createCredential(credentials, credential) {
   if (credentials.some((item) => item.id === credential.id)) {
     throw new DuplicateCredentialError(credential.id);
   }
-  return [...credentials, credential];
+  const context = requestContextStore.getStore();
+  const tenant_id = credential.tenant_id || context?.tenantId || 'default';
+  const itemWithTenant = { tenant_id, ...credential };
+  return [...credentials, itemWithTenant];
 }
 
 /**

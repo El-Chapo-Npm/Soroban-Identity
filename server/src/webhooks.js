@@ -85,10 +85,11 @@ export async function writeWebhooks(config, webhooks) {
   await writeAtomic(filePath, JSON.stringify({ webhooks }, null, 2));
 }
 
-export async function createWebhookRecord(config, { url, events = ['*'], secret, authToken, description }) {
+export async function createWebhookRecord(config, { url, events = ['*'], secret, authToken, description, tenant_id }) {
   const webhooks = await readWebhooks(config);
   const webhook = {
     id: `whk_${crypto.randomUUID()}`,
+    tenant_id: tenant_id || config.tenantId || 'default',
     url,
     events: Array.isArray(events) && events.length > 0 ? events : ['*'],
     secret: secret || crypto.randomBytes(24).toString('hex'),
