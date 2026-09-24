@@ -79,5 +79,28 @@
     "skipToContent": "Passer au contenu principal",
     "switchLanguage": "Changer de langue",
     "dismissNotification": "Fermer la notification"
+  },
+  "shortcuts": {
+    "title": "Raccourcis Clavier",
+    "description": "Utilisez les raccourcis clavier pour naviguer et interagir plus efficacement avec l'application.",
+    "close": "Fermer l'aide des raccourcis",
+    "enableShortcuts": "Activer les raccourcis clavier",
+    "hint": "Appuyez sur ? pour afficher les raccourcis à tout moment. {{key}}+/ fonctionne également.",
+    "category": {
+      "navigation": "Navigation",
+      "actions": "Actions",
+      "ui": "Interface Utilisateur"
+    },
+    "table": {
+      "shortcut": "Raccourci",
+      "description": "Description"
+    },
+    "search": "Ouvrir la recherche",
+    "createCredential": "Créer un nouveau justificatif",
+    "goToDIDs": "Aller à l'onglet DIDs",
+    "goToCredentials": "Aller à l'onglet Justificatifs",
+    "toggleTheme": "Basculer le thème",
+    "showHelp": "Afficher les raccourcis clavier",
+    "closeDialog": "Fermer la boîte de dialogue ou le modal"
   }
 }

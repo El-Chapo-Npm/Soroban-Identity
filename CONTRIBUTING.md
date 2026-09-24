@@ -231,17 +231,28 @@ Before requesting review, confirm:
 
 ## Internationalization (i18n)
 
-The English locale file `frontend/src/locales/en.json` is the source of truth. All other locale files must stay in sync with it.
+The frontend uses `react-i18next` for internationalization with dynamic locale switching and local storage persistence. The English locale file `frontend/src/locales/en.json` is the source of truth. All other locale files (`es.json`, `fr.json`, `zh.json`, and future locales) must stay in sync with it.
 
-When adding new UI text:
+### Translation Workflow
 
-1. Add the key and English string to `en.json` first.
-2. Add the same key and translated string to every other locale file.
-3. Run the validation script to confirm no keys are missing:
+1. **Source of Truth**: Add new text and keys to `frontend/src/locales/en.json`.
+2. **Translate to Supported Languages**: Add the corresponding translation keys and values to:
+   - `frontend/src/locales/es.json` (Spanish)
+   - `frontend/src/locales/fr.json` (French)
+   - `frontend/src/locales/zh.json` (Chinese)
+3. **Usage in Components**:
+   - Use the `useTranslation` hook: `const { t } = useTranslation();`
+   - Render translated strings: `t('credentials.verifyCredential')` or with variables `t('credentials.expiresInDays', { count })`.
+4. **Dates and Times**:
+   - Use `formatDate` or `formatTimestamp` from `frontend/src/utils/formatDate.ts` which automatically utilizes `date-fns` with locale-aware formatting.
+5. **RTL Support**:
+   - Locales such as Arabic (`ar`), Hebrew (`he`), etc., are automatically recognized and set the document `dir="rtl"` attribute.
+6. **Validate Locales**:
+   - Run the validation script to verify that no keys are missing across any language:
 
 ```bash
 cd frontend
-node scripts/validate-locales.js
+npm run validate:locales
 ```
 
 ---

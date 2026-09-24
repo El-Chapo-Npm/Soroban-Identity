@@ -79,5 +79,28 @@
     "skipToContent": "跳至主内容",
     "switchLanguage": "切换语言",
     "dismissNotification": "关闭通知"
+  },
+  "shortcuts": {
+    "title": "快捷键",
+    "description": "使用快捷键更高效地导航和使用应用程序。",
+    "close": "关闭快捷键说明",
+    "enableShortcuts": "启用快捷键",
+    "hint": "随时按 ? 查看快捷键。{{key}}+/ 也可用。",
+    "category": {
+      "navigation": "导航",
+      "actions": "操作",
+      "ui": "用户界面"
+    },
+    "table": {
+      "shortcut": "快捷键",
+      "description": "描述"
+    },
+    "search": "打开搜索",
+    "createCredential": "创建新凭证",
+    "goToDIDs": "转到 DID 标签",
+    "goToCredentials": "转到凭证标签",
+    "toggleTheme": "切换主题",
+    "showHelp": "显示快捷键",
+    "closeDialog": "关闭对话框或弹窗"
   }
 }
