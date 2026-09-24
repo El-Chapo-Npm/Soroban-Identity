@@ -41,3 +41,9 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
     </ErrorBoundary>
   </React.StrictMode>
 );
+
+// Register service worker for offline support and PWA caching
+import("./serviceWorker").then((sw) => {
+  sw.register();
+});
+
