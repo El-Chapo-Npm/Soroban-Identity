@@ -76,6 +76,7 @@ import { pickQuotaBinding, QuotaTracker, notifyQuotaThresholdOwner } from "./quo
 import { DeprecationRegistry, notifyDeprecatedEndpointOwner } from "./deprecation.js";
 import { DdosProtection, ddosResponse } from "./ddos-protection.js";
 import { TenantRegistry, handleTenantRoutes, resolveTenantId } from "./tenancy/index.js";
+import { openTelemetryHttpMiddleware } from "./tracing/index.js";
 const SERVER_VERSION = "0.1.0";
 const MIN_SDK_VERSION = "0.1.0";
 const SERVER_FEATURES = [
@@ -218,6 +219,9 @@ export function createApp({
     const tenantId = resolveTenantId(req);
     req.tenantId = tenantId;
     res.setHeader("X-Tenant-ID", tenantId);
+
+    // Distributed Tracing with OpenTelemetry (#801)
+    openTelemetryHttpMiddleware()(req, res);
 
     // CSP and companion security headers (#754). Set before any branch that
     // can produce a response, so an early return still carries them. The
