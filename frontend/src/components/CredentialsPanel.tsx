@@ -12,6 +12,7 @@ import { handleError } from "../utils/handleError";
 import { useWalletContext } from "../context/WalletContext";
 import { useToast } from "../context/ToastContext";
 import CredentialTimeline from "./CredentialTimeline";
+import CredentialShare from "./CredentialShare";
 
 type VerifyState =
   | "idle"
@@ -261,6 +262,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
   const [exportFormat, setExportFormat] = useState<"json" | "csv" | "pdf">("json");
   const [isExporting, setIsExporting] = useState(false);
   const [selectedCredentialsForExport, setSelectedCredentialsForExport] = useState<Set<string>>(new Set());
+  const [sharingCredential, setSharingCredential] = useState<Credential | null>(null);
 
   const handleVerify = async (credentialId?: string, silent = false) => {
   // ── Pagination ──────────────────────────────────────────────────────────
@@ -1019,13 +1021,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      const url = new URL(window.location.href);
-                      url.searchParams.set('verify', cred.id);
-                      navigator.clipboard.writeText(url.toString()).then(() => {
-                        alert('Share link copied to clipboard!');
-                      }).catch(() => {
-                        alert('Failed to copy link');
-                      });
+                      setSharingCredential(cred);
                     }}
                     style={{
                       background: "none",
@@ -1036,7 +1032,8 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
                       marginLeft: "auto",
                       marginRight: "0.5rem",
                     }}
-                    title="Copy share link"
+                    title="Share credential via encrypted link"
+                    aria-label={`Share credential ${cred.id}`}
                   >
                     🔗
                   </button>
@@ -1370,6 +1367,14 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
         <CredentialImport
           onImport={handleImportCredentials}
           onClose={() => setShowImportModal(false)}
+        />
+      )}
+
+      {/* Share Modal */}
+      {sharingCredential && (
+        <CredentialShare
+          credential={sharingCredential}
+          onClose={() => setSharingCredential(null)}
         />
       )}
     </>

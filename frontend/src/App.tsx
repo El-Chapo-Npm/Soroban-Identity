@@ -13,6 +13,7 @@ const CredentialsPanel = lazy(() => import("./components/CredentialsPanel"));
 const preloadCredentialsPanel = () => {
   void import("./components/CredentialsPanel");
 };
+import CredentialRecipientVerify from "./components/CredentialRecipientVerify";
 import WalletButton from "./components/WalletButton";
 import ErrorBoundary from "./components/ErrorBoundary";
 import Toast from "./components/Toast";
@@ -53,6 +54,7 @@ export default function App() {
   const tabRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({});
   const [activeNetwork, setActiveNetwork] = useState<NetworkName>(DEFAULT_NETWORK);
   const [verifyId, setVerifyId] = useState<string | null>(null);
+  const [deepLinkEncrypted, setDeepLinkEncrypted] = useState<{ c: string; k: string } | null>(null);
   const networkConfig = NETWORK_CONFIGS[activeNetwork];
   const wallet = useWallet(networkConfig);
   const { isDark, toggleTheme } = useTheme();
@@ -80,7 +82,13 @@ export default function App() {
   useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
     const verifyParam = urlParams.get("verify");
-    if (verifyParam) {
+    const cParam = urlParams.get("c");
+    const kParam = urlParams.get("k");
+
+    if (cParam && kParam) {
+      setDeepLinkEncrypted({ c: cParam, k: kParam });
+      setTab(Tab.Credentials);
+    } else if (verifyParam) {
       setVerifyId(verifyParam);
       setTab(Tab.Credentials);
     }
@@ -484,7 +492,18 @@ export default function App() {
             aria-labelledby={`tab-${Tab.Credentials}`}
             hidden={tab !== Tab.Credentials}
           >
-            {tab === Tab.Credentials && <CredentialsPanel verifyId={verifyId} />}
+            {tab === Tab.Credentials && (
+              <>
+                {deepLinkEncrypted && (
+                  <CredentialRecipientVerify
+                    ciphertext={deepLinkEncrypted.c}
+                    secretKey={deepLinkEncrypted.k}
+                    onClose={() => setDeepLinkEncrypted(null)}
+                  />
+                )}
+                <CredentialsPanel verifyId={verifyId} />
+              </>
+            )}
           </div>
           </Suspense>
         </ErrorBoundary>
