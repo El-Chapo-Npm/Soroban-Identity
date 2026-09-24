@@ -13,6 +13,8 @@ import { useWalletContext } from "../context/WalletContext";
 import { useToast } from "../context/ToastContext";
 import CredentialTimeline from "./CredentialTimeline";
 import CredentialShare from "./CredentialShare";
+import TemplateSelector from "../templates/TemplateSelector";
+import { type CredentialTemplate, validateClaimsAgainstTemplate } from "../templates/credentialTemplates";
 
 type VerifyState =
   | "idle"
@@ -246,6 +248,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
   const [expiresAt, setExpiresAt] = useState("0");
   const [issueResult, setIssueResult] = useState<string | null>(null);
   const [issuing, setIssuing] = useState(false);
+  const [selectedTemplate, setSelectedTemplate] = useState<CredentialTemplate | null>(null);
   const [issueErrors, setIssueErrors] = useState<Record<string, string>>({});
 
   const [activeFilter, setActiveFilter] = useState<FilterType>("All");
@@ -578,8 +581,32 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
       }
     }
 
+    // Validate claims against template schema if a template is selected
+    if (selectedTemplate) {
+      const claimsMap: Record<string, string> = {};
+      claims.forEach((c) => {
+        if (c.key.trim()) claimsMap[c.key.trim()] = c.value.trim();
+      });
+      const tplValidation = validateClaimsAgainstTemplate(selectedTemplate, claimsMap);
+      if (!tplValidation.valid) {
+        const firstErr = Object.values(tplValidation.errors)[0];
+        errors.claims = firstErr;
+      }
+    }
+
     setIssueErrors(errors);
     return Object.keys(errors).length === 0;
+  };
+
+  const handleSelectTemplate = (template: CredentialTemplate) => {
+    setSelectedTemplate(template);
+    // Auto-populate claims from template fields
+    const autoClaims = template.fields.map((field) => ({
+      key: field.name,
+      value: field.defaultValue || "",
+    }));
+    setClaims(autoClaims.length > 0 ? autoClaims : [{ key: "", value: "" }]);
+    setIssueErrors({});
   };
 
   const handleAddClaim = () => {
@@ -1265,6 +1292,12 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
                   {wallet.publicKey?.slice(0, 6)}…{wallet.publicKey?.slice(-4)}
                 </span>
               </p>
+
+              {/* Template Selector Library */}
+              <TemplateSelector
+                selectedTemplateId={selectedTemplate?.id}
+                onSelectTemplate={handleSelectTemplate}
+              />
               
               <FormField
                 label="Subject Address"
@@ -1345,7 +1378,11 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
               />
 
               <button onClick={handleIssue} disabled={issuing || Object.keys(issueErrors).length > 0}>
-                {issuing ? "Issuing…" : "Issue KYC Credential"}
+                {issuing
+                  ? "Issuing…"
+                  : selectedTemplate
+                  ? `Issue ${selectedTemplate.name}`
+                  : "Issue Credential"}
               </button>
               {issuing && <SkeletonCard variant="credential" />}
             </>
