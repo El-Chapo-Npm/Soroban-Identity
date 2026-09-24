@@ -77,6 +77,7 @@ import { DeprecationRegistry, notifyDeprecatedEndpointOwner } from "./deprecatio
 import { DdosProtection, ddosResponse } from "./ddos-protection.js";
 import { TenantRegistry, handleTenantRoutes, resolveTenantId } from "./tenancy/index.js";
 import { openTelemetryHttpMiddleware } from "./tracing/index.js";
+import { EventStore, EventReplayer, createEvent, EventTypes, handleEventSourcingRoutes } from "./events/index.js";
 const SERVER_VERSION = "0.1.0";
 const MIN_SDK_VERSION = "0.1.0";
 const SERVER_FEATURES = [
@@ -174,6 +175,10 @@ export function createApp({
 
   const tenantRegistry = new TenantRegistry(config);
   void tenantRegistry.init();
+
+  const eventStore = new EventStore({ dataDir: `${config.dataDir}/events` });
+  void eventStore.init();
+  const eventReplayer = new EventReplayer(eventStore);
 
   return async function app(req, res) {
     const url = new URL(
@@ -1679,6 +1684,11 @@ export function createApp({
 
         // Multi-tenant administration and provisioning endpoints (#800)
         if (handleTenantRoutes(req, res, url, tenantRegistry, (entry) => appendAuditLog(config, entry))) {
+          return;
+        }
+
+        // Event sourcing audit trail routes (#802)
+        if (handleEventSourcingRoutes(req, res, url, eventStore, eventReplayer)) {
           return;
         }
 
