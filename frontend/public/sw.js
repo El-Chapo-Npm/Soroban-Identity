@@ -156,15 +156,21 @@ async function syncCredentials() {
 
 function openDB() {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open('soroban-identity', 1);
+    const request = indexedDB.open('soroban-identity', 2);
 
     request.onerror = () => reject(request.error);
     request.onsuccess = () => resolve(request.result);
 
     request.onupgradeneeded = (event) => {
-      const db = (event.target as IDBOpenDBRequest).result;
+      const db = event.target.result;
       if (!db.objectStoreNames.contains('pending-operations')) {
         db.createObjectStore('pending-operations', { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains('credentials')) {
+        db.createObjectStore('credentials', { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains('dids')) {
+        db.createObjectStore('dids', { keyPath: 'id' });
       }
     };
   });
@@ -192,9 +198,48 @@ function removePendingOperation(db, id) {
   });
 }
 
+// Push notifications for credential expiry
+self.addEventListener('push', (event) => {
+  let data = { title: 'Soroban Identity Alert', body: 'A credential status update has occurred.' };
+  if (event.data) {
+    try {
+      data = event.data.json();
+    } catch {
+      data.body = event.data.text();
+    }
+  }
+
+  const options = {
+    body: data.body,
+    icon: '/icon-192x192.png',
+    badge: '/icon-96x96.png',
+    data: data.url || '/',
+    vibrate: [100, 50, 100],
+  };
+
+  event.waitUntil(self.registration.showNotification(data.title, options));
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+      for (const client of clientList) {
+        if (client.url === event.notification.data && 'focus' in client) {
+          return client.focus();
+        }
+      }
+      if (self.clients.openWindow) {
+        return self.clients.openWindow(event.notification.data || '/');
+      }
+    })
+  );
+});
+
 // Message handler for client communication
 self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'SKIP_WAITING') {
     self.skipWaiting();
   }
 });
+

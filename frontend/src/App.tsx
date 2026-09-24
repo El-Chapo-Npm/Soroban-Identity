@@ -20,7 +20,6 @@ import Toast from "./components/Toast";
 import { ToastProvider } from "./context/ToastContext";
 import { useWallet } from "./hooks/useWallet";
 import { useCredentialExpiryCheck } from "./hooks/useCredentialExpiryCheck";
-import { useTheme } from "./context/ThemeContext";
 import { useTheme, cycleTheme, getThemeIcon, getThemeLabel } from "./hooks/useTheme";
 import { useServiceWorker } from "./hooks/useServiceWorker";
 import OfflineIndicator from "./components/OfflineIndicator";
@@ -57,7 +56,6 @@ export default function App() {
   const [deepLinkEncrypted, setDeepLinkEncrypted] = useState<{ c: string; k: string } | null>(null);
   const networkConfig = NETWORK_CONFIGS[activeNetwork];
   const wallet = useWallet(networkConfig);
-  const { isDark, toggleTheme } = useTheme();
   const [theme, setTheme, isDarkMode] = useTheme();
   const { t, i18n } = useTranslation();
   const [isConnected, setIsConnected] = useState<boolean | null>(null);
@@ -345,8 +343,6 @@ export default function App() {
           </label>
           <button
             className="theme-toggle"
-            onClick={toggleTheme}
-            aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
             onClick={() => setTheme(cycleTheme(theme))}
             aria-label={`Switch theme. Current: ${theme === 'system' ? 'System' : theme === 'light' ? 'Light' : 'Dark'}`}
             title={`Theme: ${theme === 'system' ? 'System' : theme === 'light' ? 'Light' : 'Dark'}`}
@@ -361,6 +357,8 @@ export default function App() {
           aria-hidden="true"
         />
       </header>
+
+      <OfflineIndicator />
 
       {uninitializedContracts.length > 0 && (
         <div
