@@ -1,0 +1,16 @@
+{
+  "name": "soroban-identity-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vitepress dev . --host 0.0.0.0 --port 8787",
+    "build": "vitepress build .",
+    "preview": "vitepress preview . --host 0.0.0.0 --port 8787",
+    "docs:api": "typedoc --options typedoc.json"
+  },
+  "devDependencies": {
+    "typedoc": "^0.28.13",
+    "typedoc-plugin-markdown": "^4.13.1",
+    "vitepress": "^1.6.4"
+  }
+}
