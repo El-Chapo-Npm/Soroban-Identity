@@ -1,0 +1,78 @@
+name: Changelog & Release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  # Enforce Conventional Commits on PR titles (squash merges use the PR title as the commit message).
+  lint-pr-title:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            refactor
+            perf
+            test
+            build
+            ci
+            chore
+            revert
+
+  # Maintains a release PR that bumps the version and updates CHANGELOG.md.
+  # Merging it creates the vX.Y.Z tag and a GitHub Release with the notes.
+  release-please:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      html_url: ${{ steps.release.outputs.html_url }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  notify:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Announce on Discord
+        if: env.DISCORD_WEBHOOK_URL != ''
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+          URL: ${{ needs.release-please.outputs.html_url }}
+        run: |
+          jq -n --arg c "Soroban Identity $TAG is out: $URL" '{content: $c}' \
+            | curl -fsS -H 'Content-Type: application/json' -d @- "$DISCORD_WEBHOOK_URL"
+      - name: Announce on Twitter/X
+        if: env.TWITTER_API_KEY != ''
+        uses: nearform-actions/github-action-notify-twitter@v1
+        env:
+          TWITTER_API_KEY: ${{ secrets.TWITTER_API_KEY }}
+        with:
+          message: "Soroban Identity ${{ needs.release-please.outputs.tag_name }} released: ${{ needs.release-please.outputs.html_url }}"
+          twitter-app-key: ${{ secrets.TWITTER_API_KEY }}
+          twitter-app-secret: ${{ secrets.TWITTER_API_SECRET }}
+          twitter-access-token: ${{ secrets.TWITTER_ACCESS_TOKEN }}
+          twitter-access-token-secret: ${{ secrets.TWITTER_ACCESS_TOKEN_SECRET }}
