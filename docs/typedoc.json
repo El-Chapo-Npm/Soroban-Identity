@@ -1,0 +1,11 @@
+{
+  "entryPoints": ["../sdk/src/index.ts"],
+  "entryPointStrategy": "resolve",
+  "plugin": ["typedoc-plugin-markdown"],
+  "out": "api/sdk",
+  "readme": "none",
+  "excludePrivate": true,
+  "excludeProtected": true,
+  "categorizeByGroup": true,
+  "sort": ["source-order"]
+}
