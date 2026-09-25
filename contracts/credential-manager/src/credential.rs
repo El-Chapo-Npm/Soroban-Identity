@@ -61,7 +61,10 @@ pub fn fetch_subject_creds(env: &Env, subject: &Address) -> Vec<BytesN<32>> {
 
 fn generate_id(env: &Env, timestamp: u64) -> BytesN<32> {
     let seq: u64 = env.storage().instance().get(&IDSEQ).unwrap_or(0);
-    env.storage().instance().set(&IDSEQ, &(seq + 1));
+    // Use wrapping arithmetic so a fuzzer-driven sequence counter at u64::MAX
+    // cannot panic on overflow; the id remains unique per (timestamp, seq).
+    let next_seq = seq.wrapping_add(1);
+    env.storage().instance().set(&IDSEQ, &next_seq);
 
     let mut data = Bytes::new(env);
     data.extend_from_array(&timestamp.to_be_bytes());

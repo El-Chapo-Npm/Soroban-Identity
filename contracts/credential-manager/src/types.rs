@@ -29,3 +29,34 @@ pub struct Credential {
     /// equivalent to revoked for all verification purposes. #731
     pub activation_cancelled: bool,
 }
+
+impl Credential {
+    /// Returns `true` when the credential is currently active at `now`.
+    ///
+    /// A credential is active when it has not been revoked, its pending
+    /// activation has not been cancelled, it has already reached its
+    /// `activation_time` (or has no time-lock), and it has not yet expired.
+    ///
+    /// This is the single source of truth for the time-lock/expiry checks
+    /// exercised by the `fuzz_issue_credential` target. It is written with
+    /// saturating arithmetic and explicit ordering so that arbitrary fuzzer
+    /// inputs (including `expires_at == 0`, `activation_time > expires_at`,
+    /// and `u64::MAX` timestamps) can never panic or overflow. #781
+    pub fn is_active_at(&self, now: u64) -> bool {
+        if self.revoked || self.activation_cancelled {
+            return false;
+        }
+
+        // `0` means "no time-lock": active immediately.
+        if self.activation_time != 0 && now < self.activation_time {
+            return false;
+        }
+
+        // `0` means "never expires".
+        if self.expires_at != 0 && now >= self.expires_at {
+            return false;
+        }
+
+        true
+    }
+}
