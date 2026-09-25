@@ -1,0 +1,27 @@
+name: Accessibility
+
+on:
+  pull_request:
+    paths: ["frontend/**", "tests/a11y/**"]
+  push:
+    branches: [main]
+
+jobs:
+  a11y:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+        working-directory: frontend
+      - run: npm install && npx playwright install --with-deps chromium
+        working-directory: tests/a11y
+      - run: npm test
+        working-directory: tests/a11y
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: a11y-report
+          path: tests/a11y/reports

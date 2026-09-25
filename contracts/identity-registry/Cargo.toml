@@ -12,6 +12,11 @@ shared-errors = { path = "../shared-errors" }
 
 [dev-dependencies]
 soroban-sdk = { version = "21.0.0", features = ["testutils"] }
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support", "html_reports"] }
+
+[[bench]]
+name = "registry"
+harness = false
 
 [profile.release]
 opt-level = "z"

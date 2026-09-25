@@ -1,0 +1,11 @@
+{
+  "name": "soroban-identity-a11y-tests",
+  "private": true,
+  "scripts": {
+    "test": "playwright test -c playwright.config.ts"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.10.0",
+    "@playwright/test": "^1.47.0"
+  }
+}
