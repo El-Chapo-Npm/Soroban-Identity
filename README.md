@@ -434,3 +434,8 @@ PRs are welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) for branch naming, com
 ## License
 
 MIT — built on [Stellar](https://stellar.org) / [Soroban](https://soroban.stellar.org).
+
+## Handsoff notes
+
+<!-- handsoff-issue-808 -->
+- #808: [BE-NEW-09] Implement API gateway pattern with rate limiting and auth
