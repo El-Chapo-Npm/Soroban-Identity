@@ -239,6 +239,19 @@ type Mutation {
   """
   testWebhook(id: ID!): WebhookLog
 }
+
+type Subscription {
+  """Emitted when a credential is issued, updated, or revoked."""
+  credentialUpdated(subject: String, credentialType: String): CredentialEvent!
+  """Emitted when a DID document changes."""
+  didUpdated(subject: String): DidEvent!
+  """Emitted when the reputation score for a subject changes."""
+  reputationChanged(subject: String): ReputationEvent!
+}
+
+type CredentialEvent { id: ID!, subject: String, credentialType: String, action: String!, credential: String, timestamp: String! }
+type DidEvent { did: ID!, action: String!, document: String, timestamp: String! }
+type ReputationEvent { subject: ID!, score: Float!, tier: String, timestamp: String! }
 `;
 
 /**

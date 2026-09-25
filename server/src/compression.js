@@ -1,185 +1,102 @@
 import zlib from 'node:zlib';
 import { logger } from './logger.js';
 
-/**
- * Configuration for response compression middleware.
- * Supports gzip and brotli compression.
- */
+const COMPRESSIBLE = /^(text\/|application\/(json|javascript|xml|graphql|wasm)|image\/svg\+xml)/i;
+const NEVER_COMPRESS = /^(image\/(?!svg\+xml)|audio\/|video\/|font\/(woff2|otf)|application\/(zip|gzip|br|x-rar-compressed|pdf))/i;
+
+function parseAcceptEncoding(value) {
+  return String(value || '').split(',').map((part) => {
+    const [name, ...params] = part.trim().toLowerCase().split(';');
+    const q = params.find((p) => p.trim().startsWith('q='));
+    return { name, q: q ? Number.parseFloat(q.split('=')[1]) : 1 };
+  }).filter(({ name, q }) => name && Number.isFinite(q) && q > 0);
+}
+
+export function negotiateEncoding(header, { enableBrotli = true } = {}) {
+  const accepted = parseAcceptEncoding(header);
+  const quality = (name) => accepted.find((item) => item.name === name)?.q
+    ?? accepted.find((item) => item.name === '*')?.q
+    ?? 0;
+  const candidates = [
+    ...(enableBrotli ? [{ name: 'br', q: quality('br') }] : []),
+    { name: 'gzip', q: quality('gzip') },
+  ].filter((item) => item.q > 0).sort((a, b) => b.q - a.q);
+  return candidates[0]?.name ?? null;
+}
+
 export class CompressionMiddleware {
   constructor(options = {}) {
-    // Minimum response size in bytes before compression is applied (default 1KB)
-    this.threshold = options.threshold ?? 1024;
-    
-    // Compression level (0-9 for gzip, 0-11 for brotli)
-    this.gzipLevel = options.gzipLevel ?? zlib.constants.Z_DEFAULT_COMPRESSION;
+    this.threshold = Math.max(0, options.threshold ?? 1024);
+    this.gzipLevel = options.gzipLevel ?? 6;
     this.brotliLevel = options.brotliLevel ?? 4;
-    
-    // Whether to enable brotli compression (requires Node.js >= 10.16.0)
     this.enableBrotli = options.enableBrotli ?? true;
-    
-    // Content types that should NOT be compressed (already compressed)
-    this.excludeContentTypes = new Set(options.excludeContentTypes ?? [
-      'application/gzip',
-      'application/x-gzip',
-      'application/br',
-      'application/x-brotli',
-      'image/jpeg',
-      'image/png',
-      'image/gif',
-      'image/webp',
-      'audio/mpeg',
-      'audio/mp4',
-      'video/mp4',
-      'video/webm',
-      'font/woff2',
-    ]);
-    
-    // Content types that should be compressed
-    this.includeContentTypes = new Set(options.includeContentTypes ?? [
-      'text/plain',
-      'text/html',
-      'text/css',
-      'text/javascript',
-      'application/javascript',
-      'application/json',
-      'application/xml',
-      'application/xhtml+xml',
-      'image/svg+xml',
-      'font/woff',
-      'font/ttf',
-      'font/eot',
-      'application/octet-stream',
-    ]);
-    
     this.metrics = options.metrics ?? null;
     this.logger = options.logger ?? logger;
   }
 
-  /**
-   * Determine if response should be compressed based on Content-Type and size.
-   */
-  shouldCompress(req, res, contentType, contentLength) {
-    // Don't compress if client doesn't support it
-    const acceptEncoding = req.headers['accept-encoding'] || '';
-    const supportsCompression = acceptEncoding.includes('gzip') || 
-                                (this.enableBrotli && acceptEncoding.includes('br'));
-    if (!supportsCompression) return null;
-    
-    // Don't compress if already below threshold
-    if (contentLength && contentLength < this.threshold) return null;
-    
-    // Don't compress if already compressed
-    if (res.getHeader('content-encoding')) return null;
-    
-    // Check content type
-    const mimeType = contentType ? contentType.split(';')[0].trim() : '';
-    if (this.excludeContentTypes.has(mimeType)) return null;
-    
-    // Determine compression algorithm preference
-    if (this.enableBrotli && acceptEncoding.includes('br')) {
-      return 'br';
-    }
-    if (acceptEncoding.includes('gzip')) {
-      return 'gzip';
-    }
-    
-    return null;
+  shouldCompress(req, res) {
+    const contentType = String(res.getHeader('content-type') || '').split(';', 1)[0];
+    const length = Number(res.getHeader('content-length'));
+    if (res.getHeader('content-encoding') || res.statusCode === 204 || req.method === 'HEAD') return null;
+    if (Number.isFinite(length) && length < this.threshold) return null;
+    if (!COMPRESSIBLE.test(contentType) || NEVER_COMPRESS.test(contentType)) return null;
+    return negotiateEncoding(req.headers['accept-encoding'], { enableBrotli: this.enableBrotli });
   }
 
-  /**
-   * Create a compression transform stream.
-   */
-  createCompressionStream(encoding) {
-    if (encoding === 'br') {
-      return zlib.createBrotliCompress({
-        params: {
-          [zlib.constants.BROTLI_PARAM_QUALITY]: this.brotliLevel,
-        },
-      });
-    }
-    
-    return zlib.createGzip({
-      level: this.gzipLevel,
-    });
-  }
-
-  /**
-   * Middleware function to enable response compression.
-   */
   middleware() {
-    return async (req, res) => {
+    return (req, res) => {
       const originalWrite = res.write.bind(res);
       const originalEnd = res.end.bind(res);
       const originalSetHeader = res.setHeader.bind(res);
-      
-      let compressionStream = null;
-      let compressionStarted = false;
-      let originalContentLength = null;
-      const startTime = process.hrtime.bigint();
-      
-      // Override setHeader to intercept content-type and content-length
-      res.setHeader = function(name, value) {
-        if (name.toLowerCase() === 'content-length') {
-          originalContentLength = Number.parseInt(value, 10);
-          // Don't set content-length when we're compressing
-          if (compressionStream) return res;
-        }
+      let stream = null;
+      let encoding = null;
+      let inputBytes = 0;
+      let outputBytes = 0;
+      let started = false;
+
+      const start = () => {
+        if (started) return;
+        started = true;
+        encoding = this.shouldCompress(req, res);
+        if (!encoding) return;
+        stream = encoding === 'br'
+          ? zlib.createBrotliCompress({ params: { [zlib.constants.BROTLI_PARAM_QUALITY]: this.brotliLevel } })
+          : zlib.createGzip({ level: this.gzipLevel });
+        originalSetHeader('Content-Encoding', encoding);
+        originalSetHeader('Vary', 'Accept-Encoding');
+        originalSetHeader('Transfer-Encoding', 'chunked');
+        res.removeHeader('Content-Length');
+        stream.on('data', (chunk) => { outputBytes += chunk.length; originalWrite(chunk); });
+        stream.on('end', () => {
+          this.metrics?.observeCompression?.({ encoding, originalSize: inputBytes, compressedSize: outputBytes, ratio: inputBytes ? outputBytes / inputBytes : 1 });
+        });
+      };
+
+      res.setHeader = (name, value) => {
+        if (String(name).toLowerCase() === 'content-length' && stream) return res;
         return originalSetHeader(name, value);
       };
-      
-      // Override write to enable compression on first write
-      res.write = function(chunk, encoding, callback) {
-        if (!compressionStarted) {
-          compressionStarted = true;
-          
-          const contentType = res.getHeader('content-type');
-          const encoding = this.shouldCompress(req, res, contentType, originalContentLength);
-          
-          if (encoding) {
-            compressionStream = this.createCompressionStream(encoding);
-            originalSetHeader('Content-Encoding', encoding);
-            originalSetHeader('Vary', 'Accept-Encoding');
-            
-            // Pipe the compression stream to the original response
-            compressionStream.pipe(res, { end: false });
-            
-            const endTime = process.hrtime.bigint();
-            const durationMs = Number(endTime - startTime) / 1e6;
-            
-            if (this.metrics?.observeCompression) {
-              this.metrics.observeCompression({ encoding, originalSize: originalContentLength, duration: durationMs });
-            }
-            
-            this.logger.debug({ encoding, originalSize: originalContentLength }, 'Response compression enabled');
-          }
-        }
-        
-        if (compressionStream) {
-          return compressionStream.write(chunk, encoding, callback);
-        }
-        return originalWrite(chunk, encoding, callback);
-      }.bind(this);
-      
-      // Override end to finalize compression
-      res.end = function(chunk, encoding, callback) {
-        if (compressionStream && !compressionStream.writableEnded) {
-          if (chunk) {
-            compressionStream.write(chunk, encoding);
-          }
-          compressionStream.end(callback);
-        } else {
-          return originalEnd(chunk, encoding, callback);
-        }
-      }.bind(this);
-      
-      this.shouldCompress = this.shouldCompress.bind(this);
-    }.bind(this);
+      res.write = (chunk, chunkEncoding, callback) => {
+        start();
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, chunkEncoding);
+        inputBytes += buffer.length;
+        if (stream) return stream.write(buffer, callback);
+        return originalWrite(chunk, chunkEncoding, callback);
+      };
+      res.end = (chunk, chunkEncoding, callback) => {
+        start();
+        if (!stream) return originalEnd(chunk, chunkEncoding, callback);
+        if (chunk) {
+          const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, chunkEncoding);
+          inputBytes += buffer.length;
+          stream.end(buffer, callback);
+        } else stream.end(callback);
+        return res;
+      };
+    };
   }
 }
 
-/**
- * Create a compression middleware configured with default settings.
- */
-export function createCompressionMiddleware(config = {}) {
-  return new CompressionMiddleware(config);
+export function createCompressionMiddleware(options = {}) {
+  return new CompressionMiddleware(options);
 }
