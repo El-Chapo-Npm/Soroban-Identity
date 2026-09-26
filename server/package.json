@@ -15,7 +15,7 @@
     "@bull-board/api": "^6.9.1",
     "@bull-board/express": "^6.9.1",
     "bull": "^4.16.5",
-    "graphql": "^16.11.0",
+    "graphql": "^17.0.2",
     "graphql-ws": "^6.0.6",
     "pino": "^9.0.0",
     "ws": "^8.21.3",
