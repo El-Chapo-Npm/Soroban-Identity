@@ -18,7 +18,7 @@ import { formatTimestamp } from "../utils/formatDate";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export type TimelineEventType = "issued" | "verified" | "expired" | "revoked";
+export type TimelineEventType = "issued" | "verified" | "expired" | "revoked" | "amended";
 
 export interface TimelineEvent {
   id: string;
@@ -41,6 +41,7 @@ const EVENT_COLORS: Record<TimelineEventType, string> = {
   verified: "var(--success-text, #155724)",
   expired: "var(--warning, #856404)",
   revoked: "var(--error, #dc3545)",
+  amended: "var(--info, #0c5460)",
 };
 
 const EVENT_BG: Record<TimelineEventType, string> = {
@@ -48,6 +49,7 @@ const EVENT_BG: Record<TimelineEventType, string> = {
   verified: "var(--success-bg, #d4edda)",
   expired: "var(--warning-bg, #fff3cd)",
   revoked: "var(--danger-bg, #f8d7da)",
+  amended: "var(--info-bg, #d1ecf1)",
 };
 
 const EVENT_ICONS: Record<TimelineEventType, string> = {
@@ -55,6 +57,7 @@ const EVENT_ICONS: Record<TimelineEventType, string> = {
   verified: "✓",
   expired: "⏳",
   revoked: "✕",
+  amended: "↻",
 };
 
 const EVENT_LABELS: Record<TimelineEventType, string> = {
@@ -62,9 +65,10 @@ const EVENT_LABELS: Record<TimelineEventType, string> = {
   verified: "Verified",
   expired: "Expired",
   revoked: "Revoked",
+  amended: "Amended",
 };
 
-const ALL_EVENT_TYPES: TimelineEventType[] = ["issued", "verified", "expired", "revoked"];
+const ALL_EVENT_TYPES: TimelineEventType[] = ["issued", "verified", "expired", "revoked", "amended"];
 
 // ── Helper ────────────────────────────────────────────────────────────────────
 
@@ -90,6 +94,17 @@ function buildEvents(credential: Credential, verifiedAt: number[] = []): Timelin
       detail: `Credential verified at ${formatTimestamp(ts)}`,
     });
   });
+
+  if (credential.version && credential.version > 1) {
+    const amendedTs = credential.lastModifiedAt ?? credential.issuedAt ?? 0;
+    events.push({
+      id: `amended-${credential.id}-${credential.version}`,
+      type: "amended",
+      timestamp: amendedTs,
+      label: "Amended",
+      detail: `Version ${credential.version} amended${credential.versionHistory?.[credential.versionHistory.length - 1]?.reason ? `: ${credential.versionHistory[credential.versionHistory.length - 1].reason}` : ""}`,
+    });
+  }
 
   // Expiry
   if (credential.expiresAt && credential.expiresAt > 0) {

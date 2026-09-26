@@ -11,6 +11,7 @@ members = [
     "identity-registry",
     "credential-manager",
     "reputation",
+    "governance",
     "soroban-identity-interface",
     "schema-registry",
     "revocation-registry",
@@ -22,6 +23,7 @@ default-members = [
     "identity-registry",
     "credential-manager",
     "reputation",
+    "governance",
     "soroban-identity-interface",
     "schema-registry",
     "revocation-registry",
@@ -33,6 +35,7 @@ resolver = "2"
 credential-manager = { path = "credential-manager" }
 identity-registry = { path = "identity-registry" }
 reputation = { path = "reputation" }
+governance = { path = "governance" }
 shared-errors = { path = "shared-errors" }
 soroban-identity-interface = { path = "soroban-identity-interface" }
 schema-registry = { path = "schema-registry" }

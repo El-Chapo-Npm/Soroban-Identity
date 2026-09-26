@@ -1,11 +1,14 @@
 #![no_std]
 #![deny(clippy::all)]
 
+mod versions;
+
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short,
     Address, Bytes, BytesN, Env, IntoVal, Map, String, Symbol, Val, Vec,
 };
+use versions::{CredentialVersion, MAX_VERSION_HISTORY};
 
 pub const CONTRACT_VERSION: u32 = 1;
 const EVENT_VERSION: u32 = 1;
@@ -55,6 +58,8 @@ const MAX_DEP_DEPTH: u32 = 5;
 // ── Issue #733: batch verification cap ────────────────────────────────────────
 /// Maximum number of credential IDs accepted in a single `verify_credentials_batch` call.
 const MAX_VERIFY_BATCH: u32 = 50;
+const CRED_VERSIONS: Symbol = symbol_short!("CREDVER");
+const MAX_CREDENTIAL_VERSION_HISTORY: u32 = MAX_VERSION_HISTORY;
 
 // -- Issue #659: credential proof requirements
 /// Maps (issuer, subject) to a challenge for proof of possession.
@@ -130,6 +135,8 @@ pub enum ContractError {
     InsufficientApprovals = 30,
     /// Issue #658: admin action has expired.
     AdminActionExpired = 31,
+    /// Issue #816: credential version was not found in the amendment history.
+    VersionNotFound = 32,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -263,6 +270,8 @@ pub struct Credential {
     pub claims_hash: BytesN<32>,
     pub signature: Bytes,
     pub issued_at: u64,
+    pub version: u32,
+    pub last_modified_at: u64,
     /// Unix timestamp after which the credential is considered active.
     /// `0` means immediately active (no time-lock). Implements issue #731.
     pub activation_time: u64,
@@ -726,6 +735,7 @@ impl CredentialManager {
         claims_hash: BytesN<32>,
         signature: Bytes,
         expires_at: u64,
+        activation_time: u64,
         schema_hash: Option<BytesN<32>>,
         proof: Option<Bytes>,
     ) -> Result<BytesN<32>, ContractError> {
@@ -814,6 +824,8 @@ impl CredentialManager {
             claims_hash,
             signature,
             issued_at: now,
+            version: 1,
+            last_modified_at: now,
             activation_time,
             expires_at,
             revoked: false,
@@ -1107,6 +1119,118 @@ impl CredentialManager {
 
     /// Verify a credential is valid, not revoked, not expired, and that its
     /// entire prerequisite chain (issue #732) also passes.
+    pub fn amend_credential(
+        env: Env,
+        issuer: Address,
+        credential_id: BytesN<32>,
+        new_claims: Map<String, String>,
+        reason: String,
+    ) -> Result<u32, ContractError> {
+        issuer.require_auth();
+        let key = Self::cred_key(&credential_id);
+        let mut cred: Credential = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::CredentialNotFound)?;
+
+        if cred.issuer != issuer {
+            return Err(ContractError::UnauthorizedIssuer);
+        }
+        if cred.revoked {
+            return Err(ContractError::CredentialRevoked);
+        }
+
+        let next_version = cred.version.saturating_add(1);
+        let amended_at = env.ledger().timestamp();
+        let summary = versions::summarize_claim_changes(&env, &cred.claims, &new_claims);
+        let version_record = CredentialVersion {
+            version: next_version,
+            claims: new_claims.clone(),
+            claims_hash: Self::claims_schema_hash(&env, &new_claims),
+            amended_at,
+            amended_by: issuer.clone(),
+            reason: reason.clone(),
+            change_summary: summary.clone(),
+        };
+
+        let history_key = (CRED_VERSIONS, credential_id.clone());
+        let mut history: Vec<CredentialVersion> = env
+            .storage()
+            .persistent()
+            .get(&history_key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        if history.len() >= MAX_CREDENTIAL_VERSION_HISTORY {
+            let mut trimmed: Vec<CredentialVersion> = Vec::new(&env);
+            for idx in 1..history.len() {
+                let item = history.get(idx as u32).unwrap();
+                trimmed.push_back(item);
+            }
+            history = trimmed;
+        }
+
+        history.push_back(version_record);
+        env.storage().persistent().set(&history_key, &history);
+
+        cred.claims = new_claims;
+        cred.claims_hash = Self::claims_schema_hash(&env, &cred.claims);
+        cred.version = next_version;
+        cred.last_modified_at = amended_at;
+        env.storage().persistent().set(&key, &cred);
+
+        env.events().publish(
+            (CRED, symbol_short!("amended")),
+            (EVENT_VERSION, credential_id, issuer, next_version, summary, reason),
+        );
+
+        Ok(next_version)
+    }
+
+    pub fn get_credential_version(
+        env: Env,
+        credential_id: BytesN<32>,
+        version: u32,
+    ) -> Result<CredentialVersion, ContractError> {
+        let history_key = (CRED_VERSIONS, credential_id.clone());
+        let history: Vec<CredentialVersion> = env
+            .storage()
+            .persistent()
+            .get(&history_key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        for item in history.iter() {
+            if item.version == version {
+                return Ok(item);
+            }
+        }
+
+        let current = env
+            .storage()
+            .persistent()
+            .get::<_, Credential>(&Self::cred_key(&credential_id))
+            .ok_or(ContractError::CredentialNotFound)?;
+        if current.version == version {
+            return Ok(CredentialVersion {
+                version: current.version,
+                claims: current.claims.clone(),
+                claims_hash: current.claims_hash,
+                amended_at: current.last_modified_at,
+                amended_by: current.issuer.clone(),
+                reason: String::from_str(&env, "latest"),
+                change_summary: String::from_str(&env, "latest_version"),
+            });
+        }
+        Err(ContractError::VersionNotFound)
+    }
+
+    pub fn get_credential_history(env: Env, credential_id: BytesN<32>) -> Vec<CredentialVersion> {
+        env.storage()
+            .persistent()
+            .get(&(CRED_VERSIONS, credential_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
     pub fn verify_credential(env: Env, credential_id: BytesN<32>) -> Result<(), ContractError> {
         let key = Self::cred_key(&credential_id);
         match env.storage().persistent().get::<_, Credential>(&key) {

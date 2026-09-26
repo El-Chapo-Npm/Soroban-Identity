@@ -19,6 +19,8 @@ pub struct Credential {
     pub claims: Map<String, String>,
     pub signature: Bytes,
     pub issued_at: u64,
+    pub version: u32,
+    pub last_modified_at: u64,
     /// Unix timestamp after which the credential becomes active.
     /// `0` means the credential is active immediately (no time-lock). #731
     pub activation_time: u64,
