@@ -8,6 +8,10 @@ Soroban Identity provides identity, credential, reputation, and selective-disclo
 - [Architecture](/architecture) — understand the contracts, SDK, and API server.
 - [API server](/api-server) — configure and operate the HTTP service.
 - [Migration guides](/migrations/) — upgrade safely between major versions.
+- [SDK tutorials](/tutorials/) — step-by-step guides with live sandboxes.
+- [Video documentation](/videos/) — video walkthroughs and advanced topics.
+- [Architecture decision records](/adr/) — why the system is built the way it is.
+- [Changelog and releases](/changelog-and-releases) — commit conventions and release flow.
 - [Documentation style guide](/DOCUMENTATION_STYLE) — contribute maintainable API documentation.
 
 ## Search

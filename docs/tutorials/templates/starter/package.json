@@ -1,0 +1,16 @@
+{
+  "name": "soroban-identity-starter",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx index.ts"
+  },
+  "dependencies": {
+    "@soroban-identity/sdk": "^0.1.0",
+    "@stellar/stellar-sdk": "*"
+  },
+  "devDependencies": {
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}
