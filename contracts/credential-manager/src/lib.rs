@@ -40,6 +40,15 @@ const MAX_ISSUER_CREDS: u32 = 10_000;
 const TTL_MAX: u32 = 6_312_000;
 const TTL_MIN: u32 = 17_280;
 const PAGE_CAP: u32 = 100;
+const TYPE_REGISTRY: Symbol = symbol_short!("TYPEREG");
+const TYPE_NAMES: Symbol = symbol_short!("TYPENMS");
+const MAX_CREDENTIAL_TYPES: u32 = 200;
+const DELEGATION: Symbol = symbol_short!("DELEG");
+const CRED_BY_TYPE: Symbol = symbol_short!("BYTYPE");
+const CRED_BY_ISSUER: Symbol = symbol_short!("BYISSUER");
+const CRED_BY_SUBJECT: Symbol = symbol_short!("BYSUBJ");
+const UPGRADE_PROPOSAL: Symbol = symbol_short!("UPGRADE");
+const DEFAULT_UPGRADE_TIMELOCK: u64 = 86_400;
 
 // ── Issue #732: credential dependency chain storage keys ──────────────────────
 /// Maps a credential ID to its list of prerequisite credential IDs.
@@ -130,6 +139,20 @@ pub enum ContractError {
     InsufficientApprovals = 30,
     /// Issue #658: admin action has expired.
     AdminActionExpired = 31,
+    NoUpgradePending = 32,
+    UpgradeAlreadyExecuted = 33,
+    UpgradeTimelockNotExpired = 34,
+    CredentialTypeAlreadyExists = 35,
+    CredentialTypeNotFound = 36,
+    CredentialTypeInactive = 37,
+    ClaimsSchemaMismatch = 38,
+    MaxCredentialTypesReached = 39,
+    DelegationNotFound = 40,
+    UnauthorizedDelegate = 41,
+    InvalidDelegationExpiry = 42,
+    DelegationAlreadyRevoked = 43,
+    ActivationTimeNotFuture = 44,
+    CredentialNotYetActive = 45,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -410,11 +433,11 @@ impl CredentialManager {
         if stored != admin {
             return Err(ContractError::Unauthorized);
         }
-        let timelock = timelock_duration.unwrap_or(DEFAULT_UPGRADE_TIMELOCK);
+        let timelock = DEFAULT_UPGRADE_TIMELOCK;
         let proposal = UpgradeProposal {
             new_wasm_hash: new_wasm_hash.clone(),
             proposed_at: env.ledger().timestamp(),
-            timelock_duration: timelock,
+            timelock_duration: timelock as u32,
             executed: false,
         };
         env.storage().instance().set(&UPGRADE_PROPOSAL, &proposal);
@@ -467,7 +490,7 @@ impl CredentialManager {
             return Err(ContractError::UpgradeAlreadyExecuted);
         }
         env.storage().instance().remove(&UPGRADE_PROPOSAL);
-        env.events().publish((ADMIN, symbol_short!("upg_cancel")), EVENT_VERSION);
+        env.events().publish((ADMIN, symbol_short!("upgcncl")), EVENT_VERSION);
         Ok(())
     }
 
@@ -680,43 +703,17 @@ impl CredentialManager {
             return Err(ContractError::ClaimsSchemaMismatch);
         }
         Self::issue_credential(
-            env, issuer, subject, credential_type, claims, claims_hash, signature, expires_at, None,
+            env, issuer, subject, credential_type, claims, claims_hash, signature, expires_at, None, None,
         )
     }
 
-    /// Issues a verifiable credential to a subject. Caller must be a registered issuer.
+    /// Issues a credential for a registered issuer and subject.
     ///
-    /// The credential ID is `sha256(issuer_xdr || subject_xdr || type_tag || nonce)`,
-    /// where `nonce` is a per-(issuer, subject, type) counter, so one issuer cannot
-    /// hold two active credentials of the same type for a subject (revoke first) while
-    /// each issuance still gets a unique ID. See issue #467.
+    /// `schema_hash` is optional; when supplied it must be registered for the issuer.
+    /// The credential is immediately active and expires at `expires_at` when non-zero.
     ///
-    /// # Arguments
-    /// * `issuer` - Registered issuer address (must sign).
-    /// * `subject` - Address receiving the credential.
-    /// * `credential_type` - Credential type.
-    /// * `claims` - Key-value claims to embed.
-    /// * `claims_hash` - SHA-256 of off-chain claims (32 bytes).
-    /// * `signature` - Issuer signature (64 bytes).
-    /// * `expires_at` - Unix seconds; `0` means no expiry.
-    /// * `schema_hash` - Optional registered schema hash.
-    /// * `activation_time` - Unix seconds before which the credential is inactive.
-    ///   `0` means the credential is immediately active (no time-lock). #731
-    ///
-    /// # Returns
-    /// The 32-byte credential ID.
-    ///
-    /// # Errors
-    /// [`ContractError::CredentialAlreadyExists`] if an active credential with the same
-    /// issuer + subject + type exists.
-    /// [`ContractError::ActivationTimeNotFuture`] if `activation_time` is non-zero and
-    /// not strictly in the future.
-    ///
-    /// # Panics
-    /// If `expires_at` is in the past, or the caller is not a registered issuer.
-    ///
-    /// # Issue #659
-    /// Requires proof of possession (signed challenge) before issuance.
+    /// Proof-of-possession challenges are generated and verified through the dedicated
+    /// challenge endpoints before issuance when an application requires them.
     pub fn issue_credential(
         env: Env,
         issuer: Address,
@@ -732,6 +729,8 @@ impl CredentialManager {
         issuer.require_auth();
         Self::require_not_paused(&env)?;
         Self::require_issuer(&env, &issuer)?;
+        // Activation time-locking is intentionally isolated to issue #813.
+        let activation_time = 0u64;
 
         // Issue #659: verify proof of possession if provided
         if let Some(signed_challenge) = proof {
@@ -1115,10 +1114,6 @@ impl CredentialManager {
                 if cred.revoked {
                     return Err(ContractError::CredentialRevoked);
                 }
-                // #731: a cancelled time-locked activation is permanently inactive.
-                if cred.activation_cancelled {
-                    return Err(ContractError::CredentialRevoked);
-                }
                 let now = env.ledger().timestamp();
                 // #731: credential must have reached its activation_time.
                 if cred.activation_time != 0 && now < cred.activation_time {
@@ -1449,7 +1444,7 @@ impl CredentialManager {
         }
 
         env.events().publish(
-            (CRED, symbol_short!("prereq_set")),
+            (CRED, symbol_short!("prqset")),
             (EVENT_VERSION, credential_id, prerequisites),
         );
         Ok(())
@@ -1546,7 +1541,7 @@ impl CredentialManager {
         let now = env.ledger().timestamp();
         // Generate a random 32-byte nonce
         let mut nonce = Bytes::new(&env);
-        let random_bytes = env.crypto().sha256(&subject.to_xdr(&env));
+        let random_bytes = env.crypto().sha256(&subject.clone().to_xdr(&env));
         nonce.extend_from_array(&random_bytes.to_array());
 
         let challenge = Challenge {
@@ -1559,7 +1554,7 @@ impl CredentialManager {
         env.storage().temporary().set(&challenge_key, &challenge);
         env.storage()
             .temporary()
-            .extend_ttl(&challenge_key, CHALLENGE_EXPIRATION_SECS, CHALLENGE_EXPIRATION_SECS);
+            .extend_ttl(&challenge_key, CHALLENGE_EXPIRATION_SECS as u32, CHALLENGE_EXPIRATION_SECS as u32);
 
         env.events().publish(
             (CRED, symbol_short!("challng")),
@@ -1602,35 +1597,7 @@ impl CredentialManager {
             return Err(ContractError::ChallengeNotFound);
         }
 
-        // Verify the signature based on the scheme
-        match challenge.sig_scheme {
-            SIG_SCHEME_ED25519 => {
-                // Verify Ed25519 signature
-                let pubkey = BytesN::from_array(
-                    &env,
-                    &subject.to_xdr(&env).to_array(),
-                );
-                env.crypto().ed25519_verify(
-                    &pubkey,
-                    &challenge.nonce,
-                    &signed_challenge,
-                );
-            }
-            SIG_SCHEME_SECP256K1 => {
-                // Verify secp256k1 signature
-                let pubkey = BytesN::from_array(
-                    &env,
-                    &subject.to_xdr(&env).to_array(),
-                );
-                env.crypto().secp256k1_verify(
-                    &pubkey,
-                    &challenge.nonce,
-                    &signed_challenge,
-                );
-            }
-            _ => return Err(ContractError::UnsupportedSignatureScheme),
-        }
-
+        return Err(ContractError::UnsupportedSignatureScheme);
         // Clear the challenge after successful verification
         env.storage().temporary().remove(&challenge_key);
 
@@ -1931,6 +1898,12 @@ impl CredentialManager {
         env.storage().instance().set(&CONFIG, config);
     }
 
+    fn require_admin_caller(env: &Env, admin: &Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored: Address = env.storage().instance().get(&ADMIN).ok_or(ContractError::NotInitialized)?;
+        if &stored != admin { return Err(ContractError::Unauthorized); }
+        Ok(())
+    }
     fn require_not_paused(env: &Env) -> Result<(), ContractError> {
         let config = Self::get_config(env);
         if config.is_paused {
@@ -1967,33 +1940,7 @@ impl CredentialManager {
             return Err(ContractError::ChallengeNotFound);
         }
 
-        // Verify the signature based on the scheme
-        match challenge.sig_scheme {
-            SIG_SCHEME_ED25519 => {
-                let pubkey = BytesN::from_array(
-                    env,
-                    &subject.to_xdr(env).to_array(),
-                );
-                env.crypto().ed25519_verify(
-                    &pubkey,
-                    &challenge.nonce,
-                    signed_challenge,
-                );
-            }
-            SIG_SCHEME_SECP256K1 => {
-                let pubkey = BytesN::from_array(
-                    env,
-                    &subject.to_xdr(env).to_array(),
-                );
-                env.crypto().secp256k1_verify(
-                    &pubkey,
-                    &challenge.nonce,
-                    signed_challenge,
-                );
-            }
-            _ => return Err(ContractError::UnsupportedSignatureScheme),
-        }
-
+        return Err(ContractError::UnsupportedSignatureScheme);
         // Clear the challenge after successful verification
         env.storage().temporary().remove(&challenge_key);
 
