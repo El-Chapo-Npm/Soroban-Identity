@@ -14,7 +14,7 @@ jobs:
   contracts:
     runs-on: ${{ vars.BENCH_RUNNER || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
@@ -44,7 +44,7 @@ jobs:
           alert-threshold: "110%"
           fail-on-alert: true
           comment-on-alert: true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: criterion-report
           path: contracts/target/criterion
@@ -52,10 +52,10 @@ jobs:
   api:
     runs-on: ${{ vars.BENCH_RUNNER || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
       - name: Benchmark base branch
@@ -72,7 +72,7 @@ jobs:
       - name: Compare (fail on >10% p95 regression)
         if: github.event_name == 'pull_request'
         run: node benches/api/compare.mjs baseline.json current.json --threshold 10 | tee -a "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: api-bench
