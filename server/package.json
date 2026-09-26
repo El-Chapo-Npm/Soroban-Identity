@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@bull-board/api": "^6.9.1",
-    "@bull-board/express": "^6.9.1",
+    "@bull-board/express": "^9.10.1",
     "bull": "^4.16.5",
     "graphql": "^16.11.0",
     "graphql-ws": "^6.0.6",
