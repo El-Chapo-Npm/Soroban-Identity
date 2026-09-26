@@ -30,6 +30,13 @@ pub enum ContractError {
     BatchTooLarge = 15,
     /// `create_dids_batch` was called with an empty entry list.
     EmptyBatch = 16,
+    DelegationNotFound = 17,
+    DelegationAlreadyExists = 18,
+    DelegationDepthExceeded = 19,
+    DelegationCycle = 20,
+    InvalidDelegationScope = 21,
+    DelegationRevoked = 22,
+    CannotDelegateToInactiveDid = 23,
 }
 
 /// Version returned by `ping` for deployment health checks.
@@ -62,6 +69,12 @@ const MAX_SERVICES: u32 = 10;
 /// Maximum number of entries accepted by [`IdentityRegistry::create_dids_batch`]
 /// in a single call, chosen to stay well within Soroban instruction limits.
 pub const MAX_BATCH_DIDS: u32 = 50;
+/// Maximum depth of a delegation chain, including the direct parent edge.
+pub const MAX_DELEGATION_DEPTH: u32 = 3;
+const DELEGATION: Symbol = symbol_short!("DELEG");
+const DELEGATION_CHILDREN: Symbol = symbol_short!("DELGCH");
+const DELEGATION_PARENT: Symbol = symbol_short!("DELGPAR");
+const MAX_DELEGATION_SCOPE_LEN: u32 = 128;
 
 // ── Data types ────────────────────────────────────────────────────────────────
 
@@ -90,6 +103,20 @@ pub struct DidDocument {
     pub updated_at: u64,
     pub active: bool,
     pub services: Vec<ServiceEndpoint>,
+    /// Parent controller. A root DID stores its own controller here.
+    pub parent: Address,
+    pub delegation_depth: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Delegation {
+    pub parent: Address,
+    pub child: Address,
+    pub scope: String,
+    pub depth: u32,
+    pub created_at: u64,
+    pub active: bool,
 }
 
 #[contract]
@@ -468,6 +495,123 @@ impl IdentityRegistry {
         }
     }
 
+    // ── Hierarchical DID delegation (#810) ───────────────────────────────────
+    /// Delegates authority from an active parent DID to an active child DID.
+    /// A child can have at most one active parent and chains are limited to
+    /// [`MAX_DELEGATION_DEPTH`] edges. The scope is application-defined.
+    pub fn delegate_authority(
+        env: Env,
+        parent: Address,
+        child: Address,
+        scope: String,
+    ) -> Result<(), ContractError> {
+        parent.require_auth();
+        Self::require_not_paused(&env)?;
+        if parent == child || scope.len() == 0 || scope.len() > MAX_DELEGATION_SCOPE_LEN {
+            return Err(if parent == child { ContractError::DelegationCycle } else { ContractError::InvalidDelegationScope });
+        }
+        let storage = env.storage().persistent();
+        let parent_key = Self::did_key(&env, &parent);
+        let child_key = Self::did_key(&env, &child);
+        let parent_doc: DidDocument = storage.get(&parent_key).ok_or(ContractError::DidNotFound)?;
+        let mut child_doc: DidDocument = storage.get(&child_key).ok_or(ContractError::DidNotFound)?;
+        if !parent_doc.active || !child_doc.active {
+            return Err(ContractError::CannotDelegateToInactiveDid);
+        }
+        let existing_parent_key = (DELEGATION_PARENT, child.clone());
+        if storage.has(&existing_parent_key) {
+            return Err(ContractError::DelegationAlreadyExists);
+        }
+        let depth = parent_doc.delegation_depth.saturating_add(1);
+        if depth > MAX_DELEGATION_DEPTH {
+            return Err(ContractError::DelegationDepthExceeded);
+        }
+        // A child with an existing ancestor relationship cannot be re-used as
+        // a parent in its own chain; the single-parent invariant makes this
+        // cycle check deterministic and bounded.
+        let delegation = Delegation {
+            parent: parent.clone(),
+            child: child.clone(),
+            scope,
+            depth,
+            created_at: env.ledger().timestamp(),
+            active: true,
+        };
+        let edge_key = (DELEGATION, parent.clone(), child.clone());
+        storage.set(&edge_key, &delegation);
+        storage.set(&existing_parent_key, &parent);
+        let children_key = (DELEGATION_CHILDREN, parent.clone());
+        let mut children: Vec<Address> = storage.get(&children_key).unwrap_or_else(|| Vec::new(&env));
+        children.push_back(child.clone());
+        storage.set(&children_key, &children);
+        storage.extend_ttl(&edge_key, TTL_LEDGERS, TTL_LEDGERS);
+        storage.extend_ttl(&existing_parent_key, TTL_LEDGERS, TTL_LEDGERS);
+        child_doc.parent = parent.clone();
+        child_doc.delegation_depth = depth;
+        child_doc.updated_at = env.ledger().timestamp();
+        storage.set(&child_key, &child_doc);
+        storage.extend_ttl(&child_key, TTL_LEDGERS, TTL_LEDGERS);
+        env.events().publish((DELEGATION, symbol_short!("created")), (EVENT_VERSION, parent, child, depth));
+        Ok(())
+    }
+    /// Revokes an active parent-to-child delegation. The parent must authorize.
+    pub fn revoke_delegation(env: Env, parent: Address, child: Address) -> Result<(), ContractError> {
+        parent.require_auth();
+        Self::require_not_paused(&env)?;
+        let storage = env.storage().persistent();
+        let edge_key = (DELEGATION, parent.clone(), child.clone());
+        let mut delegation: Delegation = storage.get(&edge_key).ok_or(ContractError::DelegationNotFound)?;
+        if !delegation.active { return Err(ContractError::DelegationRevoked); }
+        delegation.active = false;
+        storage.set(&edge_key, &delegation);
+        storage.remove(&(DELEGATION_PARENT, child.clone()));
+        let child_key = Self::did_key(&env, &child);
+        if let Some(mut doc) = storage.get::<_, DidDocument>(&child_key) {
+            doc.parent = child.clone();
+            doc.delegation_depth = 0;
+            doc.updated_at = env.ledger().timestamp();
+            storage.set(&child_key, &doc);
+        }
+        env.events().publish((DELEGATION, symbol_short!("revoked")), (EVENT_VERSION, parent, child));
+        Ok(())
+    }
+    /// Returns all delegation records created by `parent`, including revoked records.
+    pub fn get_delegations(env: Env, parent: Address) -> Vec<Delegation> {
+        let children_key = (DELEGATION_CHILDREN, parent.clone());
+        let children: Vec<Address> = env.storage().persistent().get(&children_key).unwrap_or_else(|| Vec::new(&env));
+        let mut result = Vec::new(&env);
+        for child in children.iter() {
+            let key = (DELEGATION, parent.clone(), child);
+            if let Some(delegation) = env.storage().persistent().get(&key) { result.push_back(delegation); }
+        }
+        result
+    }
+    /// Returns the active delegation chain from `child` toward its root parent.
+    /// The first entry is the direct parent edge; callers can inspect `depth`.
+    pub fn get_delegation_chain(env: Env, child: Address) -> Result<Vec<Delegation>, ContractError> {
+        let mut current = child;
+        let mut result = Vec::new(&env);
+        for _ in 0..MAX_DELEGATION_DEPTH {
+            let parent: Address = match env.storage().persistent().get(&(DELEGATION_PARENT, current.clone())) {
+                Some(value) => value, None => break,
+            };
+            let edge: Delegation = env.storage().persistent().get(&(DELEGATION, parent.clone(), current.clone())).ok_or(ContractError::DelegationNotFound)?;
+            if !edge.active { return Err(ContractError::DelegationRevoked); }
+            current = parent;
+            result.push_back(edge);
+        }
+        Ok(result)
+    }
+    /// Checks whether `ancestor` delegates authority to `child` through a
+    /// complete active chain, enforcing every edge's depth and active status.
+    pub fn is_delegation_authorized(env: Env, ancestor: Address, child: Address) -> bool {
+        if ancestor == child { return false; }
+        match Self::get_delegation_chain(env, child) {
+            Ok(chain) => chain.iter().any(|edge| edge.parent == ancestor) && !chain.is_empty(),
+            Err(_) => false,
+        }
+    }
+
     // ── Service endpoints ─────────────────────────────────────────────────────
     pub fn remove_service(env: Env, controller: Address, service_id: String) -> Result<(), ContractError> {
         controller.require_auth();
@@ -558,6 +702,8 @@ impl IdentityRegistry {
             updated_at: now,
             active: true,
             services: Vec::new(env),
+            parent: controller.clone(),
+            delegation_depth: 0,
         };
         storage.set(&key, &doc);
         storage.extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
@@ -1242,5 +1388,87 @@ mod tests {
         let mut entries = Vec::new(&env);
         entries.push_back((Address::generate(&env), Map::new(&env)));
         assert_eq!(client.try_create_dids_batch(&entries), Err(Ok(ContractError::ContractPaused)));
+    }
+
+    #[test]
+    fn test_hierarchical_delegation_updates_document_and_chain() {
+        let (env, client) = setup();
+        let root = Address::generate(&env);
+        let child = Address::generate(&env);
+        let grandchild = Address::generate(&env);
+        client.create_did(&root, &Map::new(&env));
+        client.create_did(&child, &Map::new(&env));
+        client.create_did(&grandchild, &Map::new(&env));
+
+        client.delegate_authority(&root, &child, &String::from_str(&env, "issue"));
+        client.delegate_authority(&child, &grandchild, &String::from_str(&env, "verify"));
+
+        let doc = client.resolve_did(&grandchild);
+        assert_eq!(doc.parent, child.clone());
+        assert_eq!(doc.delegation_depth, 2);
+        assert!(client.is_delegation_authorized(&root, &grandchild));
+        assert_eq!(client.get_delegation_chain(&grandchild).len(), 2);
+        assert_eq!(client.get_delegations(&root).len(), 1);
+    }
+
+    #[test]
+    fn test_delegation_depth_is_limited_to_three_edges() {
+        let (env, client) = setup();
+        let root = Address::generate(&env);
+        let first = Address::generate(&env);
+        let second = Address::generate(&env);
+        let third = Address::generate(&env);
+        let fourth = Address::generate(&env);
+        for address in [&root, &first, &second, &third, &fourth] {
+            client.create_did(address, &Map::new(&env));
+        }
+        let scope = String::from_str(&env, "all");
+        client.delegate_authority(&root, &first, &scope);
+        client.delegate_authority(&first, &second, &scope);
+        client.delegate_authority(&second, &third, &scope);
+        assert_eq!(
+            client.try_delegate_authority(&third, &fourth, &scope),
+            Err(Ok(ContractError::DelegationDepthExceeded))
+        );
+    }
+
+    #[test]
+    fn test_delegation_rejects_cycles_and_duplicate_parent() {
+        let (env, client) = setup();
+        let parent = Address::generate(&env);
+        let child = Address::generate(&env);
+        let other_parent = Address::generate(&env);
+        for address in [&parent, &child, &other_parent] {
+            client.create_did(address, &Map::new(&env));
+        }
+        let scope = String::from_str(&env, "read");
+        assert_eq!(
+            client.try_delegate_authority(&parent, &parent, &scope),
+            Err(Ok(ContractError::DelegationCycle))
+        );
+        client.delegate_authority(&parent, &child, &scope);
+        assert_eq!(
+            client.try_delegate_authority(&other_parent, &child, &scope),
+            Err(Ok(ContractError::DelegationAlreadyExists))
+        );
+    }
+
+    #[test]
+    fn test_revoke_delegation_clears_child_parent_and_authorization() {
+        let (env, client) = setup();
+        let parent = Address::generate(&env);
+        let child = Address::generate(&env);
+        client.create_did(&parent, &Map::new(&env));
+        client.create_did(&child, &Map::new(&env));
+        client.delegate_authority(&parent, &child, &String::from_str(&env, "read"));
+        client.revoke_delegation(&parent, &child);
+        let doc = client.resolve_did(&child);
+        assert_eq!(doc.parent, child.clone());
+        assert_eq!(doc.delegation_depth, 0);
+        assert!(!client.is_delegation_authorized(&parent, &child));
+        assert_eq!(
+            client.try_revoke_delegation(&parent, &child),
+            Err(Ok(ContractError::DelegationRevoked))
+        );
     }
 }
