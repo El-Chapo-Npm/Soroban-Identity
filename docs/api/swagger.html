@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Soroban Identity API — Interactive Docs</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui.css" />
+  <style>
+    body { margin: 0; }
+    @media (max-width: 640px) {
+      .swagger-ui .wrapper { padding: 0 8px; }
+      .swagger-ui .opblock .opblock-summary { flex-wrap: wrap; }
+    }
+  </style>
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui-bundle.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui-standalone-preset.js"></script>
+  <script>
+    // When served by the API at /api/docs the server substitutes the spec URL;
+    // when opened statically it falls back to the committed spec.
+    var specUrl = "__SPEC_URL__";
+    if (specUrl.indexOf("__") === 0) specUrl = "../openapi.yaml";
+    window.ui = SwaggerUIBundle({
+      url: specUrl,
+      dom_id: "#swagger-ui",
+      deepLinking: true,
+      tryItOutEnabled: true,
+      persistAuthorization: true,
+      displayRequestDuration: true,
+      filter: true,
+      requestSnippetsEnabled: true,
+      requestSnippets: {
+        generators: {
+          curl_bash: { title: "cURL (bash)", syntax: "bash" },
+          curl_powershell: { title: "cURL (PowerShell)", syntax: "powershell" },
+          curl_cmd: { title: "cURL (CMD)", syntax: "bash" }
+        },
+        defaultExpanded: false
+      },
+      presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
+      layout: "StandaloneLayout"
+    });
+  </script>
+</body>
+</html>

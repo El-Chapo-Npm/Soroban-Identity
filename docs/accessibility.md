@@ -106,3 +106,23 @@ Automated tooling catches roughly a third of WCAG issues. These need a person:
   scrolling (WCAG 1.4.10).
 - **Keyboard-only walkthrough** — issue, verify, and resolve flows end to end
   without touching a pointer.
+
+## Automated testing (#827)
+
+`tests/a11y/` runs axe-core through Playwright against every frontend route on each PR (`.github/workflows/a11y.yml`). The build fails on any **critical** or **serious** WCAG 2.1 AA violation. Violation reports are uploaded as the `a11y-report` artifact.
+
+### Requirements
+- WCAG 2.1 Level AA conformance.
+- Text contrast of at least 4.5:1, and 3:1 for large text and UI components.
+- Every interactive element can be reached by keyboard and shows a visible focus indicator.
+- Each page has one `main` landmark and one `h1`.
+- Form controls have labels. Icon-only buttons have an `aria-label`.
+- ARIA roles and attributes are valid. `aria-hidden` is never set on a focusable element.
+
+### PR accessibility checklist
+- [ ] `npm test` in `tests/a11y` passes locally, or the CI `a11y` job is green
+- [ ] New UI can be operated with the keyboard alone (Tab, Shift+Tab, Enter, Space, Esc)
+- [ ] Focus stays visible and follows a logical order. Modals trap focus and restore it when closed
+- [ ] Images have `alt` text. Decorative images use `alt=""`
+- [ ] Colour is not the only way information is shown
+- [ ] Checked with a screen reader (NVDA, JAWS or VoiceOver) for any significant UI change
