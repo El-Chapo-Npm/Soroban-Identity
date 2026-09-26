@@ -1,0 +1,79 @@
+name: Benchmarks
+
+on:
+  pull_request:
+    paths: ["contracts/**", "server/**", "benches/**"]
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  contracts:
+    runs-on: ${{ vars.BENCH_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts
+      - name: Benchmark base branch
+        if: github.event_name == 'pull_request'
+        working-directory: contracts
+        run: |
+          git checkout ${{ github.event.pull_request.base.sha }}
+          cargo bench -p identity-registry --bench registry -- --save-baseline base || echo "no benches on base"
+          git checkout ${{ github.event.pull_request.head.sha }}
+      - name: Benchmark head
+        working-directory: contracts
+        run: |
+          ARGS="--output-format bencher"
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ -d target/criterion ]; then ARGS="$ARGS --baseline base"; fi
+          cargo bench -p identity-registry --bench registry -- $ARGS | tee ../bench-output.txt
+      - name: Track trend and fail on >10% regression
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          tool: cargo
+          output-file-path: bench-output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: ${{ github.event_name == 'push' }}
+          alert-threshold: "110%"
+          fail-on-alert: true
+          comment-on-alert: true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: criterion-report
+          path: contracts/target/criterion
+
+  api:
+    runs-on: ${{ vars.BENCH_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Benchmark base branch
+        if: github.event_name == 'pull_request'
+        run: |
+          git worktree add ../base ${{ github.event.pull_request.base.sha }}
+          (cd ../base/server && npm ci && (PORT=3000 npm start &) && npx --yes wait-on -t 60000 http://localhost:3000/health)
+          node benches/api/bench.mjs --base http://localhost:3000 --out baseline.json
+          pkill -f "node.*server" || true
+      - name: Benchmark head
+        run: |
+          cd server && npm ci && (PORT=3000 npm start &) && npx --yes wait-on -t 60000 http://localhost:3000/health && cd ..
+          node benches/api/bench.mjs --base http://localhost:3000 --out current.json
+      - name: Compare (fail on >10% p95 regression)
+        if: github.event_name == 'pull_request'
+        run: node benches/api/compare.mjs baseline.json current.json --threshold 10 | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: api-bench
+          path: "*.json"

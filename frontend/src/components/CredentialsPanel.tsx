@@ -1079,6 +1079,10 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
                         <dt style={{ fontWeight: 600, color: "var(--text-muted)", minWidth: "120px" }}>Expires</dt>
                         <dd style={{ margin: 0, ...getExpiryStyle(cred.expiresAt) }}>{formatTimestamp(cred.expiresAt)}</dd>
                       </div>
+                      <div style={{ display: "flex", gap: "1rem", marginBottom: "0.5rem" }}>
+                        <dt style={{ fontWeight: 600, color: "var(--text-muted)", minWidth: "120px" }}>Version</dt>
+                        <dd style={{ margin: 0, color: "var(--text)" }}>v{cred.version ?? 1}</dd>
+                      </div>
                     </dl>
                     {Object.keys(cred.claims).length > 0 ? (
                       <dl style={{ margin: 0, fontSize: "0.85rem" }}>

@@ -72,6 +72,14 @@ export function assertCredentialType(value: unknown): CredentialType {
  * On-chain credential record returned by
  * {@link CredentialClient.getCredential}.
  */
+export interface CredentialVersionEntry {
+  version: number;
+  amendedAt: number;
+  amendedBy: string;
+  reason: string;
+  changeSummary: string;
+}
+
 export interface Credential {
   id: string; // hex-encoded 32-byte hash
   subject: string;
@@ -82,6 +90,9 @@ export interface Credential {
   claimsHash: string;
   signature: string; // hex
   issuedAt: number;
+  version: number;
+  lastModifiedAt: number;
+  versionHistory?: CredentialVersionEntry[];
   /**
    * Unix timestamp (seconds) before which this credential is inactive.
    * `0` means the credential is active immediately (no time-lock). #731

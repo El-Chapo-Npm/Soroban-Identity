@@ -883,6 +883,17 @@ export function createApp({
           return sendJson(res, 200, { verified: true, credential });
         }
 
+        // Interactive Swagger UI (#830)
+        if (req.method === "GET" && (pathname === "/api/docs" || pathname === "/api/docs/")) {
+          try {
+            const html = await fs.readFile(new URL("../../docs/api/swagger.html", import.meta.url), "utf8");
+            res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+            return res.end(html.replace("__SPEC_URL__", "/openapi.json"));
+          } catch (err) {
+            return sendJson(res, 500, { error: "swagger_ui_unavailable", message: err.message });
+          }
+        }
+
         if (req.method === "GET" && pathname === "/openapi.json") {
           try {
             const openApiPath = path.resolve(process.cwd(), "openapi.json");
