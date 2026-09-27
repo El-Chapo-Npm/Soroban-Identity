@@ -3,11 +3,14 @@
   "private": true,
   "workspaces": [
     "sdk",
-    "frontend"
+    "frontend",
+    "cli"
   ],
   "scripts": {
     "build": "npm run build --workspace=sdk && npm run build --workspace=frontend",
     "build:sdk": "npm run build --workspace=sdk",
-    "build:frontend": "npm run build --workspace=frontend"
+    "build:frontend": "npm run build --workspace=frontend",
+    "build:cli": "npm run build --workspace=cli",
+    "test:cli": "npm run test --workspace=cli"
   }
 }
