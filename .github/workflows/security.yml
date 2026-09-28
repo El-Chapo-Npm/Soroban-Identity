@@ -11,9 +11,9 @@ jobs:
   dependency-review:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Dependency review
-        uses: actions/dependency-review-action@v4
+        uses: actions/dependency-review-action@v5
         with:
           fail-on-severity: high
       - name: npm audit
@@ -24,7 +24,7 @@ jobs:
   contract-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-audit and cargo-deny
         run: cargo install cargo-audit cargo-deny --locked
@@ -39,19 +39,19 @@ jobs:
         run: cargo test --workspace
       - name: Upload contract report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with: { name: contract-security-report, path: contracts/target, if-no-files-found: ignore }
   zap:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Start server for DAST
         run: |
           npm ci --prefix server
           (PORT=3001 ADMIN_API_KEY=ci-test STELLAR_SECRET_KEY=SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX CREDENTIAL_CONTRACT_ID=CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX node server/src/index.js > /tmp/server.log 2>&1 & echo $! > /tmp/server.pid)
           for i in {1..30}; do curl -fsS http://127.0.0.1:3001/health && break || sleep 2; done
       - name: OWASP ZAP baseline scan
-        uses: zaproxy/action-baseline@v0.12.0
+        uses: zaproxy/action-baseline@v0.15.0
         with:
           target: http://127.0.0.1:3001
           allow_issue_writing: false
@@ -59,7 +59,7 @@ jobs:
           rules_file_name: .zap/rules.tsv
       - name: Upload ZAP report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with: { name: zap-security-report, path: report_html.html }
       - name: Stop server
         if: always()
