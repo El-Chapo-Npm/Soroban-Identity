@@ -137,7 +137,7 @@ jobs:
         run: |
           cd fuzz
           set -o pipefail
-          cargo +nightly fuzz run ${{ matrix.target }} \
+          cargo +nightly fuzz run --fuzz-dir . ${{ matrix.target }} \
             corpus/${{ matrix.target }} \
             -- \
             -max_total_time=${{ steps.budget.outputs.seconds }} \
@@ -238,7 +238,7 @@ jobs:
               '',
               '```bash',
               'cd fuzz',
-              `cargo +nightly fuzz run ${target} artifacts/${target}/<crash-file>`,
+              `cargo +nightly fuzz run --fuzz-dir . ${target} artifacts/${target}/<crash-file>`,
               '```',
             ].join('\n');
 

@@ -96,6 +96,8 @@ pub enum ContractError {
     ContractPaused         = 15,
     /// Issue #733: batch too large.
     BatchTooLarge          = 16,
+    /// Score decay rate is out of the valid range.
+    InvalidDecayRate       = 17,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -592,6 +594,9 @@ impl Reputation {
         record.score = computed_score;
         record.reporter_count = reporter_count;
         record.updated_at = now;
+        let last_reporter_key = Self::last_reporter_key(&subject);
+        env.storage().persistent().set(&last_reporter_key, &reporter);
+        env.storage().persistent().extend_ttl(&last_reporter_key, TTL_MAX, TTL_MAX);
 
         env.storage().persistent().set(&rec_key, &record);
         env.storage()
@@ -1325,6 +1330,9 @@ impl Reputation {
         record.score = computed_score;
         record.reporter_count = reporter_count;
         record.updated_at = now;
+        let last_reporter_key = Self::last_reporter_key(&subject);
+        env.storage().persistent().set(&last_reporter_key, &reporter);
+        env.storage().persistent().extend_ttl(&last_reporter_key, TTL_MAX, TTL_MAX);
 
         env.storage().persistent().set(&rec_key, &record);
         env.storage().persistent().extend_ttl(&rec_key, TTL_MAX, TTL_MAX);

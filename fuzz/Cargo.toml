@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[package.metadata]
+cargo-fuzz = true
+
 # cargo-fuzz requires the workspace to be declared here so it is isolated
 [workspace]
 members = ["."]
@@ -12,9 +15,9 @@ members = ["."]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1.3", features = ["derive"] }
 soroban-sdk = { version = "21.0.0", features = ["testutils"] }
-identity-registry = { path = "../contracts/identity-registry" }
-credential-manager = { path = "../contracts/credential-manager" }
-reputation = { path = "../contracts/reputation" }
+identity-registry = { path = "../contracts/identity-registry", features = ["testutils"] }
+credential-manager = { path = "../contracts/credential-manager", features = ["testutils"] }
+reputation = { path = "../contracts/reputation", features = ["testutils"] }
 
 [[bin]]
 name = "fuzz_create_did"

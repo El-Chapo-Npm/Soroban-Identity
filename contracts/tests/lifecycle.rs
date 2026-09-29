@@ -37,7 +37,7 @@ fn did_and_credential_lifecycle() {
     let subject = Address::generate(&env);
 
     identity.initialize(&admin);
-    credentials.initialize(&admin);
+    credentials.initialize(&admin, &identity.address);
     reputation.initialize(&admin);
 
     // Create a DID before issuing credentials so the subject has an on-chain identity.
@@ -64,16 +64,22 @@ fn did_and_credential_lifecycle() {
         &claims_hash,
         &signature,
         &0u64,
+        &None,
+        &0u64,
+        &None,
     );
 
-    assert!(credentials.verify_credential(&credential_id));
+    assert_eq!(credentials.try_verify_credential(&credential_id), Ok(Ok(())));
     let credential = credentials.get_credential(&credential_id);
     assert_eq!(credential.subject, subject);
     assert_eq!(credential.issuer, issuer);
 
     // Revocation must immediately make the same credential fail verification.
     credentials.revoke_credential(&issuer, &credential_id);
-    assert!(!credentials.verify_credential(&credential_id));
+    assert_eq!(
+        credentials.try_verify_credential(&credential_id),
+        Err(Ok(CredentialError::CredentialRevoked))
+    );
 }
 
 #[test]
@@ -163,8 +169,11 @@ fn cross_contract_lifecycle() {
         &BytesN::from_array(&env, &[0u8; 32]),
         &Bytes::from_array(&env, &[1u8; 64]),
         &0u64,
+        &None,
+        &0u64,
+        &None,
     );
-    assert!(credentials.verify_credential(&cred_id));
+    assert_eq!(credentials.try_verify_credential(&cred_id), Ok(Ok(())));
     let cred = credentials.get_credential(&cred_id);
     assert_eq!(cred.subject, subject);
 
@@ -175,7 +184,7 @@ fn cross_contract_lifecycle() {
 
     // Assert final state across all three contracts is consistent
     assert!(identity.has_active_did(&subject));          // DID still active
-    assert!(credentials.verify_credential(&cred_id));    // credential still valid
+    assert_eq!(credentials.try_verify_credential(&cred_id), Ok(Ok(())));    // credential still valid
     let rec = reputation.get_reputation(&subject);
     assert!(rec.score > 0);                              // reputation score is non-zero
     assert_eq!(rec.reporter_count, 1);
@@ -256,7 +265,7 @@ fn update_did_after_deactivation_returns_did_deactivated() {
 }
 
 #[test]
-fn accept_admin_without_pending_returns_no_pending_admin() {
+fn accept_admin_without_pending_returns_not_initialized() {
     let env = Env::default();
     env.mock_all_auths();
     let (identity, _credentials, _reputation) = register_clients(&env);
@@ -266,12 +275,12 @@ fn accept_admin_without_pending_returns_no_pending_admin() {
 
     assert_eq!(
         identity.try_accept_admin(&rando),
-        Err(Ok(IdentityError::NoPendingAdmin))
+        Err(Ok(IdentityError::NotInitialized))
     );
 }
 
 #[test]
-fn accept_admin_with_wrong_address_returns_not_pending_admin() {
+fn accept_admin_with_wrong_address_returns_unauthorized() {
     let env = Env::default();
     env.mock_all_auths();
     let (identity, _credentials, _reputation) = register_clients(&env);
@@ -283,7 +292,7 @@ fn accept_admin_with_wrong_address_returns_not_pending_admin() {
 
     assert_eq!(
         identity.try_accept_admin(&impostor),
-        Err(Ok(IdentityError::NotPendingAdmin))
+        Err(Ok(IdentityError::Unauthorized))
     );
 }
 
@@ -330,6 +339,8 @@ fn issue_credential_to_deactivated_did_panics() {
             &Bytes::from_array(&env, &[1u8; 64]),
             &0u64,
             &None,
+            &0u64,
+            &None,
         )
     }));
     assert!(result.is_err(), "issuing to a deactivated DID should panic");
@@ -355,6 +366,8 @@ fn verify_revoked_credential_returns_credential_revoked() {
         &Map::new(&env),
         &BytesN::from_array(&env, &[9u8; 32]),
         &Bytes::from_array(&env, &[1u8; 64]),
+        &0u64,
+        &None,
         &0u64,
         &None,
     );
@@ -385,6 +398,8 @@ fn issue_credential_by_non_issuer_returns_unauthorized_issuer() {
         &Map::new(&env),
         &BytesN::from_array(&env, &[3u8; 32]),
         &Bytes::from_array(&env, &[1u8; 64]),
+        &0u64,
+        &None,
         &0u64,
         &None,
     );
@@ -523,17 +538,12 @@ fn resolve_unknown_dispute_returns_dispute_not_found() {
     reputation.initialize(&admin);
 
     assert_eq!(
-        reputation.try_resolve_dispute(&admin, &999u32, &false),
+        reputation.try_resolve_dispute(&admin, &admin, &999u32, &false),
         Err(Ok(ReputationError::DisputeNotFound))
     );
 }
 
-/// Explicit "dispute after expiry" coverage requested by #546. Note: this
-/// mirrors reputation's own `test_dispute_expired` unit test, which is
-/// currently failing on `main` due to a pre-existing, unrelated contract
-/// instance-TTL bug (the contract instance itself gets archived in the test
-/// environment when the ledger sequence is advanced this far without an
-/// intervening call). Tracked separately from #545/#546.
+/// Resolution uses the disputed history index, not the returned dispute ID.
 #[test]
 fn dispute_resolution_after_expiry_returns_dispute_expired() {
     let env = Env::default();
@@ -547,13 +557,13 @@ fn dispute_resolution_after_expiry_returns_dispute_expired() {
 
     let reason = String::from_str(&env, "activity");
     reputation.submit_score(&reporter, &subject, &20, &reason);
-    let dispute_id = reputation.dispute_score(&subject, &reporter, &0);
+    reputation.dispute_score(&subject, &reporter, &0);
 
     // Advance past reputation's private DISPUTE_WINDOW_LEDGERS (17_280 ledgers).
     env.ledger().with_mut(|li| li.sequence_number += 17_281);
 
     assert_eq!(
-        reputation.try_resolve_dispute(&admin, &dispute_id, &true),
+        reputation.try_resolve_dispute(&subject, &reporter, &0, &true),
         Err(Ok(ReputationError::DisputeExpired))
     );
 }

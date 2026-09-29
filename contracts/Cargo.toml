@@ -30,9 +30,9 @@ default-members = [
 resolver = "2"
 
 [dev-dependencies]
-credential-manager = { path = "credential-manager" }
-identity-registry = { path = "identity-registry" }
-reputation = { path = "reputation" }
+credential-manager = { path = "credential-manager", features = ["testutils"] }
+identity-registry = { path = "identity-registry", features = ["testutils"] }
+reputation = { path = "reputation", features = ["testutils"] }
 shared-errors = { path = "shared-errors" }
 soroban-identity-interface = { path = "soroban-identity-interface" }
 schema-registry = { path = "schema-registry" }

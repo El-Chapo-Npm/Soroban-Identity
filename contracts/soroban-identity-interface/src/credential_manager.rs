@@ -49,6 +49,8 @@ pub trait CredentialManagerInterface {
         signature: Bytes,
         expires_at: u64,
         schema_hash: Option<BytesN<32>>,
+        activation_time: u64,
+        proof: Option<Bytes>,
     ) -> Result<BytesN<32>, ContractError>;
 
     // ── Credential type registry (#656) ─────────────────────────────────────
@@ -203,6 +205,8 @@ impl CredentialManagerInterface for CredentialManager {
         signature: Bytes,
         expires_at: u64,
         schema_hash: Option<BytesN<32>>,
+        activation_time: u64,
+        proof: Option<Bytes>,
     ) -> Result<BytesN<32>, ContractError> {
         Self::issue_credential(
             env,
@@ -214,6 +218,8 @@ impl CredentialManagerInterface for CredentialManager {
             signature,
             expires_at,
             schema_hash,
+            activation_time,
+            proof,
         )
     }
 

@@ -82,6 +82,10 @@ libfuzzer_sys::fuzz_target!(|input: IssueCredentialInput| {
 
     let subject = soroban_sdk::Address::generate(&env);
 
+    let mut metadata = Map::new(&env);
+    metadata.set(SorobanString::from_str(&env, "name"), SorobanString::from_str(&env, "subject"));
+    identity_client.create_did(&subject, &metadata);
+
     // Build the claims map
     let mut claims: Map<SorobanString, SorobanString> = Map::new(&env);
     for (k, v) in input.claims.iter().take(12) {
@@ -101,6 +105,8 @@ libfuzzer_sys::fuzz_target!(|input: IssueCredentialInput| {
         &claims_hash,
         &signature,
         &input.expires_at,
+        &None,
+        &0,
         &None,
     );
 
