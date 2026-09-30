@@ -41,7 +41,7 @@ soroban-identity-interface = { path = "soroban-identity-interface" }
 schema-registry = { path = "schema-registry" }
 revocation-registry = { path = "revocation-registry" }
 selective-disclosure = { path = "selective-disclosure" }
-soroban-sdk = { version = "21.0.0", features = ["testutils"] }
+soroban-sdk = { version = "28.0.0", features = ["testutils"] }
 
 [[test]]
 name = "integration"
