@@ -14,6 +14,7 @@ const IssuerDashboard = lazy(() => import("./pages/IssuerDashboard"));
 const preloadCredentialsPanel = () => {
   void import("./components/CredentialsPanel");
 };
+import QRScanner from "./components/QRScanner";
 import CredentialRecipientVerify from "./components/CredentialRecipientVerify";
 import WalletButton from "./components/WalletButton";
 import ErrorBoundary from "./components/ErrorBoundary";
@@ -57,6 +58,7 @@ export default function App() {
   const tabRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({});
   const [activeNetwork, setActiveNetwork] = useState<NetworkName>(DEFAULT_NETWORK);
   const [verifyId, setVerifyId] = useState<string | null>(null);
+  const [scanning, setScanning] = useState(false);
   const [deepLinkEncrypted, setDeepLinkEncrypted] = useState<{ c: string; k: string } | null>(null);
   const networkConfig = NETWORK_CONFIGS[activeNetwork];
   const wallet = useWallet(networkConfig);
@@ -523,6 +525,18 @@ export default function App() {
                     ciphertext={deepLinkEncrypted.c}
                     secretKey={deepLinkEncrypted.k}
                     onClose={() => setDeepLinkEncrypted(null)}
+                  />
+                )}
+                <button type="button" onClick={() => setScanning((v) => !v)}>
+                  Scan QR
+                </button>
+                {scanning && (
+                  <QRScanner
+                    onVerify={(id) => {
+                      setVerifyId(id);
+                      setScanning(false);
+                    }}
+                    onClose={() => setScanning(false)}
                   />
                 )}
                 <CredentialsPanel verifyId={verifyId} />
