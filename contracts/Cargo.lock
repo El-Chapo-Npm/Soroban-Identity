@@ -433,6 +433,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "did-bridge"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1377,6 +1384,7 @@ name = "soroban-identity-contracts"
 version = "0.1.0"
 dependencies = [
  "credential-manager",
+ "did-bridge",
  "governance",
  "identity-registry",
  "reputation",

@@ -1,6 +1,9 @@
 #![no_std]
 #![deny(clippy::all)]
 
+mod batch;
+pub use batch::{BatchFailureReason, BatchVerifyResult};
+
 mod templates;
 pub use templates::{CredentialTemplate, TemplateRef};
 
@@ -113,30 +116,6 @@ const ADMIN_SIGNERS: Symbol = symbol_short!("ADMSIG");
 const SIG_THRESHOLD: Symbol = symbol_short!("SIGTH");
 /// Admin action proposal expiration time in seconds (15 minutes).
 const ADMIN_ACTION_EXPIRATION_SECS: u64 = 900;
-
-// -- Issue #663: upgrade timelock
-/// Storage key for the pending upgrade proposal.
-const UPGRADE_PROPOSAL: Symbol = symbol_short!("UPGPROP");
-/// Default timelock (seconds) applied to an upgrade proposal when the caller
-/// does not specify one explicitly (7 days).
-const DEFAULT_UPGRADE_TIMELOCK: u32 = 604_800;
-
-// -- Issue #656: credential type registry
-/// List of every credential type name ever registered.
-const TYPE_NAMES: Symbol = symbol_short!("TYPENAMES");
-/// Maps a type name to its [`CredentialTypeDescriptor`].
-const TYPE_REGISTRY: Symbol = symbol_short!("TYPEREG");
-/// Maximum number of distinct credential type names that may be registered.
-const MAX_CREDENTIAL_TYPES: u32 = 200;
-
-// -- Issue #662: credential metadata secondary indexes
-const CRED_BY_TYPE: Symbol = symbol_short!("CREDBYTYP");
-const CRED_BY_ISSUER: Symbol = symbol_short!("CREDBYISS");
-const CRED_BY_SUBJECT: Symbol = symbol_short!("CREDBYSUB");
-
-// -- Issue #655: delegated verification
-/// Maps a delegation ID to its [`Delegation`] record.
-const DELEGATION: Symbol = symbol_short!("DELEG");
 
 #[contracterror]
 #[derive(Clone, Debug, PartialEq, Copy)]
@@ -3096,92 +3075,6 @@ impl CredentialManager {
         Some(delegation)
     }
 
-    /// Issue #655: grant `delegate` the ability to call
-    /// [`Self::verify_credential_as_delegate`] on `subject`'s behalf, either for
-    /// one specific credential (`credential_id`) or, when `credential_id` is the
-    /// all-zero id, for every credential `subject` holds. Requires `subject`'s
-    /// auth. `expires_at` must be strictly in the future. A second grant to the
-    /// same (subject, delegate) pair replaces the previous one.
-    pub fn delegate_verification(
-        env: Env,
-        subject: Address,
-        delegate: Address,
-        credential_id: BytesN<32>,
-        expires_at: u64,
-    ) -> Result<(), ContractError> {
-        subject.require_auth();
-        if expires_at <= env.ledger().timestamp() {
-            return Err(ContractError::InvalidDelegationExpiry);
-        }
-        let key = Self::delegation_key(&subject, &delegate);
-        let delegation = Delegation {
-            subject: subject.clone(),
-            delegate: delegate.clone(),
-            credential_id: credential_id.clone(),
-            granted_at: env.ledger().timestamp(),
-            expires_at,
-            revoked: false,
-        };
-        env.storage().persistent().set(&key, &delegation);
-        let ttl = Self::ttl_for_credential(&env, expires_at);
-        env.storage().persistent().extend_ttl(&key, ttl, ttl);
-        env.events().publish(
-            (DELEGATION, symbol_short!("granted")),
-            (EVENT_VERSION, subject, delegate, credential_id, expires_at),
-        );
-        Ok(())
-    }
-
-    /// Issue #655: whether `delegate` currently holds an active (not revoked,
-    /// not expired) delegation from `subject` covering `credential_id`.
-    pub fn is_delegate_authorized(
-        env: Env,
-        subject: Address,
-        delegate: Address,
-        credential_id: BytesN<32>,
-    ) -> bool {
-        Self::active_delegation(&env, &subject, &delegate, &credential_id).is_some()
-    }
-
-    /// Issue #655: verify `credential_id` on `subject`'s behalf as `delegate`,
-    /// provided `delegate` currently holds an active delegation covering it.
-    /// Requires `delegate`'s auth. Delegates to [`Self::verify_credential`] for
-    /// the actual validity check (revocation, expiry, activation, prerequisites).
-    pub fn verify_credential_as_delegate(
-        env: Env,
-        delegate: Address,
-        subject: Address,
-        credential_id: BytesN<32>,
-    ) -> Result<(), ContractError> {
-        delegate.require_auth();
-        if Self::active_delegation(&env, &subject, &delegate, &credential_id).is_none() {
-            return Err(ContractError::UnauthorizedDelegate);
-        }
-        Self::verify_credential(env, credential_id)
-    }
-
-    /// Issue #655: revoke a previously granted delegation from `subject` to
-    /// `delegate`. Requires `subject`'s auth.
-    pub fn revoke_delegation(env: Env, subject: Address, delegate: Address) -> Result<(), ContractError> {
-        subject.require_auth();
-        let key = Self::delegation_key(&subject, &delegate);
-        let mut delegation: Delegation = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .ok_or(ContractError::DelegationNotFound)?;
-        if delegation.revoked {
-            return Err(ContractError::DelegationAlreadyRevoked);
-        }
-        delegation.revoked = true;
-        env.storage().persistent().set(&key, &delegation);
-        env.events().publish(
-            (DELEGATION, symbol_short!("revoked")),
-            (EVENT_VERSION, subject, delegate),
-        );
-        Ok(())
-    }
-
     fn type_names(env: &Env) -> Vec<String> {
         env.storage()
             .instance()
@@ -4059,30 +3952,28 @@ mod tests {
         let issuer = Address::generate(&env);
         client.add_issuer(&issuer);
 
-        env.budget().reset_unlimited();
-        let mut first_id = None;
+        let mut index = Vec::new(&env);
         for i in 0..MAX_ISSUER_CREDS {
-            let subject = Address::generate(&env);
-            let id = issue_kyc(&env, &client, &issuer, &subject);
-            if i == 0 {
-                first_id = Some(id);
-            }
+            let mut raw_id = [0u8; 32];
+            raw_id[..4].copy_from_slice(&i.to_be_bytes());
+            index.push_back(BytesN::from_array(&env, &raw_id));
+        }
+        let evicted_id = index.get(0).unwrap();
+        let next_oldest_id = index.get(1).unwrap();
+        env.as_contract(&client.address, || {
             env.storage()
                 .persistent()
                 .set(&CredentialManager::issuer_creds_key(&issuer), &index);
         });
-        assert_eq!(client.get_issuer_credentials(&issuer).len(), MAX_ISSUER_CREDS);
 
+        assert_eq!(client.get_issuer_credentials(&issuer).len(), MAX_ISSUER_CREDS);
         let new_id = issue_kyc(&env, &client, &issuer, &Address::generate(&env));
 
         let creds_after = client.get_issuer_credentials(&issuer);
         assert_eq!(creds_after.len(), MAX_ISSUER_CREDS);
-        assert_eq!(creds_after.get(0).unwrap(), seeded_id(1));
+        assert_eq!(creds_after.get(0).unwrap(), next_oldest_id);
         assert_eq!(creds_after.last().unwrap(), new_id);
-        assert!(
-            !creds_after.contains(&seeded_id(0)),
-            "First credential ID should have been evicted from the index"
-        );
+        assert!(!creds_after.contains(&evicted_id));
     }
 
     // ── Credential type registry tests (#656) ───────────────────────────────
@@ -4303,7 +4194,7 @@ mod tests {
 
         let revoked_subject = Address::generate(&env);
         let revoked_id = issue_kyc(&env, &client, &issuer, &revoked_subject);
-        client.revoke_credential(&issuer, &revoked_id);
+        client.revoke_credential(&issuer, &revoked_id, &RevocationReason::KeyCompromise);
 
         let expires_at = env.ledger().timestamp() + 100;
         let expiring_subject = Address::generate(&env);
@@ -4345,7 +4236,7 @@ mod tests {
 
         let subject_b = Address::generate(&env);
         let bad_b = issue_kyc(&env, &client, &issuer, &subject_b);
-        client.revoke_credential(&issuer, &bad_b);
+        client.revoke_credential(&issuer, &bad_b, &RevocationReason::KeyCompromise);
 
         let subject_c = Address::generate(&env);
         let good_c = issue_kyc(&env, &client, &issuer, &subject_c);

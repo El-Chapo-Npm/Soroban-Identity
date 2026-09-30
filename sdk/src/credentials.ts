@@ -337,7 +337,7 @@ export class CredentialClient extends BaseClient {
     credentialId: string,
     options?: RevokeOptions
   ): Promise<SorobanResponse<RevokedCredential>> {
-    const reason = options?.reason ?? RevocationReason.Unspecified;
+    const reason = options?.reason;
     const account = await this.server.getAccount(issuerKeypair.publicKey());
     const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
     const idBytes = Buffer.from(credentialId, 'hex');
@@ -357,7 +357,7 @@ export class CredentialClient extends BaseClient {
               ...buildRevokeCredentialWithReasonArgs({
                 issuer: issuerKeypair.publicKey(),
                 credentialId: idBytes,
-                reason,
+                reason: reason!,
               })
             )
       )
@@ -577,24 +577,11 @@ export class CredentialClient extends BaseClient {
   }
 
   /**
-   * Revoke a credential with a standardized reason. Only the original issuer can revoke.
-   */
-  async revokeCredential(
-    issuerKeypair: Keypair,
-    credentialId: string,
-    reason: RevocationReason = "Unspecified"
-  ): Promise<void> {
-    const account = await this.server.getAccount(issuerKeypair.publicKey());
    * Return the credential IDs of all pending time-locked credentials for a
    * subject — those whose `activation_time` is set, still in the future, and
    * not yet cancelled. #731
    *
    * This is a read-only simulation call and does not require signing.
-   *
-   * @param callerAddress  Any valid Stellar address (used for fee estimation only).
-   * @param subjectAddress Stellar address of the credential subject.
-   * @param options        Per-call overrides.
-   * @returns Array of hex-encoded credential IDs with pending activations.
    */
   async getPendingActivations(
     callerAddress: string,
@@ -612,27 +599,6 @@ export class CredentialClient extends BaseClient {
     })
       .addOperation(
         this.contract.call(
-          "revoke_credential",
-          nativeToScVal(issuerKeypair.publicKey(), { type: "address" }),
-          nativeToScVal(Buffer.from(credentialId, "hex"), { type: "bytes" }),
-          nativeToScVal(REVOCATION_REASONS.indexOf(reason), { type: "u32" })
-        )
-      )
-      .setTimeout(this.config.txTimeout ?? 30)
-      .build();
-
-    const prepared = await this.server.prepareTransaction(tx);
-    prepared.sign(issuerKeypair);
-    const result = await this.server.sendTransaction(prepared);
-    if (result.status !== "PENDING") {
-      throw new Error(`Transaction failed: ${result.status}`);
-    }
-    await this.waitForConfirmation(result.hash);
-  }
-
-  /**
-   * Verify a credential is valid (not revoked, not expired).
-   * Returns a typed result so callers can distinguish failure reasons.
           'get_pending_activations',
           ...buildGetPendingActivationsArgs({ subject: subjectAddress })
         )

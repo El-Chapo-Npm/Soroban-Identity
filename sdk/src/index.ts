@@ -56,7 +56,6 @@ export {
   SimulationError,
   validateConfig,
   RevocationReason,
-  revocationReasonName,
 } from './types';
 export {
   EXPORT_FORMATS,
@@ -83,18 +82,16 @@ export type {
   Credential,
   RevokedCredential,
   RevocationRecord,
-  RevocationReasonName,
   RevokeOptions,
   CredentialType,
   CredentialListOptions,
   VerifyResult,
   VerifyFailReason,
-  RevocationReason,
-  RevocationRecord,
   SorobanIdentityConfig,
 } from "./types";
 export { REVOCATION_REASONS } from "./types";
 export type { ReputationRecord, ScoreHistoryEntry } from "./reputation";
+export type {
   SorobanIdentityLogger,
   CallOptions,
   IdentityStorageStats,

@@ -12,7 +12,8 @@ interface Props {
 }
 import { useState, useEffect, useReducer, useRef, lazy, Suspense } from "react";
 import { StrKey, SorobanRpc, TransactionBuilder, BASE_FEE, nativeToScVal, Contract, scValToNative } from '@stellar/stellar-sdk';
-import type { CredentialType, Credential, VerifyResult } from "../../../sdk/src/types";
+import type { CredentialType, Credential, RevocationReason, VerifyResult } from "../../../sdk/src/types";
+import { REVOCATION_REASONS } from "../../../sdk/src/types";
 import { CredentialClient } from '../../../sdk/src';
 import { validateStellarAddress } from "../../../sdk/src/utils";
 import { getNetworkConfig } from '../network';
@@ -293,14 +294,13 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
   const [isIssuer, setIsIssuer] = useState(false);
   const [checkingIssuer, setCheckingIssuer] = useState(false);
 
+  const jsonImportRef = useRef<HTMLInputElement>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importedCount, setImportedCount] = useState<number | null>(null);
   const [revokeId, setRevokeId] = useState("");
   const [revokeReason, setRevokeReason] = useState<RevocationReason>("Compromised");
   const [revokeResult, setRevokeResult] = useState<string | null>(null);
 
-  const filteredCredentials =
-    activeFilter === "All"
-      ? MOCK_CREDENTIALS
-      : MOCK_CREDENTIALS.filter((c) => c.credentialType === activeFilter);
   const [searchAddress, setSearchAddress] = useState("");
   const [lastCheckedAt, setLastCheckedAt] = useState<number | null>(null);
   const [verifyCheckedAt, setVerifyCheckedAt] = useState<number | null>(null);
@@ -317,7 +317,6 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
   const [selectedCredentialsForExport, setSelectedCredentialsForExport] = useState<Set<string>>(new Set());
   const [sharingCredential, setSharingCredential] = useState<Credential | null>(null);
 
-  const handleVerify = async (credentialId?: string, silent = false) => {
   // ── Pagination ──────────────────────────────────────────────────────────
   const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
   const readIntParam = (name: string, fallback: number): number => {
@@ -460,7 +459,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
     reader.readAsText(file);
   };
 
-  const handleVerify = async (credentialId?: string) => {
+  const handleVerify = async (credentialId?: string, silent = false) => {
     if (verifying) return; // guard against duplicate submissions
     const id = (credentialId ?? credId).trim();
     if (!id) return;
@@ -551,26 +550,20 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
   }, [verifyState, credId]);
 
   const fetchCredentialsForAddress = async (addr: string) => {
-  const handleSearch = async () => {
-    if (fetching) return; // guard against duplicate submissions
-    const addr = searchAddress.trim();
-    if (!addr) return;
-
-    // Validate Stellar address format
-    if (!StrKey.isValidEd25519PublicKey(addr)) {
+    const trimmed = addr.trim();
+    if (!trimmed) return;
+    if (!StrKey.isValidEd25519PublicKey(trimmed)) {
       const message = 'Invalid Stellar address format. Address must start with "G" and be 56 characters long.';
       dispatchCredential({ type: 'FETCH_ERROR', message });
       toast.error(message);
       return;
     }
-
     dispatchCredential({ type: 'FETCH_START' });
-    goToPage(1);
     try {
       const credentialClient = getCredentialClient();
       const caller = wallet.publicKey || "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
-      const results = await credentialClient.getCredentialsBySubject(caller, addr);
-      dispatchCredential({ type: 'FETCH_SUCCESS', credentials: results, searchedAddress: addr });
+      const results = await credentialClient.getCredentialsBySubject(caller, trimmed);
+      dispatchCredential({ type: 'FETCH_SUCCESS', credentials: results, searchedAddress: trimmed });
       setLastCheckedAt(Date.now());
     } catch (e: unknown) {
       const message = handleError(e);
@@ -893,11 +886,6 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
     // TODO: build tx via CredentialClient.revokeCredential(), sign via wallet.signTransaction(), submit
     setRevokeResult(`Credential ${revokeId} revoked (reason: ${revokeReason}).`);
   };
-
-  const handleExport = (format: ExportFormat) =>
-    exportCredentials(filteredCredentials, format).catch((e) =>
-      alert(`Export failed: ${e instanceof Error ? e.message : String(e)}`)
-    );
 
   return (
     <>

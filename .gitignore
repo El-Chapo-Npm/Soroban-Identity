@@ -5,6 +5,10 @@ test_snapshots/
 # Node
 node_modules/
 dist/
+
+# Playwright output
+tests/e2e/test-results/
+tests/e2e/reports/
 .env
 .env.local
 

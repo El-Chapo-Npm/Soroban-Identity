@@ -359,6 +359,7 @@ button:disabled { background: var(--btn-disabled-bg); color: var(--btn-disabled-
 }
 
 .network-switcher span {
+  color: var(--text);
   font-size: 0.75rem;
   font-weight: 700;
   text-transform: uppercase;
