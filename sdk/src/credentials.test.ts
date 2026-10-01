@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { CredentialClient } from "./credentials";
 import type { SorobanIdentityConfig } from "./types";
+import { RevocationReason } from "./types";
 
 vi.mock("@stellar/stellar-sdk", () => {
   const mockSimResult = {
@@ -424,10 +425,16 @@ describe("CredentialClient", () => {
 
     const { SorobanIdentityError } = await import("./errors");
     try {
-      const result = await client.revokeCredential(issuerKeypair as any, "aabb");
+      const result = await client.revokeCredential(
+        issuerKeypair as any,
+        "aabb",
+        RevocationReason.Superseded
+      );
       expect(result.data.status).toBe("revoked");
       expect(typeof result.data.revokedAt).toBe("string");
       expect(result.txHash).toBe("txhash123");
+      // #937: the reason that was submitted comes back on the revoked credential.
+      expect(result.data.revocationReason).toBe(RevocationReason.Superseded);
     } catch (err) {
       if (err instanceof SorobanIdentityError) {
         // expected in mock environment — test confirms method exists and throws typed errors

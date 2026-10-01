@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState, useEffect, useCallback, useRef } from "react";
+import { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { SorobanRpc } from "@stellar/stellar-sdk";
 import LoadingFallback from "./components/LoadingFallback";
@@ -11,10 +11,14 @@ import { useKeyboardShortcutsContext } from "./context/KeyboardShortcutsContext"
 const IdentityPanel = lazy(() => import("./components/IdentityPanel"));
 const CredentialsPanel = lazy(() => import("./components/CredentialsPanel"));
 const IssuerDashboard = lazy(() => import("./pages/IssuerDashboard"));
+const CredentialRecipientVerify = lazy(() => import("./components/CredentialRecipientVerify"));
+
 const preloadCredentialsPanel = () => {
   void import("./components/CredentialsPanel");
 };
-import CredentialRecipientVerify from "./components/CredentialRecipientVerify";
+const preloadCredentialRecipientVerify = () => {
+  void import("./components/CredentialRecipientVerify");
+};
 import WalletButton from "./components/WalletButton";
 import ErrorBoundary from "./components/ErrorBoundary";
 import Toast from "./components/Toast";
@@ -33,6 +37,8 @@ import {
 } from "./network";
 import { checkConnection, IdentityClient, CredentialClient, ReputationClient } from "../../sdk/src/index";
 import { setLocale } from "./i18n";
+import { useOpenGraphMeta } from "./hooks/useOpenGraphMeta";
+import { SHARE_DESCRIPTION, SHARE_TITLE, buildVerificationUrl } from "./utils/socialShare";
 import type { Credential } from "../../sdk/src/types";
 
 const SUPPORTED_LOCALES: { code: string; label: string }[] = [
@@ -63,19 +69,59 @@ export default function App() {
   const [isConnected, setIsConnected] = useState<boolean | null>(null);
   const [uninitializedContracts, setUninitializedContracts] = useState<string[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
+  const menuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   
   // Keyboard shortcuts
   const { enabled: shortcutsEnabled, toggleHelp: toggleShortcutsHelp, showHelp: showShortcutsHelp } = useKeyboardShortcutsContext();
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Close the mobile nav drawer on Escape
+  // Mobile nav drawer (#882): while open, focus moves into the drawer and
+  // Tab cycles inside it, the page behind does not scroll, and Escape closes
+  // it. Closing returns focus to the menu button.
+  const wasMenuOpen = useRef(false);
   useEffect(() => {
-    if (!menuOpen) return;
+    if (!menuOpen) {
+      if (wasMenuOpen.current) menuButtonRef.current?.focus();
+      wasMenuOpen.current = false;
+      return;
+    }
+    wasMenuOpen.current = true;
+    const root = document.documentElement;
+    root.classList.add("nav-open");
+    const focusable = () =>
+      Array.from(
+        menuRef.current?.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), select:not([disabled]), a[href], input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ) ?? [],
+      );
+    focusable()[0]?.focus();
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setMenuOpen(false);
+      if (e.key === "Escape") {
+        setMenuOpen(false);
+        return;
+      }
+      if (e.key !== "Tab") return;
+      // The menu button stays above the drawer as its close control, so it is
+      // part of the cycle.
+      const items = [menuButtonRef.current, ...focusable()].filter(
+        (el): el is HTMLElement => el !== null,
+      );
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last?.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first?.focus();
+      }
     };
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    return () => {
+      root.classList.remove("nav-open");
+      window.removeEventListener("keydown", onKeyDown);
+    };
   }, [menuOpen]);
 
   // Check for verify query param on load
@@ -93,6 +139,13 @@ export default function App() {
       setTab(Tab.Credentials);
     }
   }, []);
+
+  // #948: link preview metadata for shared `?verify=<id>` links.
+  const verifyMeta = useMemo(
+    () => (verifyId ? { title: SHARE_TITLE, description: SHARE_DESCRIPTION, url: buildVerificationUrl(verifyId) } : null),
+    [verifyId]
+  );
+  useOpenGraphMeta(verifyMeta);
 
   const onMainnet = isMainnet(activeNetwork);
 
@@ -262,10 +315,13 @@ export default function App() {
         {t("a11y.skipToContent")}
       </a>
       <div className="container">
-      <header style={{ position: "relative" }}>
-        <h1>{t("app.title")}</h1>
-        <p>{t("app.subtitle")}</p>
+      <header className="app-header">
+        <div className="app-header__brand">
+          <h1>{t("app.title")}</h1>
+          <p>{t("app.subtitle")}</p>
+        </div>
         <button
+          ref={menuButtonRef}
           type="button"
           className="hamburger-btn"
           aria-label={menuOpen ? "Close menu" : "Open menu"}
@@ -275,47 +331,20 @@ export default function App() {
         >
           <span className={`hamburger-icon${menuOpen ? " open" : ""}`} />
         </button>
+        {/* Layout lives in styles/navigation.css: a drawer on phones, inline
+            from 768px up. Inline styles here would override it. */}
         <div
           id="mobile-header-actions"
+          ref={menuRef}
           className={`header-actions${menuOpen ? " open" : ""}`}
-          style={{
-            position: "absolute",
-            top: "1rem",
-            right: 0,
-            display: "flex",
-            gap: "0.5rem",
-            alignItems: "center",
-          }}
         >
           {isConnected !== null && (
             <div
               role="status"
               aria-live="polite"
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "0.5rem",
-                padding: "0.4rem 0.8rem",
-                borderRadius: "0.25rem",
-                backgroundColor: isConnected
-                  ? "var(--success-bg, #d4edda)"
-                  : "var(--danger-bg, #f8d7da)",
-                color: isConnected
-                  ? "var(--success-text, #155724)"
-                  : "var(--danger-text, #721c24)",
-                fontSize: "0.85rem",
-              }}
+              className={`network-status${isConnected ? " is-online" : ""}`}
             >
-              <span
-                aria-hidden="true"
-                style={{
-                  display: "inline-block",
-                  width: "8px",
-                  height: "8px",
-                  borderRadius: "50%",
-                  backgroundColor: isConnected ? "#28a745" : "#dc3545",
-                }}
-              />
+              <span aria-hidden="true" className="network-status__dot" />
               {isConnected ? t("app.networkOnline") : t("app.networkOffline")}
             </div>
           )}
@@ -323,7 +352,6 @@ export default function App() {
             value={i18n.language}
             onChange={handleLocaleChange}
             aria-label={t("a11y.switchLanguage")}
-            style={{ padding: "0.3rem 0.5rem", borderRadius: "0.25rem", fontSize: "0.85rem" }}
           >
             {SUPPORTED_LOCALES.map(({ code, label }) => (
               <option key={code} value={code}>{label}</option>

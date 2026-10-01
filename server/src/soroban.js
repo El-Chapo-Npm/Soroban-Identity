@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { RpcCache } from './rpc-cache.js';
 import { CircuitBreaker, SorobanUnavailableError } from './circuit-breaker.js';
 import { logger } from './logger.js';
+import { correlationEnv, correlationHeaders, traceSpan } from './middleware/tracing.js';
 import { QueryResultCache } from './query-cache.js';
 
 export class SorobanError extends Error {
@@ -90,7 +91,11 @@ export class SorobanClient {
       while (true) {
         const started = performance.now();
         try {
-          const output = await runCommand(this.config.stellarCli, commandArgs, this.config.sorobanInvokeTimeoutMs);
+          const output = await traceSpan(
+            `soroban.invoke ${method}`,
+            () => runCommand(this.config.stellarCli, commandArgs, this.config.sorobanInvokeTimeoutMs),
+            { contractId, method },
+          );
           this.metrics?.observeRpcLatency((performance.now() - started) / 1000);
           return output.trim();
         } catch (error) {
@@ -256,7 +261,7 @@ export class SorobanClient {
         };
         const response = await fetch(this.config.rpcUrl, {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          headers: { 'content-type': 'application/json', ...correlationHeaders() },
           body: JSON.stringify(body),
         });
         if (!response.ok) throw new Error(`RPC getEvents failed with HTTP ${response.status}`);
@@ -290,7 +295,10 @@ function runCommand(command, args, timeoutMs) {
   let child;
   
   const commandPromise = new Promise((resolve, reject) => {
-    child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    child = spawn(command, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, ...correlationEnv() },
+    });
     const stdoutChunks = [];
     const stderrChunks = [];
     child.stdout.on('data', (chunk) => stdoutChunks.push(chunk));

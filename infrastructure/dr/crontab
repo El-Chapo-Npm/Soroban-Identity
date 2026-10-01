@@ -1,0 +1,15 @@
+# Disaster recovery schedules (INFRA-05 / issue #945)
+# Install on the ops host with: crontab infrastructure/dr/crontab
+# Env (DR_BACKUP_BUCKET_*, DATA_DIR, REDIS_URL, ALERT_WEBHOOK, ...) is read
+# from /etc/soroban-identity/dr.env.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+DR=/opt/soroban-identity/infrastructure/dr/scripts
+
+# m   h  dom mon      dow  command
+# Hourly backup shipped to S3 (replicated cross-region) — meets the 1h RPO.
+  15  *   *   *        *   set -a; . /etc/soroban-identity/dr.env; $DR/backup-and-ship.sh >> /var/log/dr-backup.log 2>&1
+# Backup freshness check — alerts if the replicated copy exceeds the RPO.
+  45  *   *   *        *   set -a; . /etc/soroban-identity/dr.env; $DR/verify-recovery.sh --check-backup-age >> /var/log/dr-backup.log 2>&1 || curl -fsS -m 10 -X POST "$ALERT_WEBHOOK" -H 'Content-Type: application/json' -d '{"text":"[dr] replicated backup older than RPO"}'
+# Quarterly automated restore drill: 06:00 UTC on Jan/Apr/Jul/Oct 1st.
+  0   6   1   1,4,7,10 *   set -a; . /etc/soroban-identity/dr.env; $DR/dr-drill.sh >> /var/log/dr-drill.log 2>&1

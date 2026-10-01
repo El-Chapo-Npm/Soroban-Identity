@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { logger } from '../logger.js';
 import { requestContextStore } from '../request-context.js';
 
@@ -84,6 +86,7 @@ export class TraceExporter {
     this.batch = [];
     this.maxBatchSize = options.maxBatchSize || 50;
     this.flushIntervalMs = options.flushIntervalMs || 2000;
+    this.traceStorePath = options.traceStorePath || process.env.TRACE_STORE_PATH || null;
     this._timer = null;
 
     if (this.exporterType !== 'console') {
@@ -105,6 +108,18 @@ export class TraceExporter {
     if (this.batch.length === 0) return;
     const spansToExport = [...this.batch];
     this.batch = [];
+
+    if (this.traceStorePath) {
+      try {
+        await fs.mkdir(path.dirname(this.traceStorePath), { recursive: true });
+        await fs.appendFile(
+          this.traceStorePath,
+          `${spansToExport.map((span) => JSON.stringify(span)).join('\n')}\n`,
+        );
+      } catch {
+        // Trace persistence is best effort and must never affect requests.
+      }
+    }
 
     if (this.exporterType === 'console') {
       for (const s of spansToExport) {

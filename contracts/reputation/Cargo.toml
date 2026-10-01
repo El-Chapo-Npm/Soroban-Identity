@@ -6,12 +6,13 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+testutils = ["soroban-sdk/testutils"]
+
 [dependencies]
 soroban-sdk = { version = "21.0.0", features = ["alloc"] }
 shared-errors = { path = "../shared-errors" }
-
-[features]
-testutils = ["soroban-sdk/testutils"]
+shared-events = { path = "../shared-events" }
 
 [dev-dependencies]
 soroban-sdk = { version = "21.0.0", features = ["testutils"] }

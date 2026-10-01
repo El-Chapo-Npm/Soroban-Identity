@@ -46,6 +46,12 @@ jobs:
             contract: credential-manager
           - target: fuzz_submit_score
             contract: reputation
+          - target: fuzz_verify_credentials_batch
+            contract: credential-manager
+          - target: fuzz_revoke_and_delegate
+            contract: credential-manager
+          - target: fuzz_resolve_external_did
+            contract: did-bridge
 
     steps:
       - name: Checkout code

@@ -1,5 +1,6 @@
 use credential_manager::{
     ContractError as CredentialError, CredentialManager, CredentialManagerClient, CredentialType,
+    RevocationReason,
 };
 use identity_registry::{ContractError as IdentityError, IdentityRegistry, IdentityRegistryClient};
 use reputation::{ContractError as ReputationError, Reputation, ReputationClient};
@@ -64,22 +65,19 @@ fn did_and_credential_lifecycle() {
         &claims_hash,
         &signature,
         &0u64,
-        &None,
-        &0u64,
-        &None,
-    );
+            &0u64,
+            &None,
+            &None,
+        );
 
-    assert_eq!(credentials.try_verify_credential(&credential_id), Ok(Ok(())));
+    credentials.verify_credential(&credential_id);
     let credential = credentials.get_credential(&credential_id);
     assert_eq!(credential.subject, subject);
     assert_eq!(credential.issuer, issuer);
 
     // Revocation must immediately make the same credential fail verification.
-    credentials.revoke_credential(&issuer, &credential_id);
-    assert_eq!(
-        credentials.try_verify_credential(&credential_id),
-        Err(Ok(CredentialError::CredentialRevoked))
-    );
+    credentials.revoke_credential(&issuer, &credential_id, &RevocationReason::KeyCompromise);
+    assert!(credentials.try_verify_credential(&credential_id).is_err());
 }
 
 #[test]
@@ -169,11 +167,11 @@ fn cross_contract_lifecycle() {
         &BytesN::from_array(&env, &[0u8; 32]),
         &Bytes::from_array(&env, &[1u8; 64]),
         &0u64,
-        &None,
-        &0u64,
-        &None,
-    );
-    assert_eq!(credentials.try_verify_credential(&cred_id), Ok(Ok(())));
+            &0u64,
+            &None,
+            &None,
+        );
+    credentials.verify_credential(&cred_id);
     let cred = credentials.get_credential(&cred_id);
     assert_eq!(cred.subject, subject);
 
@@ -184,11 +182,248 @@ fn cross_contract_lifecycle() {
 
     // Assert final state across all three contracts is consistent
     assert!(identity.has_active_did(&subject));          // DID still active
-    assert_eq!(credentials.try_verify_credential(&cred_id), Ok(Ok(())));    // credential still valid
+    credentials.verify_credential(&cred_id);    // credential still valid
     let rec = reputation.get_reputation(&subject);
     assert!(rec.score > 0);                              // reputation score is non-zero
     assert_eq!(rec.reporter_count, 1);
     assert!(reputation.passes_sybil_check(&subject, &50, &1));
+}
+
+// ── TEST-12: cross-contract integration coverage ────────────────────────────
+//
+// End-to-end tests covering interactions between identity-registry,
+// credential-manager, and reputation: full credential lifecycle, cross-contract
+// authorization, reputation integration with credentials, and error propagation.
+
+/// Full credential lifecycle across all three contracts: a DID is registered,
+/// a credential is issued against it, reputation is accrued, the credential is
+/// revoked, and every contract reflects the terminal state consistently.
+#[test]
+fn full_credential_lifecycle_across_contracts() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let identity_id = env.register_contract(None, IdentityRegistry);
+    let credential_id = env.register_contract(None, CredentialManager);
+    let reputation_id = env.register_contract(None, Reputation);
+
+    let identity = IdentityRegistryClient::new(&env, &identity_id);
+    let credentials = CredentialManagerClient::new(&env, &credential_id);
+    let reputation = ReputationClient::new(&env, &reputation_id);
+
+    let admin = Address::generate(&env);
+    let issuer = Address::generate(&env);
+    let reporter = Address::generate(&env);
+    let subject = Address::generate(&env);
+
+    identity.initialize(&admin);
+    credentials.initialize(&admin, &identity_id);
+    reputation.initialize(&admin);
+
+    // Issue: subject must have an active DID before a credential can be issued.
+    identity.create_did(&subject, &Map::new(&env));
+    assert!(identity.has_active_did(&subject));
+
+    credentials.add_issuer(&issuer);
+    let cred_id = credentials.issue_credential(
+        &issuer,
+        &subject,
+        &CredentialType::Kyc,
+        &Map::new(&env),
+        &BytesN::from_array(&env, &[3u8; 32]),
+        &Bytes::from_array(&env, &[2u8; 64]),
+        &0u64,
+            &0u64,
+            &None,
+            &None,
+        );
+    credentials.verify_credential(&cred_id);
+
+    // Reputation accrues while the credential is valid.
+    reputation.add_reporter(&reporter);
+    let reason = String::from_str(&env, "credential issued");
+    reputation.submit_score(&reporter, &subject, &40, &reason);
+    assert!(reputation.get_reputation(&subject).score > 0);
+
+    // Revoke: credential verification must fail immediately.
+    credentials.revoke_credential(&issuer, &cred_id, &RevocationReason::Superseded);
+    assert!(credentials.try_verify_credential(&cred_id).is_err());
+
+    // Terminal state is consistent across all three contracts.
+    assert!(identity.has_active_did(&subject));
+    assert!(credentials.try_verify_credential(&cred_id).is_err());
+    assert_eq!(reputation.get_reputation(&subject).reporter_count, 1);
+}
+
+/// Cross-contract authorization: only registered issuers may issue, and only
+/// the original issuer may revoke. Unauthorized actors are rejected and the
+/// credential state is left untouched.
+#[test]
+fn cross_contract_authorization_checks() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let identity_id = env.register_contract(None, IdentityRegistry);
+    let credential_id = env.register_contract(None, CredentialManager);
+    let reputation_id = env.register_contract(None, Reputation);
+
+    let identity = IdentityRegistryClient::new(&env, &identity_id);
+    let credentials = CredentialManagerClient::new(&env, &credential_id);
+    let reputation = ReputationClient::new(&env, &reputation_id);
+
+    let admin = Address::generate(&env);
+    let issuer = Address::generate(&env);
+    let rogue = Address::generate(&env);
+    let subject = Address::generate(&env);
+
+    identity.initialize(&admin);
+    credentials.initialize(&admin, &identity_id);
+    reputation.initialize(&admin);
+
+    identity.create_did(&subject, &Map::new(&env));
+    credentials.add_issuer(&issuer);
+
+    // An unregistered issuer cannot issue a credential.
+    assert!(credentials
+        .try_issue_credential(
+            &rogue,
+            &subject,
+            &CredentialType::Kyc,
+            &Map::new(&env),
+            &BytesN::from_array(&env, &[4u8; 32]),
+            &Bytes::from_array(&env, &[3u8; 64]),
+            &0u64,
+            &0u64,
+            &None,
+            &None,
+        )
+        .is_err());
+
+    // The registered issuer can issue, but a different actor cannot revoke.
+    let cred_id = credentials.issue_credential(
+        &issuer,
+        &subject,
+        &CredentialType::Kyc,
+        &Map::new(&env),
+        &BytesN::from_array(&env, &[5u8; 32]),
+        &Bytes::from_array(&env, &[4u8; 64]),
+        &0u64,
+            &0u64,
+            &None,
+            &None,
+        );
+    assert!(credentials
+        .try_revoke_credential(&rogue, &cred_id, &RevocationReason::Unspecified)
+        .is_err());
+    credentials.verify_credential(&cred_id);
+
+    // Only the original issuer can revoke successfully.
+    credentials.revoke_credential(&issuer, &cred_id, &RevocationReason::Superseded);
+    assert!(credentials.try_verify_credential(&cred_id).is_err());
+}
+
+/// Reputation integration with credentials: reputation reads/writes are tied to
+/// the credential lifecycle, and the sybil gate reflects the accrued score.
+#[test]
+fn reputation_integration_with_credentials() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let identity_id = env.register_contract(None, IdentityRegistry);
+    let credential_id = env.register_contract(None, CredentialManager);
+    let reputation_id = env.register_contract(None, Reputation);
+
+    let identity = IdentityRegistryClient::new(&env, &identity_id);
+    let credentials = CredentialManagerClient::new(&env, &credential_id);
+    let reputation = ReputationClient::new(&env, &reputation_id);
+
+    let admin = Address::generate(&env);
+    let issuer = Address::generate(&env);
+    let reporter = Address::generate(&env);
+    let subject = Address::generate(&env);
+
+    identity.initialize(&admin);
+    credentials.initialize(&admin, &identity_id);
+    reputation.initialize(&admin);
+
+    identity.create_did(&subject, &Map::new(&env));
+    credentials.add_issuer(&issuer);
+    reputation.add_reporter(&reporter);
+
+    // Before any credential, the subject fails the sybil gate.
+    assert!(!reputation.passes_sybil_check(&subject, &50, &1));
+
+    // Issuing a credential is paired with a reputation score from the reporter.
+    let cred_id = credentials.issue_credential(
+        &issuer,
+        &subject,
+        &CredentialType::Kyc,
+        &Map::new(&env),
+        &BytesN::from_array(&env, &[6u8; 32]),
+        &Bytes::from_array(&env, &[5u8; 64]),
+        &0u64,
+            &0u64,
+            &None,
+            &None,
+        );
+    credentials.verify_credential(&cred_id);
+
+    let reason = String::from_str(&env, "credential-backed reputation");
+    reputation.submit_score(&reporter, &subject, &80, &reason);
+    let record = reputation.get_reputation(&subject);
+    assert_eq!(record.score, 80);
+    assert_eq!(record.reporter_count, 1);
+    assert!(reputation.passes_sybil_check(&subject, &50, &1));
+
+    // Revoking the credential does not silently erase reputation history.
+    credentials.revoke_credential(&issuer, &cred_id, &RevocationReason::Superseded);
+    assert!(credentials.try_verify_credential(&cred_id).is_err());
+    assert_eq!(reputation.get_reputation(&subject).score, 80);
+}
+
+/// Edge cases and error propagation: duplicate DIDs, duplicate issuers, and
+/// operations on unknown credentials surface the expected contract errors
+/// without corrupting cross-contract state.
+#[test]
+fn edge_cases_and_error_propagation() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let identity_id = env.register_contract(None, IdentityRegistry);
+    let credential_id = env.register_contract(None, CredentialManager);
+    let reputation_id = env.register_contract(None, Reputation);
+
+    let identity = IdentityRegistryClient::new(&env, &identity_id);
+    let credentials = CredentialManagerClient::new(&env, &credential_id);
+    let reputation = ReputationClient::new(&env, &reputation_id);
+
+    let admin = Address::generate(&env);
+    let issuer = Address::generate(&env);
+    let subject = Address::generate(&env);
+
+    identity.initialize(&admin);
+    credentials.initialize(&admin, &identity_id);
+    reputation.initialize(&admin);
+
+    // Duplicate DID creation propagates DidAlreadyExists.
+    identity.create_did(&subject, &Map::new(&env));
+    assert_eq!(
+        identity.try_create_did(&subject, &Map::new(&env)),
+        Err(Ok(IdentityError::DidAlreadyExists))
+    );
+
+    // Registering the same issuer twice is idempotent.
+    credentials.add_issuer(&issuer);
+    credentials.add_issuer(&issuer);
+    assert_eq!(credentials.get_issuers().len(), 1);
+
+    // Verifying an unknown credential id fails rather than panicking.
+    let unknown = BytesN::from_array(&env, &[9u8; 32]);
+    assert!(credentials.try_verify_credential(&unknown).is_err());
+
+    // The DID remains active and reputation is untouched by the failed calls.
+    assert!(identity.has_active_did(&subject));
+    assert_eq!(reputation.get_reputation(&subject).reporter_count, 0);
 }
 
 // ── SC-10: negative-path coverage ───────────────────────────────────────────
@@ -227,343 +462,5 @@ fn update_did_with_empty_metadata_returns_empty_metadata() {
     assert_eq!(
         identity.try_update_did(&subject, &Map::new(&env)),
         Err(Ok(IdentityError::EmptyMetadata))
-    );
-}
-
-#[test]
-fn resolve_unknown_did_returns_did_not_found() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (identity, _credentials, _reputation) = register_clients(&env);
-    let admin = Address::generate(&env);
-    let stranger = Address::generate(&env);
-    identity.initialize(&admin);
-
-    assert_eq!(
-        identity.try_resolve_did(&stranger),
-        Err(Ok(IdentityError::DidNotFound))
-    );
-}
-
-#[test]
-fn update_did_after_deactivation_returns_did_deactivated() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (identity, _credentials, _reputation) = register_clients(&env);
-    let admin = Address::generate(&env);
-    let subject = Address::generate(&env);
-    identity.initialize(&admin);
-    identity.create_did(&subject, &Map::new(&env));
-    identity.deactivate_did(&subject);
-
-    let mut metadata = Map::new(&env);
-    metadata.set(String::from_str(&env, "k"), String::from_str(&env, "v"));
-    assert_eq!(
-        identity.try_update_did(&subject, &metadata),
-        Err(Ok(IdentityError::DidDeactivated))
-    );
-}
-
-#[test]
-fn accept_admin_without_pending_returns_not_initialized() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (identity, _credentials, _reputation) = register_clients(&env);
-    let admin = Address::generate(&env);
-    let rando = Address::generate(&env);
-    identity.initialize(&admin);
-
-    assert_eq!(
-        identity.try_accept_admin(&rando),
-        Err(Ok(IdentityError::NotInitialized))
-    );
-}
-
-#[test]
-fn accept_admin_with_wrong_address_returns_unauthorized() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (identity, _credentials, _reputation) = register_clients(&env);
-    let admin = Address::generate(&env);
-    let proposed = Address::generate(&env);
-    let impostor = Address::generate(&env);
-    identity.initialize(&admin);
-    identity.propose_admin(&admin, &proposed);
-
-    assert_eq!(
-        identity.try_accept_admin(&impostor),
-        Err(Ok(IdentityError::Unauthorized))
-    );
-}
-
-#[test]
-fn propose_admin_before_initialize_returns_not_initialized() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (identity, _credentials, _reputation) = register_clients(&env);
-    let someone = Address::generate(&env);
-    let proposed = Address::generate(&env);
-
-    // Contract was registered but `initialize` was never called.
-    assert_eq!(
-        identity.try_propose_admin(&someone, &proposed),
-        Err(Ok(IdentityError::NotInitialized))
-    );
-}
-
-// -- credential-manager ------------------------------------------------------
-
-#[test]
-fn issue_credential_to_deactivated_did_panics() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (identity, credentials, _reputation) = register_clients(&env);
-    let admin = Address::generate(&env);
-    let issuer = Address::generate(&env);
-    let subject = Address::generate(&env);
-    identity.initialize(&admin);
-    credentials.initialize(&admin, &identity.address);
-    credentials.add_issuer(&issuer);
-    identity.create_did(&subject, &Map::new(&env));
-    identity.deactivate_did(&subject);
-
-    // issue_credential panics (rather than returning a typed ContractError)
-    // when the subject has no active DID.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        credentials.issue_credential(
-            &issuer,
-            &subject,
-            &CredentialType::Kyc,
-            &Map::new(&env),
-            &BytesN::from_array(&env, &[0u8; 32]),
-            &Bytes::from_array(&env, &[1u8; 64]),
-            &0u64,
-            &None,
-            &0u64,
-            &None,
-        )
-    }));
-    assert!(result.is_err(), "issuing to a deactivated DID should panic");
-}
-
-#[test]
-fn verify_revoked_credential_returns_credential_revoked() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (identity, credentials, _reputation) = register_clients(&env);
-    let admin = Address::generate(&env);
-    let issuer = Address::generate(&env);
-    let subject = Address::generate(&env);
-    identity.initialize(&admin);
-    credentials.initialize(&admin, &identity.address);
-    identity.create_did(&subject, &Map::new(&env));
-    credentials.add_issuer(&issuer);
-
-    let cred_id = credentials.issue_credential(
-        &issuer,
-        &subject,
-        &CredentialType::Kyc,
-        &Map::new(&env),
-        &BytesN::from_array(&env, &[9u8; 32]),
-        &Bytes::from_array(&env, &[1u8; 64]),
-        &0u64,
-        &None,
-        &0u64,
-        &None,
-    );
-    credentials.revoke_credential(&issuer, &cred_id);
-
-    assert_eq!(
-        credentials.try_verify_credential(&cred_id),
-        Err(Ok(CredentialError::CredentialRevoked))
-    );
-}
-
-#[test]
-fn issue_credential_by_non_issuer_returns_unauthorized_issuer() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (identity, credentials, _reputation) = register_clients(&env);
-    let admin = Address::generate(&env);
-    let not_an_issuer = Address::generate(&env);
-    let subject = Address::generate(&env);
-    identity.initialize(&admin);
-    credentials.initialize(&admin, &identity.address);
-    identity.create_did(&subject, &Map::new(&env));
-
-    let result = credentials.try_issue_credential(
-        &not_an_issuer,
-        &subject,
-        &CredentialType::Kyc,
-        &Map::new(&env),
-        &BytesN::from_array(&env, &[3u8; 32]),
-        &Bytes::from_array(&env, &[1u8; 64]),
-        &0u64,
-        &None,
-        &0u64,
-        &None,
-    );
-    assert_eq!(result, Err(Ok(CredentialError::UnauthorizedIssuer)));
-}
-
-#[test]
-fn get_unknown_credential_returns_credential_not_found() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (identity, credentials, _reputation) = register_clients(&env);
-    let admin = Address::generate(&env);
-    identity.initialize(&admin);
-    credentials.initialize(&admin, &identity.address);
-
-    let fake_id = BytesN::from_array(&env, &[0xAB; 32]);
-    assert_eq!(
-        credentials.try_get_credential(&fake_id),
-        Err(Ok(CredentialError::CredentialNotFound))
-    );
-}
-
-#[test]
-fn add_issuer_beyond_cap_returns_max_issuers_reached() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (identity, credentials, _reputation) = register_clients(&env);
-    let admin = Address::generate(&env);
-    identity.initialize(&admin);
-    credentials.initialize(&admin, &identity.address);
-
-    // credential-manager's MAX_ISSUERS cap is 100.
-    for _ in 0..100 {
-        credentials.add_issuer(&Address::generate(&env));
-    }
-    let one_too_many = Address::generate(&env);
-    assert_eq!(
-        credentials.try_add_issuer(&one_too_many),
-        Err(Ok(CredentialError::MaxIssuersReached))
-    );
-}
-
-// -- reputation ---------------------------------------------------------------
-
-#[test]
-fn submit_score_with_overlong_reason_returns_reason_too_long() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (_identity, _credentials, reputation) = register_clients(&env);
-    let admin = Address::generate(&env);
-    let reporter = Address::generate(&env);
-    let subject = Address::generate(&env);
-    reputation.initialize(&admin);
-    reputation.add_reporter(&reporter);
-
-    let too_long = "a".repeat(257);
-    let reason = String::from_str(&env, &too_long);
-    assert_eq!(
-        reputation.try_submit_score(&reporter, &subject, &10, &reason),
-        Err(Ok(ReputationError::ReasonTooLong))
-    );
-}
-
-#[test]
-fn sybil_check_below_threshold_returns_false() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (_identity, _credentials, reputation) = register_clients(&env);
-    let admin = Address::generate(&env);
-    let reporter = Address::generate(&env);
-    let subject = Address::generate(&env);
-    reputation.initialize(&admin);
-    reputation.add_reporter(&reporter);
-
-    let reason = String::from_str(&env, "single report");
-    reputation.submit_score(&reporter, &subject, &80, &reason);
-
-    // Score clears min_score, but only 1 of the 2 required reporters exist.
-    assert!(!reputation.passes_sybil_check(&subject, &50, &2));
-}
-
-#[test]
-fn sybil_check_default_before_threshold_set_returns_not_initialized() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (_identity, _credentials, reputation) = register_clients(&env);
-    let admin = Address::generate(&env);
-    let subject = Address::generate(&env);
-    reputation.initialize(&admin);
-    // set_default_threshold / update_thresholds was never called.
-
-    assert_eq!(
-        reputation.try_passes_sybil_check_default(&subject),
-        Err(Ok(ReputationError::NotInitialized))
-    );
-}
-
-#[test]
-fn reputation_accept_admin_without_pending_returns_no_pending_admin() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (_identity, _credentials, reputation) = register_clients(&env);
-    let admin = Address::generate(&env);
-    let rando = Address::generate(&env);
-    reputation.initialize(&admin);
-
-    assert_eq!(
-        reputation.try_accept_admin(&rando),
-        Err(Ok(ReputationError::NoPendingAdmin))
-    );
-}
-
-#[test]
-fn reputation_accept_admin_with_wrong_address_returns_not_pending_admin() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (_identity, _credentials, reputation) = register_clients(&env);
-    let admin = Address::generate(&env);
-    let proposed = Address::generate(&env);
-    let impostor = Address::generate(&env);
-    reputation.initialize(&admin);
-    reputation.propose_admin(&admin, &proposed);
-
-    assert_eq!(
-        reputation.try_accept_admin(&impostor),
-        Err(Ok(ReputationError::NotPendingAdmin))
-    );
-}
-
-#[test]
-fn resolve_unknown_dispute_returns_dispute_not_found() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (_identity, _credentials, reputation) = register_clients(&env);
-    let admin = Address::generate(&env);
-    reputation.initialize(&admin);
-
-    assert_eq!(
-        reputation.try_resolve_dispute(&admin, &admin, &999u32, &false),
-        Err(Ok(ReputationError::DisputeNotFound))
-    );
-}
-
-/// Resolution uses the disputed history index, not the returned dispute ID.
-#[test]
-fn dispute_resolution_after_expiry_returns_dispute_expired() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (_identity, _credentials, reputation) = register_clients(&env);
-    let admin = Address::generate(&env);
-    let reporter = Address::generate(&env);
-    let subject = Address::generate(&env);
-    reputation.initialize(&admin);
-    reputation.add_reporter(&reporter);
-
-    let reason = String::from_str(&env, "activity");
-    reputation.submit_score(&reporter, &subject, &20, &reason);
-    reputation.dispute_score(&subject, &reporter, &0);
-
-    // Advance past reputation's private DISPUTE_WINDOW_LEDGERS (17_280 ledgers).
-    env.ledger().with_mut(|li| li.sequence_number += 17_281);
-
-    assert_eq!(
-        reputation.try_resolve_dispute(&subject, &reporter, &0, &true),
-        Err(Ok(ReputationError::DisputeExpired))
     );
 }

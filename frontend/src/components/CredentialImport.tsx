@@ -13,6 +13,24 @@ interface CredentialImportProps {
   onClose?: () => void;
 }
 
+const CREDENTIAL_FIELDS = [
+  "credentialType",
+  "issuer",
+  "subject",
+  "issuedAt",
+] as const;
+
+type CredentialField = (typeof CREDENTIAL_FIELDS)[number];
+
+type FieldMapping = Record<CredentialField, string>;
+
+const DEFAULT_FIELD_MAPPING: FieldMapping = {
+  credentialType: "credentialType",
+  issuer: "issuer",
+  subject: "subject",
+  issuedAt: "issuedAt",
+};
+
 /**
  * Validate if the credential structure is correct
  */
@@ -20,14 +38,41 @@ function validateCredentialStructure(credential: unknown): credential is Credent
   if (!credential || typeof credential !== "object") return false;
 
   const cred = credential as Record<string, unknown>;
-  const requiredFields = ["credentialType", "issuer", "subject", "issuedAt"];
-  return requiredFields.every((field) => field in cred);
+  return CREDENTIAL_FIELDS.every((field) => field in cred);
+}
+
+/**
+ * Parse a CSV line respecting quoted values
+ */
+function parseCSVLine(line: string): string[] {
+  const values: string[] = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    if (char === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        current += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (char === "," && !inQuotes) {
+      values.push(current.trim());
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  values.push(current.trim());
+  return values;
 }
 
 /**
  * Parse JSON file content
  */
-async function parseJSONFile(file: File): Promise<Credential[]> {
+async function parseJSONFile(file: File): Promise<Record<string, unknown>[]> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -38,11 +83,11 @@ async function parseJSONFile(file: File): Promise<Credential[]> {
         // Handle both single credential and array of credentials
         const credentials = Array.isArray(data) ? data : data.credentials || [data];
 
-        const validCredentials = credentials.filter(validateCredentialStructure);
-        if (validCredentials.length === 0) {
-          reject(new Error("No valid credentials found in file"));
+        if (!Array.isArray(credentials) || credentials.length === 0) {
+          reject(new Error("No credentials found in file"));
+          return;
         }
-        resolve(validCredentials);
+        resolve(credentials as Record<string, unknown>[]);
       } catch (error) {
         reject(new Error(`Failed to parse JSON: ${error instanceof Error ? error.message : "Unknown error"}`));
       }
@@ -53,36 +98,37 @@ async function parseJSONFile(file: File): Promise<Credential[]> {
 }
 
 /**
- * Parse CSV file content
+ * Parse CSV file content into raw rows
  */
-async function parseCSVFile(file: File): Promise<Credential[]> {
+async function parseCSVFile(file: File): Promise<Record<string, unknown>[]> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
         const content = e.target?.result as string;
-        const lines = content.split("\n");
-        const headers = lines[0].split(",").map((h) => h.trim().replace(/"/g, ""));
+        const lines = content.split(/\r?\n/).filter((line) => line.trim());
+        if (lines.length < 2) {
+          reject(new Error("CSV file must contain a header and at least one row"));
+          return;
+        }
 
-        const credentials: Credential[] = [];
+        const headers = parseCSVLine(lines[0]);
+        const rows: Record<string, unknown>[] = [];
+
         for (let i = 1; i < lines.length; i++) {
-          if (!lines[i].trim()) continue;
-
-          const values = lines[i].split(",").map((v) => v.trim().replace(/"/g, ""));
+          const values = parseCSVLine(lines[i]);
           const row: Record<string, unknown> = {};
           headers.forEach((header, idx) => {
-            row[header] = values[idx];
+            row[header] = values[idx] ?? "";
           });
-
-          if (validateCredentialStructure(row)) {
-            credentials.push(row as Credential);
-          }
+          rows.push(row);
         }
 
-        if (credentials.length === 0) {
-          reject(new Error("No valid credentials found in CSV"));
+        if (rows.length === 0) {
+          reject(new Error("No rows found in CSV"));
+          return;
         }
-        resolve(credentials);
+        resolve(rows);
       } catch (error) {
         reject(new Error(`Failed to parse CSV: ${error instanceof Error ? error.message : "Unknown error"}`));
       }
@@ -90,6 +136,35 @@ async function parseCSVFile(file: File): Promise<Credential[]> {
     reader.onerror = () => reject(new Error("Failed to read file"));
     reader.readAsText(file);
   });
+}
+
+/**
+ * Apply field mapping to raw rows and validate the resulting credentials
+ */
+function applyFieldMapping(
+  rows: Record<string, unknown>[],
+  mapping: FieldMapping
+): { credentials: Credential[]; invalidCount: number } {
+  const credentials: Credential[] = [];
+  let invalidCount = 0;
+
+  for (const row of rows) {
+    const mapped: Record<string, unknown> = { ...row };
+    for (const field of CREDENTIAL_FIELDS) {
+      const sourceKey = mapping[field];
+      if (sourceKey && sourceKey in row) {
+        mapped[field] = row[sourceKey];
+      }
+    }
+
+    if (validateCredentialStructure(mapped)) {
+      credentials.push(mapped as Credential);
+    } else {
+      invalidCount++;
+    }
+  }
+
+  return { credentials, invalidCount };
 }
 
 /**
@@ -120,6 +195,37 @@ function detectDuplicates(
   return { unique, duplicates };
 }
 
+/**
+ * Trigger a client-side download of a template file
+ */
+function downloadTemplate(filename: string, content: string, mime: string) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+const JSON_TEMPLATE = JSON.stringify(
+  [
+    {
+      credentialType: "example-type",
+      issuer: "did:example:issuer",
+      subject: "did:example:subject",
+      issuedAt: "2024-01-01T00:00:00.000Z",
+    },
+  ],
+  null,
+  2
+);
+
+const CSV_TEMPLATE =
+  "credentialType,issuer,subject,issuedAt\nexample-type,did:example:issuer,did:example:subject,2024-01-01T00:00:00.000Z\n";
+
 export default function CredentialImport({
   onImport,
   onClose,
@@ -127,7 +233,11 @@ export default function CredentialImport({
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [rawRows, setRawRows] = useState<Record<string, unknown>[]>([]);
+  const [sourceKeys, setSourceKeys] = useState<string[]>([]);
+  const [fieldMapping, setFieldMapping] = useState<FieldMapping>(DEFAULT_FIELD_MAPPING);
   const [previewCredentials, setPreviewCredentials] = useState<Credential[]>([]);
+  const [invalidCount, setInvalidCount] = useState(0);
   const [importResults, setImportResults] = useState<ImportResult | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -153,18 +263,19 @@ export default function CredentialImport({
       };
 
       const totalFiles = files.length;
+      const collectedRows: Record<string, unknown>[] = [];
 
       for (let i = 0; i < totalFiles; i++) {
         const file = files[i];
         const progress = Math.round(((i + 1) / totalFiles) * 100);
 
         try {
-          let credentials: Credential[] = [];
+          let rows: Record<string, unknown>[] = [];
 
           if (file.name.endsWith(".json")) {
-            credentials = await parseJSONFile(file);
+            rows = await parseJSONFile(file);
           } else if (file.name.endsWith(".csv")) {
-            credentials = await parseCSVFile(file);
+            rows = await parseCSVFile(file);
           } else {
             results.errors.push({
               file: file.name,
@@ -174,7 +285,7 @@ export default function CredentialImport({
             continue;
           }
 
-          results.success.push(...credentials);
+          collectedRows.push(...rows);
           setUploadProgress(progress);
         } catch (error) {
           results.errors.push({
@@ -185,7 +296,24 @@ export default function CredentialImport({
         }
       }
 
-      setPreviewCredentials(results.success);
+      // Derive available source keys for field mapping
+      const keys = Array.from(
+        collectedRows.reduce<Set<string>>((set, row) => {
+          Object.keys(row).forEach((key) => set.add(key));
+          return set;
+        }, new Set<string>())
+      );
+
+      const { credentials, invalidCount: invalid } = applyFieldMapping(
+        collectedRows,
+        DEFAULT_FIELD_MAPPING
+      );
+
+      setRawRows(collectedRows);
+      setSourceKeys(keys);
+      setFieldMapping(DEFAULT_FIELD_MAPPING);
+      setPreviewCredentials(credentials);
+      setInvalidCount(invalid);
       setImportResults(results);
       setIsProcessing(false);
     },
@@ -214,12 +342,44 @@ export default function CredentialImport({
     [processFiles]
   );
 
+  const handleMappingChange = useCallback(
+    (field: CredentialField, sourceKey: string) => {
+      setFieldMapping((prev) => {
+        const next = { ...prev, [field]: sourceKey };
+        const { credentials, invalidCount: invalid } = applyFieldMapping(rawRows, next);
+        setPreviewCredentials(credentials);
+        setInvalidCount(invalid);
+        return next;
+      });
+    },
+    [rawRows]
+  );
+
   const handleConfirmImport = useCallback(() => {
     if (importResults && onImport) {
-      onImport(previewCredentials, importResults);
+      const finalResults: ImportResult = {
+        ...importResults,
+        success: previewCredentials,
+      };
+      onImport(previewCredentials, finalResults);
       onClose?.();
     }
   }, [importResults, previewCredentials, onImport, onClose]);
+
+  const handleReset = useCallback(() => {
+    setRawRows([]);
+    setSourceKeys([]);
+    setFieldMapping(DEFAULT_FIELD_MAPPING);
+    setPreviewCredentials([]);
+    setInvalidCount(0);
+    setImportResults(null);
+    setUploadProgress(0);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  }, []);
+
+  const hasErrors = importResults ? importResults.errors.length > 0 : false;
 
   return (
     <div className="credential-import-modal">
@@ -263,100 +423,124 @@ export default function CredentialImport({
                 onClick={() => fileInputRef.current?.click()}
                 disabled={isProcessing}
               >
-                Select Files
+                Browse Files
               </button>
               <input
                 ref={fileInputRef}
                 type="file"
-                multiple
                 accept=".json,.csv"
+                multiple
                 onChange={handleFileSelect}
                 style={{ display: "none" }}
               />
               <p className="credential-import-hint">
-                Supports JSON and CSV formats
+                Supported formats: JSON, CSV
               </p>
+            </div>
+
+            <div className="credential-import-templates">
+              <span>Download a template:</span>
+              <button
+                className="btn-secondary"
+                onClick={() =>
+                  downloadTemplate("credentials-template.json", JSON_TEMPLATE, "application/json")
+                }
+              >
+                JSON Template
+              </button>
+              <button
+                className="btn-secondary"
+                onClick={() =>
+                  downloadTemplate("credentials-template.csv", CSV_TEMPLATE, "text/csv")
+                }
+              >
+                CSV Template
+              </button>
             </div>
 
             {isProcessing && (
               <div className="credential-import-progress">
-                <div className="progress-bar">
+                <div className="credential-import-progress-bar">
                   <div
-                    className="progress-fill"
+                    className="credential-import-progress-fill"
                     style={{ width: `${uploadProgress}%` }}
                   />
                 </div>
-                <p>{uploadProgress}% uploaded</p>
+                <span>{uploadProgress}%</span>
               </div>
             )}
           </div>
         ) : (
-          <div className="credential-import-preview">
-            <div className="credential-import-summary">
-              <p>
-                ✓ <strong>{importResults.success.length}</strong> credentials imported
-              </p>
-              {importResults.errors.length > 0 && (
-                <p>
-                  ✗ <strong>{importResults.errors.length}</strong> errors
-                </p>
-              )}
-              {importResults.duplicates.length > 0 && (
-                <p>
-                  ⚠ <strong>{importResults.duplicates.length}</strong> duplicates
+          <div className="credential-import-content">
+            {hasErrors && (
+              <div className="credential-import-errors">
+                <h4>Some files could not be imported</h4>
+                <ul>
+                  {importResults.errors.map((err, idx) => (
+                    <li key={idx}>
+                      <strong>{err.file}:</strong> {err.error}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {sourceKeys.length > 0 && (
+              <div className="credential-import-mapping">
+                <h4>Field Mapping</h4>
+                {CREDENTIAL_FIELDS.map((field) => (
+                  <div key={field} className="credential-import-mapping-row">
+                    <label htmlFor={`mapping-${field}`}>{field}</label>
+                    <select
+                      id={`mapping-${field}`}
+                      value={fieldMapping[field]}
+                      onChange={(e) => handleMappingChange(field, e.target.value)}
+                    >
+                      <option value="">— none —</option>
+                      {sourceKeys.map((key) => (
+                        <option key={key} value={key}>
+                          {key}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="credential-import-preview">
+              <h4>
+                Preview ({previewCredentials.length} valid
+                {invalidCount > 0 ? `, ${invalidCount} invalid` : ""})
+              </h4>
+              {previewCredentials.length > 0 ? (
+                <table className="credential-import-preview-table">
+                  <thead>
+                    <tr>
+                      {CREDENTIAL_FIELDS.map((field) => (
+                        <th key={field}>{field}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {previewCredentials.slice(0, 10).map((cred, idx) => (
+                      <tr key={idx}>
+                        {CREDENTIAL_FIELDS.map((field) => (
+                          <td key={field}>{String(cred[field] ?? "")}</td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <p className="credential-import-empty">
+                  No valid credentials to import. Adjust the field mapping above.
                 </p>
               )}
             </div>
 
-            {importResults.errors.length > 0 && (
-              <div className="credential-import-errors">
-                <h4>Errors:</h4>
-                {importResults.errors.map((err, idx) => (
-                  <div key={idx} className="error-item">
-                    <strong>{err.file}:</strong> {err.error}
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {previewCredentials.length > 0 && (
-              <div className="credential-import-list">
-                <h4>Preview ({previewCredentials.length} credentials):</h4>
-                {previewCredentials.slice(0, 5).map((cred, idx) => (
-                  <div key={idx} className="credential-preview-item">
-                    <div className="credential-preview-type">
-                      {cred.credentialType}
-                    </div>
-                    <div className="credential-preview-info">
-                      <p>
-                        <strong>Issuer:</strong> {cred.issuer}
-                      </p>
-                      <p>
-                        <strong>Subject:</strong> {cred.subject}
-                      </p>
-                    </div>
-                  </div>
-                ))}
-                {previewCredentials.length > 5 && (
-                  <p className="credential-preview-more">
-                    +{previewCredentials.length - 5} more...
-                  </p>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        <div className="credential-import-footer">
-          {importResults && (
-            <>
-              <button
-                className="btn-secondary"
-                onClick={() => {
-                  setImportResults(null);
-                  setPreviewCredentials([]);
-                }}
-              >
+            <div className="credential-import-actions">
+              <button className="btn-secondary" onClick={handleReset}>
                 Back
               </button>
               <button
@@ -364,16 +548,12 @@ export default function CredentialImport({
                 onClick={handleConfirmImport}
                 disabled={previewCredentials.length === 0}
               >
-                Import {previewCredentials.length} Credentials
+                Import {previewCredentials.length} Credential
+                {previewCredentials.length === 1 ? "" : "s"}
               </button>
-            </>
-          )}
-          {onClose && !importResults && (
-            <button className="btn-secondary" onClick={onClose}>
-              Cancel
-            </button>
-          )}
-        </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -1,20 +1,58 @@
-import { useState, useEffect, useReducer, useRef } from "react";
+import { useState } from "react";
+import type { CredentialType, RevocationReason } from "../../../sdk/src/types";
+import { REVOCATION_REASONS } from "../../../sdk/src/types";
+import { exportCredentials, type ExportFormat } from "../export";
+import type { WalletState } from "../hooks/useWallet";
+
+interface Props {
+  wallet: WalletState & {
+    connect: () => void;
+    signTransaction: (xdr: string) => Promise<string>;
+  };
+}
+import { useState, useEffect, useReducer, useRef, lazy, Suspense } from "react";
 import { StrKey, SorobanRpc, TransactionBuilder, BASE_FEE, nativeToScVal, Contract, scValToNative } from '@stellar/stellar-sdk';
-import type { CredentialType, Credential, VerifyResult } from "../../../sdk/src/types";
+import type { CredentialType, Credential, RevocationReason, VerifyResult } from "../../../sdk/src/types";
+import { REVOCATION_REASONS } from "../../../sdk/src/types";
 import { CredentialClient } from '../../../sdk/src';
 import { validateStellarAddress } from "../../../sdk/src/utils";
 import { getNetworkConfig } from '../network';
 import SkeletonCard from "./SkeletonCard";
 import FormField from "./FormField";
-import CredentialImport from "./CredentialImport";
 import { formatTimestamp } from "../utils/formatDate";
 import { handleError } from "../utils/handleError";
 import { useWalletContext } from "../context/WalletContext";
 import { useToast } from "../context/ToastContext";
-import CredentialTimeline from "./CredentialTimeline";
-import CredentialShare from "./CredentialShare";
 import TemplateSelector from "../templates/TemplateSelector";
 import { type CredentialTemplate, validateClaimsAgainstTemplate } from "../templates/credentialTemplates";
+import { exportCredentialsAsCSV, downloadExport } from "../utils/exportCredentials";
+import {
+  exportBatch,
+  downloadFile,
+  allTemplates,
+  saveCustomTemplates,
+  type BatchMode,
+  type ExportTemplate,
+} from "../export";
+import LoadingFallback from "./LoadingFallback";
+
+// ── Lazy-loaded components for code-splitting (#854) ─────────────────────────
+// These credential components are loaded on-demand to reduce initial bundle size
+
+const CredentialImport = lazy(() => import("./CredentialImport"));
+const CredentialTimeline = lazy(() => import("./CredentialTimeline"));
+const CredentialShare = lazy(() => import("./CredentialShare"));
+const CredentialComparison = lazy(() => import("./CredentialComparison"));
+const TemplateEditor = lazy(() => import("../export/TemplateEditor"));
+
+// Preload functions for hover/focus to improve perceived performance
+const preloadCredentialImport = () => void import("./CredentialImport");
+const preloadCredentialTimeline = () => void import("./CredentialTimeline");
+const preloadCredentialShare = () => void import("./CredentialShare");
+const preloadCredentialComparison = () => void import("./CredentialComparison");
+const preloadTemplateEditor = () => void import("../export/TemplateEditor");
+
+type ExportFormat = "json" | "csv" | "xml" | "pdf";
 
 type VerifyState =
   | "idle"
@@ -256,18 +294,29 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
   const [isIssuer, setIsIssuer] = useState(false);
   const [checkingIssuer, setCheckingIssuer] = useState(false);
 
+  const jsonImportRef = useRef<HTMLInputElement>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importedCount, setImportedCount] = useState<number | null>(null);
+  const [revokeId, setRevokeId] = useState("");
+  const [revokeReason, setRevokeReason] = useState<RevocationReason>("Compromised");
+  const [revokeResult, setRevokeResult] = useState<string | null>(null);
+
   const [searchAddress, setSearchAddress] = useState("");
   const [lastCheckedAt, setLastCheckedAt] = useState<number | null>(null);
   const [verifyCheckedAt, setVerifyCheckedAt] = useState<number | null>(null);
 
   // Import/Export state
   const [showImportModal, setShowImportModal] = useState(false);
-  const [exportFormat, setExportFormat] = useState<"json" | "csv" | "pdf">("json");
+  const [exportFormat, setExportFormat] = useState<ExportFormat>("json");
+  const [exportBatchMode, setExportBatchMode] = useState<BatchMode>("combined");
+  const [exportTemplates, setExportTemplates] = useState<ExportTemplate[]>(allTemplates);
+  const [exportTemplateId, setExportTemplateId] = useState("standard");
+  const [editingExportTemplate, setEditingExportTemplate] = useState(false);
+  const exportTemplate = exportTemplates.find((t) => t.id === exportTemplateId) ?? exportTemplates[0];
   const [isExporting, setIsExporting] = useState(false);
   const [selectedCredentialsForExport, setSelectedCredentialsForExport] = useState<Set<string>>(new Set());
   const [sharingCredential, setSharingCredential] = useState<Credential | null>(null);
 
-  const handleVerify = async (credentialId?: string, silent = false) => {
   // ── Pagination ──────────────────────────────────────────────────────────
   const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
   const readIntParam = (name: string, fallback: number): number => {
@@ -410,7 +459,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
     reader.readAsText(file);
   };
 
-  const handleVerify = async (credentialId?: string) => {
+  const handleVerify = async (credentialId?: string, silent = false) => {
     if (verifying) return; // guard against duplicate submissions
     const id = (credentialId ?? credId).trim();
     if (!id) return;
@@ -501,26 +550,20 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
   }, [verifyState, credId]);
 
   const fetchCredentialsForAddress = async (addr: string) => {
-  const handleSearch = async () => {
-    if (fetching) return; // guard against duplicate submissions
-    const addr = searchAddress.trim();
-    if (!addr) return;
-
-    // Validate Stellar address format
-    if (!StrKey.isValidEd25519PublicKey(addr)) {
+    const trimmed = addr.trim();
+    if (!trimmed) return;
+    if (!StrKey.isValidEd25519PublicKey(trimmed)) {
       const message = 'Invalid Stellar address format. Address must start with "G" and be 56 characters long.';
       dispatchCredential({ type: 'FETCH_ERROR', message });
       toast.error(message);
       return;
     }
-
     dispatchCredential({ type: 'FETCH_START' });
-    goToPage(1);
     try {
       const credentialClient = getCredentialClient();
       const caller = wallet.publicKey || "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
-      const results = await credentialClient.getCredentialsBySubject(caller, addr);
-      dispatchCredential({ type: 'FETCH_SUCCESS', credentials: results, searchedAddress: addr });
+      const results = await credentialClient.getCredentialsBySubject(caller, trimmed);
+      dispatchCredential({ type: 'FETCH_SUCCESS', credentials: results, searchedAddress: trimmed });
       setLastCheckedAt(Date.now());
     } catch (e: unknown) {
       const message = handleError(e);
@@ -623,7 +666,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
     setClaims(updated);
   };
 
-  const handleExport = async (format: "json" | "csv" | "pdf") => {
+  const handleExport = async (format: ExportFormat) => {
     try {
       setIsExporting(true);
       const credentialsToExport =
@@ -636,8 +679,16 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
         return;
       }
 
-      const result = await exportCredentialsWithProgress(credentialsToExport, format);
-      downloadExport(result.content, result.filename, result.mimeType);
+      if (format === "csv") {
+        downloadExport(exportCredentialsAsCSV(credentialsToExport), `credentials_export_${Date.now()}.csv`, "text/csv");
+      } else {
+        const network = getNetworkConfig();
+        const file = await exportBatch(credentialsToExport, format, exportTemplate, exportBatchMode, {
+          network: network.name,
+          contractId: network.credentialManagerId || undefined,
+        });
+        downloadFile(file);
+      }
       toast.success(`Successfully exported ${credentialsToExport.length} credentials as ${format.toUpperCase()}`);
       setSelectedCredentialsForExport(new Set());
     } catch (error) {
@@ -645,6 +696,24 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
     } finally {
       setIsExporting(false);
     }
+  };
+
+  const handleSaveExportTemplate = (saved: ExportTemplate) => {
+    const next = exportTemplates.some((t) => t.id === saved.id)
+      ? exportTemplates.map((t) => (t.id === saved.id ? saved : t))
+      : [...exportTemplates, saved];
+    setExportTemplates(next);
+    saveCustomTemplates(next);
+    setExportTemplateId(saved.id);
+    setEditingExportTemplate(false);
+  };
+
+  const handleDeleteExportTemplate = () => {
+    if (exportTemplate.builtIn) return;
+    const next = exportTemplates.filter((t) => t.id !== exportTemplate.id);
+    setExportTemplates(next);
+    saveCustomTemplates(next);
+    setExportTemplateId("standard");
   };
 
   const handleImportCredentials = (credentials: Credential[]) => {
@@ -812,6 +881,12 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
     }
   };
 
+  const handleRevoke = async () => {
+    if (!wallet.connected || !revokeId.trim()) return;
+    // TODO: build tx via CredentialClient.revokeCredential(), sign via wallet.signTransaction(), submit
+    setRevokeResult(`Credential ${revokeId} revoked (reason: ${revokeReason}).`);
+  };
+
   return (
     <>
       {/* Filter bar */}
@@ -821,6 +896,8 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
             <button
               onClick={() => setShowImportModal(true)}
+              onMouseEnter={preloadCredentialImport}
+              onFocus={preloadCredentialImport}
               style={{
                 padding: "0.5rem 1rem",
                 backgroundColor: "var(--accent-light)",
@@ -836,10 +913,11 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
               📥 Import
             </button>
             {displayCredentials.length > 0 && (
-              <div style={{ display: "flex", gap: "0.25rem" }}>
+              <div style={{ display: "flex", gap: "0.25rem", flexWrap: "wrap" }}>
                 <select
                   value={exportFormat}
-                  onChange={(e) => setExportFormat(e.target.value as "json" | "csv" | "pdf")}
+                  onChange={(e) => setExportFormat(e.target.value as ExportFormat)}
+                  aria-label="Export format"
                   style={{
                     padding: "0.5rem 0.75rem",
                     fontSize: "0.85rem",
@@ -851,8 +929,35 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
                 >
                   <option value="json">JSON</option>
                   <option value="csv">CSV</option>
+                  <option value="xml">XML</option>
                   <option value="pdf">PDF</option>
                 </select>
+                {exportFormat === "pdf" && (
+                  <select
+                    className="export-select"
+                    value={exportTemplate.id}
+                    onChange={(e) => setExportTemplateId(e.target.value)}
+                    aria-label="PDF template"
+                  >
+                    {exportTemplates.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name}
+                        {t.builtIn ? "" : " (custom)"}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {exportFormat !== "csv" && (selectedCredentialsForExport.size > 1 || (selectedCredentialsForExport.size === 0 && displayCredentials.length > 1)) && (
+                  <select
+                    className="export-select"
+                    value={exportBatchMode}
+                    onChange={(e) => setExportBatchMode(e.target.value as BatchMode)}
+                    aria-label="Batch output"
+                  >
+                    <option value="combined">Single file</option>
+                    <option value="zip">ZIP (one file each)</option>
+                  </select>
+                )}
                 <button
                   onClick={() => handleExport(exportFormat)}
                   disabled={isExporting}
@@ -871,10 +976,38 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
                 >
                   📤 Export {selectedCredentialsForExport.size > 0 ? `(${selectedCredentialsForExport.size})` : ""}
                 </button>
+                {exportFormat === "pdf" && (
+                  <button
+                    type="button"
+                    className="export-secondary"
+                    onClick={() => setEditingExportTemplate((v) => !v)}
+                    onMouseEnter={preloadTemplateEditor}
+                    onFocus={preloadTemplateEditor}
+                    aria-expanded={editingExportTemplate}
+                  >
+                    {exportTemplate.builtIn ? "Customize template" : "Edit template"}
+                  </button>
+                )}
+                {exportFormat === "pdf" && !exportTemplate.builtIn && (
+                  <button type="button" className="export-secondary" onClick={handleDeleteExportTemplate}>
+                    Delete template
+                  </button>
+                )}
               </div>
             )}
           </div>
         </div>
+
+        {editingExportTemplate && exportFormat === "pdf" && (
+          <Suspense fallback={<LoadingFallback />}>
+            <TemplateEditor
+              key={exportTemplate.id}
+              base={exportTemplate}
+              onSave={handleSaveExportTemplate}
+              onCancel={() => setEditingExportTemplate(false)}
+            />
+          </Suspense>
+        )}
 
         {/* Subject search */}
         <div style={{ display: "flex", gap: "0.5rem", marginBottom: "1rem" }}>
@@ -1079,6 +1212,10 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
                         <dt style={{ fontWeight: 600, color: "var(--text-muted)", minWidth: "120px" }}>Expires</dt>
                         <dd style={{ margin: 0, ...getExpiryStyle(cred.expiresAt) }}>{formatTimestamp(cred.expiresAt)}</dd>
                       </div>
+                      <div style={{ display: "flex", gap: "1rem", marginBottom: "0.5rem" }}>
+                        <dt style={{ fontWeight: 600, color: "var(--text-muted)", minWidth: "120px" }}>Version</dt>
+                        <dd style={{ margin: 0, color: "var(--text)" }}>v{cred.version ?? 1}</dd>
+                      </div>
                     </dl>
                     {Object.keys(cred.claims).length > 0 ? (
                       <dl style={{ margin: 0, fontSize: "0.85rem" }}>
@@ -1234,6 +1371,15 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
           >
             ✓ {importedCount} credential{importedCount > 1 ? "s" : ""} imported.
           </p>
+        )}
+        {filteredCredentials.length > 0 && (
+          <div style={{ display: "flex", gap: "0.5rem", marginTop: "1rem" }}>
+            {(["pdf", "json", "xml"] as ExportFormat[]).map((f) => (
+              <button key={f} onClick={() => handleExport(f)}>
+                Export {f.toUpperCase()}
+              </button>
+            ))}
+          </div>
         )}
       </div>
 
@@ -1399,20 +1545,54 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
         {!issuing && issueResult && <pre className="result">{issueResult}</pre>}
       </div>
 
+      <div className="card">
+        <h2>Revoke Credential</h2>
+        {wallet.connected ? (
+          <>
+            <input
+              placeholder="Credential ID (hex)"
+              value={revokeId}
+              onChange={(e) => setRevokeId(e.target.value)}
+            />
+            <select
+              value={revokeReason}
+              onChange={(e) => setRevokeReason(e.target.value as RevocationReason)}
+            >
+              {REVOCATION_REASONS.map((r) => (
+                <option key={r} value={r}>
+                  {r}
+                </option>
+              ))}
+            </select>
+            <button onClick={handleRevoke} disabled={!revokeId}>
+              Revoke
+            </button>
+          </>
+        ) : (
+          <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>
+            Connect your wallet to revoke credentials you issued.
+          </p>
+        )}
+        {revokeResult && <pre className="result">{revokeResult}</pre>}
+      </div>
       {/* Import Modal */}
       {showImportModal && (
-        <CredentialImport
-          onImport={handleImportCredentials}
-          onClose={() => setShowImportModal(false)}
-        />
+        <Suspense fallback={<LoadingFallback />}>
+          <CredentialImport
+            onImport={handleImportCredentials}
+            onClose={() => setShowImportModal(false)}
+          />
+        </Suspense>
       )}
 
       {/* Share Modal */}
       {sharingCredential && (
-        <CredentialShare
-          credential={sharingCredential}
-          onClose={() => setSharingCredential(null)}
-        />
+        <Suspense fallback={<LoadingFallback />}>
+          <CredentialShare
+            credential={sharingCredential}
+            onClose={() => setSharingCredential(null)}
+          />
+        </Suspense>
       )}
     </>
   );

@@ -1,21 +1,30 @@
+# Blue/green API server environments. Health check semantics are documented
+# in docs/container-health-checks.md (#883).
+x-server: &server
+  image: ${IMAGE:-soroban-identity:latest}
+  # Restarts the container when the process exits. Docker itself does not
+  # restart a container that is merely *unhealthy*; that needs an orchestrator
+  # (Kubernetes liveness probe, Swarm) or an autoheal sidecar.
+  restart: unless-stopped
+  # Longer than the server's graceful shutdown timeout (SHUTDOWN_TIMEOUT_MS,
+  # 30 s by default) so in-flight requests drain before SIGKILL.
+  stop_grace_period: 35s
+  healthcheck:
+    # node:20-alpine ships no curl, so probe with the bundled Node script.
+    test: ["CMD", "node", "scripts/healthcheck.mjs", "/live"]
+    interval: 10s
+    timeout: 5s
+    retries: 3
+    start_period: 30s
+
 services:
   blue:
-    image: ${IMAGE:-soroban-identity:latest}
+    <<: *server
     environment:
       COLOR: blue
     ports: ["127.0.0.1:3001:3001"]
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:3001/health"]
-      interval: 10s
-      timeout: 3s
-      retries: 10
   green:
-    image: ${IMAGE:-soroban-identity:latest}
+    <<: *server
     environment:
       COLOR: green
     ports: ["127.0.0.1:3002:3001"]
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:3001/health"]
-      interval: 10s
-      timeout: 3s
-      retries: 10

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">Soroban Identity credential verification</title>
+  <desc id="desc">Verify a credential securely without exposing private claims.</desc>
+  <defs><linearGradient id="bg" x1="0" x2="1" y1="0" y2="1"><stop stop-color="#111827"/><stop offset="1" stop-color="#4c1d95"/></linearGradient></defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <circle cx="1050" cy="80" r="220" fill="#7c3aed" opacity=".25"/>
+  <circle cx="160" cy="570" r="260" fill="#06b6d4" opacity=".12"/>
+  <text x="90" y="245" fill="#fff" font-family="system-ui,sans-serif" font-size="62" font-weight="700">Soroban Identity</text>
+  <text x="90" y="325" fill="#ddd6fe" font-family="system-ui,sans-serif" font-size="34">Secure credential verification</text>
+  <text x="90" y="390" fill="#cbd5e1" font-family="system-ui,sans-serif" font-size="24">Private claims stay private.</text>
+</svg>

@@ -7,6 +7,7 @@ on:
       - "frontend/**"
       - "sdk/**"
       - "infra/cloudflare/**"
+      - "infrastructure/cdn/scripts/**"
       - ".github/workflows/deploy-frontend.yml"
   workflow_dispatch:
 
@@ -56,3 +57,26 @@ jobs:
         run: curl --fail --retry 5 --retry-delay 5 --silent --show-error "$FRONTEND_HEALTH_URL"
         env:
           FRONTEND_HEALTH_URL: ${{ env.FRONTEND_HEALTH_URL }}
+      # CDN post-deploy steps (infrastructure/cdn). Each is skipped until the
+      # matching repository variables are set, so existing deploys are unaffected.
+      - name: Purge CDN cache for the entry point
+        if: vars.CLOUDFLARE_ZONE_ID != '' && vars.FRONTEND_URL != ''
+        run: infrastructure/cdn/scripts/purge-cache.sh
+        env:
+          FRONTEND_URL: ${{ vars.FRONTEND_URL }}
+          CLOUDFLARE_ZONE_ID: ${{ vars.CLOUDFLARE_ZONE_ID }}
+          # The Vault token needs the Cache Purge permission on the zone.
+          CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}
+      - name: Check CDN cache headers
+        if: vars.FRONTEND_URL != ''
+        run: infrastructure/cdn/scripts/check-cache-headers.sh
+        env:
+          FRONTEND_URL: ${{ vars.FRONTEND_URL }}
+      - name: Multi-region CDN test
+        if: vars.FRONTEND_URL != ''
+        # Uses a third-party probe network; report, but never block a deploy on it.
+        continue-on-error: true
+        run: infrastructure/cdn/scripts/multi-region-test.sh
+        env:
+          FRONTEND_URL: ${{ vars.FRONTEND_URL }}
+          GLOBALPING_TOKEN: ${{ secrets.GLOBALPING_TOKEN }}

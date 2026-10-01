@@ -1,5 +1,7 @@
 # Architecture
 
+> Design decisions behind this architecture are recorded in [ADRs](adr/README.md).
+
 ## Overview
 
 Soroban Identity is composed of three layers:

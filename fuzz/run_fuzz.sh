@@ -22,7 +22,14 @@ cd "$(dirname "$0")"
 TIME_BUDGET="${1:-60}"
 shift || true
 
-ALL_TARGETS=("fuzz_create_did" "fuzz_issue_credential" "fuzz_submit_score")
+ALL_TARGETS=(
+  "fuzz_create_did"
+  "fuzz_issue_credential"
+  "fuzz_submit_score"
+  "fuzz_verify_credentials_batch"
+  "fuzz_revoke_and_delegate"
+  "fuzz_resolve_external_did"
+)
 if [ "$#" -gt 0 ]; then
   TARGETS=("$@")
 else

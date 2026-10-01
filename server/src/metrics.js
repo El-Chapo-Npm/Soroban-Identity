@@ -176,6 +176,13 @@ export class MetricsService {
       registers: [this.registry],
     });
 
+    this.rateLimitDecisions = new client.Counter({
+      name: 'rate_limit_decisions_total',
+      help: 'Rate limiter decisions by outcome (allowed, denied, bypass) and scope',
+      labelNames: ['outcome', 'scope'],
+      registers: [this.registry],
+    });
+
     this.circuitBreakerState = new client.Gauge({
       name: 'soroban_circuit_breaker_state',
       help: 'Current state of the Soroban circuit breaker (0=CLOSED, 1=OPEN, 2=HALF_OPEN)',
@@ -334,6 +341,14 @@ export class MetricsService {
     const name = outcome === 'hit' ? 'query_cache_hits_total' : outcome === 'miss' ? 'query_cache_misses_total' : 'query_cache_errors_total';
     this._counters[name].inc();
     if (durationSeconds !== undefined) this.queryCacheLatency.observe({ outcome: outcome || 'unknown' }, durationSeconds);
+  }
+
+  /**
+   * Record one rate limiter decision (#956).
+   * @param {{ outcome: string, scope: string }} decision
+   */
+  observeRateLimitDecision({ outcome, scope }) {
+    this.rateLimitDecisions.inc({ outcome: outcome || 'unknown', scope: scope || 'unknown' });
   }
 
   observeDdosEvent(type) { this.ddosEvents.inc({ type: type || 'unknown' }); }

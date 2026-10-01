@@ -72,6 +72,14 @@ export function assertCredentialType(value: unknown): CredentialType {
  * On-chain credential record returned by
  * {@link CredentialClient.getCredential}.
  */
+export interface CredentialVersionEntry {
+  version: number;
+  amendedAt: number;
+  amendedBy: string;
+  reason: string;
+  changeSummary: string;
+}
+
 export interface Credential {
   id: string; // hex-encoded 32-byte hash
   subject: string;
@@ -82,6 +90,9 @@ export interface Credential {
   claimsHash: string;
   signature: string; // hex
   issuedAt: number;
+  version: number;
+  lastModifiedAt: number;
+  versionHistory?: CredentialVersionEntry[];
   /**
    * Unix timestamp (seconds) before which this credential is inactive.
    * `0` means the credential is active immediately (no time-lock). #731
@@ -106,10 +117,96 @@ export interface Credential {
  * discriminant `status` field so callers can narrow the type without
  * inspecting `revoked`.
  */
+
+/**
+ * Reasons a credential can be revoked with. Mirrors the contract's
+ * `RevocationReason` enum (#937).
+ *
+ * The values are the contract's variant names and are part of the wire format:
+ * never rename or reorder them. Use {@link normalizeRevocationReason} for values
+ * that come from user input (CSV imports, CLI flags) — it also accepts the
+ * snake_case labels the contract stores (`admin_revoked`).
+ */
+export const RevocationReason = {
+  Compromised: "Compromised",
+  Expired: "Expired",
+  Superseded: "Superseded",
+  Lost: "Lost",
+  AdminRevoked: "AdminRevoked",
+} as const;
+
+export type RevocationReason = (typeof RevocationReason)[keyof typeof RevocationReason];
+
+/** Every reason, in the contract's declaration order — use this for pickers. */
+export const REVOCATION_REASONS: readonly RevocationReason[] = [
+  RevocationReason.Compromised,
+  RevocationReason.Expired,
+  RevocationReason.Superseded,
+  RevocationReason.Lost,
+  RevocationReason.AdminRevoked,
+];
+
+/** Human-readable labels, keyed by reason. */
+export const REVOCATION_REASON_LABELS: Record<RevocationReason, string> = {
+  [RevocationReason.Compromised]: "Compromised",
+  [RevocationReason.Expired]: "Expired",
+  [RevocationReason.Superseded]: "Superseded",
+  [RevocationReason.Lost]: "Lost",
+  [RevocationReason.AdminRevoked]: "Admin revoked",
+};
+
+/** True when `value` is already a {@link RevocationReason}. */
+export function isRevocationReason(value: unknown): value is RevocationReason {
+  return typeof value === "string" && (REVOCATION_REASONS as readonly string[]).includes(value);
+}
+
+/**
+ * Map user input to a {@link RevocationReason}.
+ *
+ * Accepts the exact enum value (`Superseded`), the contract's stored label
+ * (`superseded`), spaces or dashes instead of underscores (`admin revoked`)
+ * and any casing of those. Returns `undefined` for anything else, so callers
+ * can report the offending value instead of revoking for the wrong reason.
+ */
+export function normalizeRevocationReason(value: unknown): RevocationReason | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (isRevocationReason(value)) return value;
+  if (typeof value !== "string") return undefined;
+
+  const compact = value.trim().toLowerCase().replace(/[\s_-]+/g, "");
+  if (compact.length === 0) return undefined;
+  return REVOCATION_REASONS.find(
+    (reason) => reason.toLowerCase().replace(/[\s_-]+/g, "") === compact
+  );
+}
+
+/**
+ * A revocation record as stored by the contract (read back with
+ * `get_revocation`, #937).
+ */
+export interface RevocationRecord {
+  credentialId: string;
+  issuer: string;
+  subject: string;
+  reason: RevocationReason;
+  /** Unix timestamp (seconds) of the ledger that recorded the revocation. */
+  revokedAt: number;
+  /** Address that submitted the revocation, when the contract returns it. */
+  revokedBy?: string;
+}
+
 export interface RevokedCredential extends Credential {
   /** ISO-8601 timestamp of the ledger that included the revocation transaction. */
   revokedAt: string;
   status: 'revoked';
+  /** Standardized reason recorded on-chain for the revocation. #951 */
+  revocationReason?: RevocationReason;
+}
+
+/** Options for {@link CredentialClient.revokeCredential}. */
+export interface RevokeOptions extends CallOptions {
+  /** Standardized revocation reason. Omit to revoke without a reason code. */
+  reason?: RevocationReason;
 }
 
 /**

@@ -26,6 +26,8 @@ pub fn issue_credential(
         claims,
         signature,
         issued_at: now,
+        version: 1,
+        last_modified_at: now,
         expires_at,
         revoked: false,
     };

@@ -14,6 +14,8 @@ The generated `dist/_headers` applies this rule to JavaScript, CSS, fonts, WebAs
 
 Vite’s content-hashed filenames make every release self-invalidating. Cloudflare Pages publishes the new deployment atomically and purges the project’s edge cache as part of deployment; the release workflow then probes the configured public health URL. If another CDN is used, purge its distribution after upload using the provider’s deployment API and preserve the same cache policy.
 
+Zone-level CDN settings (tiered cache, edge cache rules), post-deploy cache purging and header checks, multi-region testing and CDN performance metrics are in [`infrastructure/cdn`](https://github.com/El-Chapo-Npm/Soroban-Identity/tree/main/infrastructure/cdn).
+
 The worker retries a failed canary request against the stable origin and adds `x-release-channel` to the response for log correlation. Configure `STABLE_ORIGIN`, `CANARY_ORIGIN`, and `CANARY_ENABLED` as worker variables or secrets. Do not put provider API tokens in the frontend bundle.
 
 ## Image delivery

@@ -23,7 +23,7 @@ export type { ReputationRecord, ScoreHistoryEntry } from './reputation';
 //   4. Submit the fully-signed transaction:
 //        const { hash } = await client.submitSignedTransaction(signed2);
 export { BaseClient, getOrCreateServer, clearServerCache, SDK_VERSION } from './base-client';
-export type { AccountInfo } from './types';
+export type { AccountInfo, RevocationRecord } from './types';
 
 // ── Presentation ──────────────────────────────────────────────────────────────
 export { PresentationClient } from './presentation';
@@ -55,17 +55,43 @@ export {
   assertCredentialType,
   SimulationError,
   validateConfig,
+  RevocationReason,
 } from './types';
+export {
+  EXPORT_FORMATS,
+  EXPORT_MIME_TYPES,
+  EXPORT_SCHEMA_VERSION,
+  credentialStatus,
+  credentialToJson,
+  credentialToPdf,
+  credentialToXml,
+  escapeXml,
+  exportCredential,
+  exportLines,
+  toExportModel,
+} from './export';
+export type {
+  ExportedCredential,
+  ExportedFile,
+  ExportFormat,
+  CredentialStatus,
+} from './export';
 export type {
   DidDocument,
   ServiceEndpoint,
   Credential,
   RevokedCredential,
+  RevocationRecord,
+  RevokeOptions,
   CredentialType,
   CredentialListOptions,
   VerifyResult,
   VerifyFailReason,
   SorobanIdentityConfig,
+} from "./types";
+export { REVOCATION_REASONS } from "./types";
+export type { ReputationRecord, ScoreHistoryEntry } from "./reputation";
+export type {
   SorobanIdentityLogger,
   CallOptions,
   IdentityStorageStats,
@@ -135,6 +161,7 @@ export {
 
 // ── Contract arg builders ─────────────────────────────────────────────────────
 export {
+  encodeRevocationReason,
   buildCreateDidArgs,
   buildUpdateDidArgs,
   buildResolveDidArgs,
@@ -164,6 +191,9 @@ export {
   buildGetRevocationsArgs,
   buildCancelActivationArgs,
   buildGetPendingActivationsArgs,
+  buildRevokeCredentialWithReasonArgs,
+  buildGetRevocationRecordArgs,
+  buildGetRevokedByReasonArgs,
 } from './contract-args';
 
 // ── OpenAPI / v1 ──────────────────────────────────────────────────────────────

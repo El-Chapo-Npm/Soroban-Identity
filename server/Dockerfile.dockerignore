@@ -1,0 +1,11 @@
+# Allow-list for server/Dockerfile (BuildKit reads <Dockerfile>.dockerignore).
+# Paths are relative to the build context, the repository root.
+*
+!server/package.json
+!server/package-lock.json
+!server/openapi.json
+!server/src/
+!server/scripts/healthcheck.mjs
+!docs/api/swagger.html
+server/src/**/*.test.js
+server/src/**/*.test.ts

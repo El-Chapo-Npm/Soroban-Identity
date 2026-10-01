@@ -18,6 +18,12 @@ const SCHEMA_CNT: Symbol = symbol_short!("SCHCNT");
 const TOTAL_SCH: Symbol = symbol_short!("TOTSCH");
 const ISSUER_SCH: Symbol = symbol_short!("ISSSCH");
 const TTL_MAX: u32 = 6_312_000;
+/// Extend a persistent entry's TTL only once it has dropped below this many
+/// ledgers (#866). With the threshold equal to the target, every access
+/// re-extended the TTL and paid rent again; now an entry that is read or
+/// written often is extended at most about once every 30 days
+/// (518_400 ledgers at 5 s), while never having less than ~11 months left.
+const TTL_BUMP_THRESHOLD: u32 = TTL_MAX - 518_400;
 const TTL_MIN: u32 = 17_280;
 const PAGE_CAP: u32 = 100;
 const MAX_SCHEMA_FIELDS: u32 = 50;
@@ -215,7 +221,7 @@ impl SchemaRegistry {
         env.storage().persistent().set(&key, &schema);
         env.storage()
             .persistent()
-            .extend_ttl(&key, TTL_MAX, TTL_MAX);
+            .extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
 
         let mut issuer_schemas = Self::fetch_issuer_schemas(&env, &issuer);
         issuer_schemas.push_back(schema_id.clone());
@@ -223,7 +229,7 @@ impl SchemaRegistry {
         env.storage().persistent().set(&issuer_key, &issuer_schemas);
         env.storage()
             .persistent()
-            .extend_ttl(&issuer_key, TTL_MAX, TTL_MAX);
+            .extend_ttl(&issuer_key, TTL_BUMP_THRESHOLD, TTL_MAX);
 
         let cnt: u32 = env
             .storage()
@@ -316,7 +322,7 @@ impl SchemaRegistry {
         env.storage().persistent().set(&key, &schema);
         env.storage()
             .persistent()
-            .extend_ttl(&key, TTL_MAX, TTL_MAX);
+            .extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
 
         let mut issuer_schemas = Self::fetch_issuer_schemas(&env, &issuer);
         issuer_schemas.push_back(schema_id.clone());
@@ -324,7 +330,7 @@ impl SchemaRegistry {
         env.storage().persistent().set(&issuer_key, &issuer_schemas);
         env.storage()
             .persistent()
-            .extend_ttl(&issuer_key, TTL_MAX, TTL_MAX);
+            .extend_ttl(&issuer_key, TTL_BUMP_THRESHOLD, TTL_MAX);
 
         let total: u32 = env
             .storage()
@@ -367,11 +373,10 @@ impl SchemaRegistry {
             return Err(ContractError::SchemaNotFound);
         }
 
-        if env.storage().persistent().has(&key) {
-            env.storage()
-                .persistent()
-                .extend_ttl(&key, TTL_MAX, TTL_MAX);
-        }
+        // The entry was just read, so no has() check is needed first.
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
 
         let mut errors: Vec<String> = Vec::new(&env);
 
@@ -397,8 +402,9 @@ impl SchemaRegistry {
         match env.storage().persistent().get::<_, SchemaDefinition>(&key) {
             None => Err(ContractError::SchemaNotFound),
             Some(schema) => {
-                let ttl = TTL_MAX;
-                env.storage().persistent().extend_ttl(&key, ttl, ttl);
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
                 Ok(schema)
             }
         }
@@ -429,7 +435,7 @@ impl SchemaRegistry {
         env.storage().persistent().set(&key, &schema);
         env.storage()
             .persistent()
-            .extend_ttl(&key, TTL_MAX, TTL_MAX);
+            .extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
 
         env.events().publish(
             (SCHEMA, symbol_short!("deactvtd")),
@@ -543,7 +549,7 @@ impl SchemaRegistry {
         if env.storage().persistent().has(&key) {
             env.storage()
                 .persistent()
-                .extend_ttl(&key, TTL_MAX, TTL_MAX);
+                .extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
         }
         env.storage()
             .persistent()
@@ -715,5 +721,47 @@ mod tests {
             client.try_initialize(&admin),
             Err(Ok(ContractError::AlreadyInitialized))
         );
+    }
+
+    /// #866: an access only extends the TTL once it has dropped below
+    /// `TTL_BUMP_THRESHOLD`, instead of on every call.
+    #[test]
+    fn test_reads_extend_ttl_only_below_threshold() {
+        use soroban_sdk::testutils::storage::Persistent as _;
+        let (env, _admin, client) = setup();
+        let mut fields: Vec<SchemaField> = Vec::new(&env);
+        fields.push_back(make_field(&env, "name", true));
+        let schema_id = client.register_schema(
+            &Address::generate(&env),
+            &String::from_str(&env, "KYC Schema"),
+            &fields,
+            &BytesN::from_array(&env, &[1u8; 32]),
+        );
+        let ttl = || {
+            env.as_contract(&client.address, || {
+                env.storage()
+                    .persistent()
+                    .get_ttl(&SchemaRegistry::schema_key(&schema_id))
+            })
+        };
+        let full = ttl();
+        // Keep the contract instance itself alive across the ledger jumps below.
+        env.as_contract(&client.address, || {
+            env.storage().instance().extend_ttl(6_000_000, 6_000_000)
+        });
+        let mut claims = Map::new(&env);
+        claims.set(
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Alice"),
+        );
+
+        env.ledger().with_mut(|li| li.sequence_number += 1_000);
+        client.get_schema(&schema_id);
+        client.validate_claims(&schema_id, &claims);
+        assert_eq!(ttl(), full - 1_000);
+
+        env.ledger().with_mut(|li| li.sequence_number += 518_400);
+        client.get_schema(&schema_id);
+        assert_eq!(ttl(), full);
     }
 }

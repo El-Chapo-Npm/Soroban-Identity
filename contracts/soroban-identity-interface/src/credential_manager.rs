@@ -1,8 +1,9 @@
 //! Stable trait ABI for the `credential-manager` contract.
 
 use credential_manager::{
-    Credential, CredentialIdsPage, CredentialManager, CredentialStorageStats,
+    BatchVerifyResult, Credential, CredentialIdsPage, CredentialManager, CredentialStorageStats,
     CredentialTypeDescriptor, CredentialType, ContractError, IssuersPage,
+    RevocationReason, RevocationRecord,
 };
 use soroban_sdk::{Address, Bytes, BytesN, Env, Map, String, Vec};
 
@@ -26,7 +27,12 @@ pub trait CredentialManagerInterface {
         new_admin: Address,
     ) -> Result<(), ContractError>;
 
-    fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), ContractError>;
+    fn upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+        timelock_duration: Option<u32>,
+    ) -> Result<(), ContractError>;
 
     fn add_issuer(env: Env, issuer: Address) -> Result<(), ContractError>;
 
@@ -48,8 +54,8 @@ pub trait CredentialManagerInterface {
         claims_hash: BytesN<32>,
         signature: Bytes,
         expires_at: u64,
-        schema_hash: Option<BytesN<32>>,
         activation_time: u64,
+        schema_hash: Option<BytesN<32>>,
         proof: Option<Bytes>,
     ) -> Result<BytesN<32>, ContractError>;
 
@@ -109,7 +115,15 @@ pub trait CredentialManagerInterface {
         env: Env,
         issuer: Address,
         credential_id: BytesN<32>,
+        reason: RevocationReason,
     ) -> Result<(), ContractError>;
+
+    /// The stored revocation record, or `CredentialNotFound` if the credential
+    /// was never revoked. #937
+    fn get_revocation(
+        env: Env,
+        credential_id: BytesN<32>,
+    ) -> Result<RevocationRecord, ContractError>;
 
     fn expire_credential(
         env: Env,
@@ -149,6 +163,16 @@ pub trait CredentialManagerInterface {
     ) -> CredentialIdsPage;
 
     fn get_storage_stats(env: Env) -> CredentialStorageStats;
+
+    /// Verify up to 50 credentials in one call (#819).
+    ///
+    /// `fail_fast` stops after the first invalid id and returns only the
+    /// results computed so far. Otherwise every id is reported.
+    fn verify_credentials_batch(
+        env: Env,
+        ids: Vec<BytesN<32>>,
+        fail_fast: bool,
+    ) -> Result<Vec<BatchVerifyResult>, ContractError>;
 }
 
 /// Blanket implementation delegating to `CredentialManager`'s existing
@@ -175,8 +199,13 @@ impl CredentialManagerInterface for CredentialManager {
         Self::transfer_admin(env, current_admin, new_admin)
     }
 
-    fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
-        Self::upgrade(env, admin, new_wasm_hash)
+    fn upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+        timelock_duration: Option<u32>,
+    ) -> Result<(), ContractError> {
+        Self::upgrade(env, admin, new_wasm_hash, timelock_duration)
     }
 
     fn add_issuer(env: Env, issuer: Address) -> Result<(), ContractError> {
@@ -204,8 +233,8 @@ impl CredentialManagerInterface for CredentialManager {
         claims_hash: BytesN<32>,
         signature: Bytes,
         expires_at: u64,
-        schema_hash: Option<BytesN<32>>,
         activation_time: u64,
+        schema_hash: Option<BytesN<32>>,
         proof: Option<Bytes>,
     ) -> Result<BytesN<32>, ContractError> {
         Self::issue_credential(
@@ -217,8 +246,8 @@ impl CredentialManagerInterface for CredentialManager {
             claims_hash,
             signature,
             expires_at,
-            schema_hash,
             activation_time,
+            schema_hash,
             proof,
         )
     }
@@ -296,8 +325,16 @@ impl CredentialManagerInterface for CredentialManager {
         env: Env,
         issuer: Address,
         credential_id: BytesN<32>,
+        reason: RevocationReason,
     ) -> Result<(), ContractError> {
-        Self::revoke_credential(env, issuer, credential_id)
+        Self::revoke_credential(env, issuer, credential_id, reason)
+    }
+
+    fn get_revocation(
+        env: Env,
+        credential_id: BytesN<32>,
+    ) -> Result<RevocationRecord, ContractError> {
+        Self::get_revocation(env, credential_id)
     }
 
     fn expire_credential(
@@ -361,5 +398,13 @@ impl CredentialManagerInterface for CredentialManager {
 
     fn get_storage_stats(env: Env) -> CredentialStorageStats {
         Self::get_storage_stats(env)
+    }
+
+    fn verify_credentials_batch(
+        env: Env,
+        ids: Vec<BytesN<32>>,
+        fail_fast: bool,
+    ) -> Result<Vec<BatchVerifyResult>, ContractError> {
+        Self::verify_credentials_batch(env, ids, fail_fast)
     }
 }

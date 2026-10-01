@@ -1,0 +1,17 @@
+/* ── Responsive layer (#882) ─────────────────────────────────────────────────
+   Mobile-first: the base rules describe a phone in portrait, and each
+   breakpoint only adds what wider screens need. Imported after ../index.css,
+   which keeps the colour tokens and component styles.
+
+   Breakpoints (min-width, CSS media queries cannot read custom properties):
+     base        < 600px   phones
+     600px       ≥ 600px   large phones in landscape, small tablets
+     768px       ≥ 768px   tablets: header controls leave the drawer
+     1024px      ≥ 1024px  laptops and desktops: single-row header
+
+   Short landscape screens (phones on their side) are matched separately with
+   (orientation: landscape) and (max-height: 500px). */
+
+@import "./layout.css";
+@import "./navigation.css";
+@import "./touch.css";

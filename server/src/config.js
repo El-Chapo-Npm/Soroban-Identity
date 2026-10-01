@@ -122,6 +122,7 @@ export const DEFAULT_CORS_ALLOWED_HEADERS = [
   "Authorization",
   "X-API-Key",
   "X-Request-ID",
+  "X-Correlation-ID",
   "X-Actor",
   "X-User-Tier",
   "X-API-Version",
@@ -129,6 +130,7 @@ export const DEFAULT_CORS_ALLOWED_HEADERS = [
 
 export const DEFAULT_CORS_EXPOSED_HEADERS = [
   "X-Request-ID",
+  "X-Correlation-ID",
   "Content-Type",
   "X-RateLimit-Limit",
   "X-RateLimit-Remaining",
@@ -231,6 +233,19 @@ export function loadConfig(env = process.env) {
       .map((entry) => entry.trim())
       .filter(Boolean),
     rateLimitMaxBuckets: parseInteger(env.RATE_LIMIT_MAX_BUCKETS, 10000),
+    // #956: per-IP and per-user token buckets, plus premium bypass.
+    rateLimitIpPerMinute: parseInteger(env.RATE_LIMIT_IP_PER_MINUTE, 300),
+    rateLimitIpBurst: parseInteger(env.RATE_LIMIT_IP_BURST, 60),
+    rateLimitUserPerMinute: parseInteger(env.RATE_LIMIT_USER_PER_MINUTE, 600),
+    rateLimitUserBurst: parseInteger(env.RATE_LIMIT_USER_BURST, 120),
+    rateLimitPremiumTiers: (env.RATE_LIMIT_PREMIUM_TIERS ?? "premium,enterprise")
+      .split(",")
+      .map((entry) => entry.trim().toLowerCase())
+      .filter(Boolean),
+    rateLimitPremiumKeys: (env.RATE_LIMIT_PREMIUM_KEYS ?? "")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean),
     trustProxy: env.TRUST_PROXY === "true",
     ddosProtectionEnabled: parseBoolean(env.DDOS_PROTECTION_ENABLED, false),
     ddosWindowMs: parseInteger(env.DDOS_WINDOW_MS, 60_000),
