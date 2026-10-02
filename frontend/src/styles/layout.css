@@ -1,0 +1,183 @@
+/* ── Page layout (#882) ──────────────────────────────────────────────────────
+   See ./index.css for the breakpoint scale. */
+
+html {
+  /* Keep text at the size we set when a phone rotates to landscape. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  overflow-x: hidden;
+}
+
+/* Side padding respects the notch / rounded corners on devices that need it
+   (index.html opts in with viewport-fit=cover). */
+.container {
+  max-width: 900px;
+  margin: 0 auto;
+  padding-top: 0;
+  padding-bottom: max(1.5rem, env(safe-area-inset-bottom));
+  padding-left: max(0.75rem, env(safe-area-inset-left));
+  padding-right: max(0.75rem, env(safe-area-inset-right));
+}
+
+/* ── Header ──────────────────────────────────────────────────────────────── */
+
+/* Phones: brand on the left, menu button on the right, in one compact row.
+   The header controls live in the drawer (./navigation.css). */
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: max(0.75rem, env(safe-area-inset-top)) 0 0.75rem;
+  margin-bottom: 0.5rem;
+  border-bottom: 1px solid var(--header-border);
+}
+
+.app-header__brand {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+
+.app-header__brand h1 {
+  font-size: 1.25rem;
+  line-height: 1.2;
+  color: var(--accent);
+}
+
+.app-header__brand p {
+  margin-top: 0.15rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+/* ── Cards and content ───────────────────────────────────────────────────── */
+
+.card {
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+
+.card h2 {
+  font-size: 1rem;
+}
+
+/* 16px stops iOS Safari from zooming into a field when it gains focus. */
+input,
+textarea,
+select {
+  font-size: 16px;
+}
+
+/* Long IDs, addresses and hashes wrap instead of widening the page. */
+code,
+pre,
+.result {
+  overflow-wrap: anywhere;
+}
+
+pre {
+  white-space: pre-wrap;
+}
+
+img,
+svg,
+canvas,
+video {
+  max-width: 100%;
+}
+
+.issuer-dashboard-container {
+  padding: 0;
+}
+
+/* ── ≥ 600px: large phones in landscape, small tablets ─────────────────────── */
+
+@media (min-width: 600px) {
+  .container {
+    padding-left: max(1rem, env(safe-area-inset-left));
+    padding-right: max(1rem, env(safe-area-inset-right));
+  }
+
+  .app-header__brand h1 {
+    font-size: 1.5rem;
+  }
+
+  .card {
+    padding: 1.25rem;
+  }
+}
+
+/* ── ≥ 768px: tablets ────────────────────────────────────────────────────── */
+
+@media (min-width: 768px) {
+  .app-header {
+    flex-wrap: wrap;
+    padding: 1.5rem 0 1rem;
+    margin-bottom: 1rem;
+  }
+
+  .app-header__brand p {
+    font-size: 0.9rem;
+  }
+
+  .card {
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+  }
+
+  .card h2 {
+    font-size: 1.1rem;
+  }
+
+  input,
+  textarea {
+    font-size: 0.9rem;
+  }
+
+  select {
+    font-size: 0.85rem;
+  }
+}
+
+/* ── ≥ 1024px: laptops and desktops ──────────────────────────────────────── */
+
+@media (min-width: 1024px) {
+  .container {
+    padding-top: 1rem;
+  }
+
+  .app-header {
+    flex-wrap: nowrap;
+    padding: 2rem 0 1.5rem;
+    margin-bottom: 1.5rem;
+  }
+
+  .app-header__brand h1 {
+    font-size: 2rem;
+  }
+
+  .issuer-dashboard-container {
+    padding: 0.5rem 0;
+  }
+}
+
+/* ── Phones in landscape: little height, so trim vertical chrome ─────────── */
+
+@media (orientation: landscape) and (max-height: 500px) {
+  .app-header {
+    padding-top: max(0.5rem, env(safe-area-inset-top));
+    padding-bottom: 0.5rem;
+  }
+
+  .app-header__brand p {
+    display: none;
+  }
+
+  .card {
+    padding: 0.875rem 1rem;
+    margin-bottom: 0.75rem;
+  }
+}

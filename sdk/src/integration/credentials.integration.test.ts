@@ -8,6 +8,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Keypair } from '@stellar/stellar-sdk';
 import { CredentialsClient } from '../credentials';
 import { IdentityClient } from '../identity';
+import { RevocationReason } from '../types';
 import { setupIntegrationTests, teardownIntegrationTests, type TestEnvironment } from './setup';
 
 describe('Credentials Integration Tests', () => {
@@ -197,7 +198,11 @@ describe('Credentials Integration Tests', () => {
     });
 
     it('revokes a credential', async () => {
-      const result = await client.revokeCredential(issuerKeypair, credentialToRevoke);
+      const result = await client.revokeCredential(
+        issuerKeypair,
+        credentialToRevoke,
+        RevocationReason.Superseded
+      );
       
       expect(result.txHash).toBeTruthy();
     });
@@ -223,7 +228,7 @@ describe('Credentials Integration Tests', () => {
       );
       
       await expect(
-        client.revokeCredential(otherKeypair, cred.data.id)
+        client.revokeCredential(otherKeypair, cred.data.id, RevocationReason.Compromised)
       ).rejects.toThrow(/unauthorized|permission/i);
     });
   });

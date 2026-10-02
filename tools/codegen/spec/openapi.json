@@ -1,0 +1,2816 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Soroban Identity Server API",
+    "version": "0.1.0",
+    "description": "Operational REST and GraphQL HTTP service for Soroban Identity contracts, covering Decentralized Identifiers (DIDs), Verifiable Credentials, Webhook delivery, and Reputation systems on Stellar Soroban."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3001",
+      "description": "Local development server"
+    },
+    {
+      "url": "https://api.soroban-identity.stellar.org",
+      "description": "Production API gateway"
+    }
+  ],
+  "tags": [
+    {
+      "name": "credentials",
+      "description": "Verifiable credential issuance, verification, revocation, and queries"
+    },
+    {
+      "name": "webhooks",
+      "description": "Webhook subscription management, delivery logs, and testing"
+    },
+    {
+      "name": "graphql",
+      "description": "Flexible GraphQL querying and mutations"
+    },
+    {
+      "name": "identity",
+      "description": "W3C DID resolution and registry endpoints"
+    },
+    {
+      "name": "admin",
+      "description": "Administrative issuer management and expiry reporting"
+    },
+    {
+      "name": "system",
+      "description": "Liveness probes, Prometheus metrics, and server metadata"
+    },
+    {
+      "name": "oauth",
+      "description": "OAuth 2.0 client registration, authorization code grant, token introspection and revocation"
+    }
+  ],
+  "paths": {
+    "/openapi.json": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Get OpenAPI Specification",
+        "description": "Returns the complete OpenAPI 3.0.3 specification JSON.",
+        "responses": {
+          "200": {
+            "description": "OpenAPI specification document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "getOpenApi"
+      }
+    },
+    "/info": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Server capability discovery",
+        "description": "Returns server version, API versioning info, and supported feature flags.",
+        "responses": {
+          "200": {
+            "description": "Server capability metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServerInfo"
+                },
+                "example": {
+                  "version": "0.1.0",
+                  "apiVersion": "v1",
+                  "supportedVersions": [
+                    "v1",
+                    "v2"
+                  ],
+                  "features": [
+                    "webhook_delivery",
+                    "batch_issuance",
+                    "event_polling",
+                    "graphql_api",
+                    "api_versioning"
+                  ],
+                  "minSdkVersion": "0.1.0"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "getServerInfo"
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Liveness and contract health probe",
+        "description": "Checks connectivity to Soroban RPC node and smart contracts with circuit breaker state.",
+        "responses": {
+          "200": {
+            "description": "Server and all upstream contracts are healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                },
+                "example": {
+                  "status": "ok",
+                  "apiVersion": "v1",
+                  "supportedVersions": [
+                    "v1",
+                    "v2"
+                  ],
+                  "deprecatedVersions": [],
+                  "defaultVersion": "v1",
+                  "contracts": {
+                    "identity": true,
+                    "credential": true,
+                    "reputation": true
+                  },
+                  "circuitBreaker": {
+                    "state": "CLOSED",
+                    "failureCount": 0
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Server or upstream contracts are degraded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "getHealth"
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Prometheus Metrics",
+        "description": "Renders Prometheus-formatted operational metrics.",
+        "responses": {
+          "200": {
+            "description": "Prometheus text metrics",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "getMetrics"
+      }
+    },
+    "/credentials": {
+      "get": {
+        "tags": [
+          "credentials"
+        ],
+        "summary": "List credentials (cursor-paginated)",
+        "description": "Retrieves a cursor-paginated list of credentials. Cursors are opaque tokens returned as nextCursor/previousCursor; pass one back as `cursor` (with `direction=next` or `direction=prev`) to continue paging. The response also carries a weak ETag; a matching If-None-Match returns 304.",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "maximum": 200
+            },
+            "description": "Number of records to return (max 200)"
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Opaque pagination cursor from a previous response's nextCursor/previousCursor"
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "next",
+                "prev"
+              ],
+              "default": "next"
+            },
+            "description": "Direction to page in relative to cursor. 'prev' walks backward through results in the same forward order."
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated list of fields to include in each returned credential, e.g. 'id,subject,claims.tier'. Omit to receive the full object."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of credentials",
+            "headers": {
+              "ETag": {
+                "description": "Weak entity tag for this page. Send back via If-None-Match to revalidate.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedCredentials"
+                },
+                "example": {
+                  "items": [
+                    {
+                      "id": "cred-001",
+                      "subject": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+                      "issuer": "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF",
+                      "expiresAt": 1893456000,
+                      "revoked": false
+                    }
+                  ],
+                  "nextCursor": "eyJpZCI6ImNyZWQtMDAxIn0",
+                  "previousCursor": null
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Not Modified - the caller's If-None-Match matches the current page."
+          },
+          "400": {
+            "description": "Invalid query parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "listCredentials"
+      },
+      "post": {
+        "tags": [
+          "credentials"
+        ],
+        "summary": "Issue a new Verifiable Credential",
+        "description": "Persists a newly issued credential, appends an audit log record, and triggers the `credential.issued` webhook event.",
+        "security": [
+          {
+            "ApiKeyAuth": [
+              "credentials:write"
+            ]
+          },
+          {
+            "BearerAuth": [
+              "credentials:write"
+            ]
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IssueCredentialRequest"
+              },
+              "example": {
+                "id": "cred-kyc-2026-001",
+                "subject": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+                "issuer": "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF",
+                "expiresAt": 1893456000,
+                "schema": "https://schema.org/KYCCredential",
+                "claims": {
+                  "tier": "tier_3",
+                  "country": "US",
+                  "verified": true
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Credential successfully issued and persisted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Credential"
+                },
+                "example": {
+                  "id": "cred-kyc-2026-001",
+                  "subject": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+                  "issuer": "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF",
+                  "expiresAt": 1893456000,
+                  "schema": "https://schema.org/KYCCredential",
+                  "claims": {
+                    "tier": "tier_3",
+                    "country": "US",
+                    "verified": true
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing required fields or invalid body format",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "code": "INVALID_REQUEST",
+                  "message": "Request body must include a credential id."
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key authentication token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "code": "UNAUTHORIZED",
+                  "error": "unauthorized",
+                  "message": "Invalid API key"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "API key lacks required scope ('credentials:write')",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "code": "INSUFFICIENT_SCOPE",
+                  "error": "forbidden",
+                  "message": "API key does not have required permissions",
+                  "requiredScopes": [
+                    "credentials:write"
+                  ],
+                  "missingScopes": [
+                    "credentials:write"
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Credential with the given ID already exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "code": "CREDENTIAL_ALREADY_EXISTS",
+                  "message": "Credential with ID \"cred-kyc-2026-001\" already exists",
+                  "details": [
+                    {
+                      "field": "id",
+                      "value": "cred-kyc-2026-001"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds maximum payload size limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "code": "PAYLOAD_TOO_LARGE",
+                  "message": "Request body exceeds the size limit."
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Media Type (must be application/json)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "code": "UNSUPPORTED_MEDIA_TYPE",
+                  "message": "Content-Type must be application/json"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server or storage failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "issueCredential"
+      }
+    },
+    "/credentials/issue": {
+      "post": {
+        "tags": [
+          "credentials"
+        ],
+        "summary": "Issue a credential (alias for POST /credentials)",
+        "description": "Alias route for credential issuance.",
+        "security": [
+          {
+            "ApiKeyAuth": [
+              "credentials:write"
+            ]
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IssueCredentialRequest"
+              },
+              "example": {
+                "id": "cred-kyc-2026-001",
+                "subject": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+                "issuer": "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF",
+                "expiresAt": 1893456000,
+                "schema": "https://schema.org/KYCCredential",
+                "claims": {
+                  "tier": "tier_3",
+                  "country": "US",
+                  "verified": true
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Credential successfully issued and persisted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Credential"
+                },
+                "example": {
+                  "id": "cred-kyc-2026-001",
+                  "subject": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+                  "issuer": "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF",
+                  "expiresAt": 1893456000,
+                  "schema": "https://schema.org/KYCCredential",
+                  "claims": {
+                    "tier": "tier_3",
+                    "country": "US",
+                    "verified": true
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing required fields or invalid body format",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "code": "INVALID_REQUEST",
+                  "message": "Request body must include a credential id."
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key authentication token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "code": "UNAUTHORIZED",
+                  "error": "unauthorized",
+                  "message": "Invalid API key"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "API key lacks required scope ('credentials:write')",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "code": "INSUFFICIENT_SCOPE",
+                  "error": "forbidden",
+                  "message": "API key does not have required permissions",
+                  "requiredScopes": [
+                    "credentials:write"
+                  ],
+                  "missingScopes": [
+                    "credentials:write"
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Credential with the given ID already exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "code": "CREDENTIAL_ALREADY_EXISTS",
+                  "message": "Credential with ID \"cred-kyc-2026-001\" already exists",
+                  "details": [
+                    {
+                      "field": "id",
+                      "value": "cred-kyc-2026-001"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "operationId": "issueCredentialAlias"
+      }
+    },
+    "/credentials/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Unique identifier of the credential",
+          "example": "cred-kyc-2026-001"
+        }
+      ],
+      "get": {
+        "tags": [
+          "credentials"
+        ],
+        "summary": "Get credential by ID",
+        "description": "Retrieves the full record of an existing credential.",
+        "parameters": [
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated list of fields to include in the response, e.g. 'id,claims.tier'. Supports dotted paths into nested objects."
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Conditional GET. When it matches the current strong ETag, the server returns 304 with no body."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Credential found",
+            "headers": {
+              "ETag": {
+                "description": "Strong entity tag for the canonical credential state (computed the same way regardless of any `fields` filtering). Reuse it in If-Match on a later write.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Credential"
+                },
+                "example": {
+                  "id": "cred-kyc-2026-001",
+                  "subject": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+                  "issuer": "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF",
+                  "expiresAt": 1893456000,
+                  "revoked": false,
+                  "schema": "https://schema.org/KYCCredential"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Not Modified - If-None-Match matched the current ETag."
+          },
+          "404": {
+            "description": "Credential not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": "not_found"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "getCredential"
+      },
+      "delete": {
+        "tags": [
+          "credentials"
+        ],
+        "summary": "Revoke a credential",
+        "description": "Marks the credential as revoked in persistent storage and dispatches a `credential.revoked` webhook notification.",
+        "security": [
+          {
+            "ApiKeyAuth": [
+              "credentials:write"
+            ]
+          },
+          {
+            "BearerAuth": [
+              "credentials:write"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optimistic concurrency. When present, the revoke is rejected with 412 unless it matches the credential's current ETag."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Credential revoked successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CredentialRevokeResponse"
+                },
+                "example": {
+                  "revoked": true,
+                  "credential": {
+                    "id": "cred-kyc-2026-001",
+                    "subject": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+                    "issuer": "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF",
+                    "revoked": true,
+                    "revokedAt": "2026-08-25T11:00:00.000Z"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized - missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden - missing credentials:write scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Credential not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "Precondition Failed - If-Match did not match the credential's current ETag.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "deleteCredential"
+      }
+    },
+    "/credentials/{id}/revoke": {
+      "post": {
+        "tags": [
+          "credentials"
+        ],
+        "summary": "Revoke a credential via POST",
+        "description": "Alias endpoint for credential revocation.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": [
+              "credentials:write"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Credential revoked successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CredentialRevokeResponse"
+                },
+                "example": {
+                  "revoked": true,
+                  "credential": {
+                    "id": "cred-kyc-2026-001",
+                    "subject": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+                    "issuer": "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF",
+                    "revoked": true,
+                    "revokedAt": "2026-08-25T11:00:00.000Z"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized - missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden - missing credentials:write scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Credential not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "revokeCredential"
+      },
+      "delete": {
+        "tags": [
+          "credentials"
+        ],
+        "summary": "Revoke a credential via DELETE",
+        "description": "Explicit revocation path matching DELETE /credentials/:id/revoke.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": [
+              "credentials:write"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Credential revoked successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CredentialRevokeResponse"
+                },
+                "example": {
+                  "revoked": true,
+                  "credential": {
+                    "id": "cred-kyc-2026-001",
+                    "subject": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+                    "issuer": "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF",
+                    "revoked": true,
+                    "revokedAt": "2026-08-25T11:00:00.000Z"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized - missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden - missing credentials:write scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Credential not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "deleteCredentialRevocation"
+      }
+    },
+    "/credentials/{id}/verify": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Identifier of the credential to verify"
+        }
+      ],
+      "post": {
+        "tags": [
+          "credentials"
+        ],
+        "summary": "Verify credential status",
+        "description": "Verifies that the credential exists, is not revoked, and has not expired. Returns the complete credential object when verified.",
+        "security": [
+          {
+            "ApiKeyAuth": [
+              "credentials:read"
+            ]
+          },
+          {
+            "BearerAuth": [
+              "credentials:read"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Verification evaluation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CredentialVerifyResponse"
+                },
+                "examples": {
+                  "valid": {
+                    "summary": "Valid Credential",
+                    "value": {
+                      "verified": true,
+                      "credential": {
+                        "id": "cred-kyc-2026-001",
+                        "subject": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+                        "issuer": "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF",
+                        "expiresAt": 1893456000,
+                        "revoked": false
+                      }
+                    }
+                  },
+                  "revoked": {
+                    "summary": "Revoked Credential",
+                    "value": {
+                      "verified": false,
+                      "reason": "revoked"
+                    }
+                  },
+                  "expired": {
+                    "summary": "Expired Credential",
+                    "value": {
+                      "verified": false,
+                      "reason": "expired"
+                    }
+                  },
+                  "notFound": {
+                    "summary": "Not Found Credential",
+                    "value": {
+                      "verified": false,
+                      "reason": "not_found"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden - missing credentials:read scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "verifyCredential"
+      }
+    },
+    "/webhooks": {
+      "get": {
+        "tags": [
+          "webhooks"
+        ],
+        "summary": "List registered webhooks",
+        "security": [
+          {
+            "ApiKeyAuth": [
+              "admin:read"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of webhooks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "webhooks": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Webhook"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "operationId": "listWebhooks"
+      },
+      "post": {
+        "tags": [
+          "webhooks"
+        ],
+        "summary": "Register a new webhook endpoint",
+        "security": [
+          {
+            "ApiKeyAuth": [
+              "admin:write"
+            ]
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterWebhookRequest"
+              },
+              "example": {
+                "url": "https://client.example.com/webhook",
+                "events": [
+                  "credential.issued",
+                  "credential.revoked"
+                ],
+                "secret": "whsec_custom_secret_key_123",
+                "description": "Primary webhook listener for credential lifecycle"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Webhook registered successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Webhook"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "registerWebhook"
+      }
+    },
+    "/webhooks/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "tags": [
+          "webhooks"
+        ],
+        "summary": "Get webhook by ID",
+        "security": [
+          {
+            "ApiKeyAuth": [
+              "admin:read"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Webhook details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Webhook"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Webhook not found"
+          }
+        },
+        "operationId": "getWebhook"
+      },
+      "delete": {
+        "tags": [
+          "webhooks"
+        ],
+        "summary": "Delete webhook",
+        "security": [
+          {
+            "ApiKeyAuth": [
+              "admin:write"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Webhook deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "id": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "operationId": "deleteWebhook"
+      }
+    },
+    "/webhooks/{id}/test": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "tags": [
+          "webhooks"
+        ],
+        "summary": "Test webhook delivery",
+        "security": [
+          {
+            "ApiKeyAuth": [
+              "admin:write"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Test delivery result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookLog"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "testWebhook"
+      }
+    },
+    "/webhooks/logs": {
+      "get": {
+        "tags": [
+          "webhooks"
+        ],
+        "summary": "Query webhook delivery logs",
+        "security": [
+          {
+            "ApiKeyAuth": [
+              "admin:read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "webhookId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Delivery logs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "logs": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/WebhookLog"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "operationId": "listWebhookLogs"
+      }
+    },
+    "/graphql": {
+      "get": {
+        "tags": [
+          "graphql"
+        ],
+        "summary": "GraphQL Playground / GET Query",
+        "description": "Renders interactive GraphiQL playground in browser or executes query via query string.",
+        "responses": {
+          "200": {
+            "description": "Playground HTML or JSON query response"
+          }
+        },
+        "operationId": "graphqlGet"
+      },
+      "post": {
+        "tags": [
+          "graphql"
+        ],
+        "summary": "Execute GraphQL query or mutation",
+        "description": "Executes GraphQL operation with DataLoader caching and batching.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "query"
+                ],
+                "properties": {
+                  "query": {
+                    "type": "string"
+                  },
+                  "variables": {
+                    "type": "object"
+                  },
+                  "operationName": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "GraphQL Execution Result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object"
+                    },
+                    "errors": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "operationId": "graphqlPost"
+      }
+    },
+    "/1.0/identifiers/{did}": {
+      "get": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "Resolve a DID document",
+        "description": "W3C DID Resolution endpoint for did:stellar identifiers.",
+        "parameters": [
+          {
+            "name": "did",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "did:stellar:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "DID Resolution response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "didDocument": {
+                      "type": "object",
+                      "nullable": true
+                    },
+                    "didResolutionMetadata": {
+                      "type": "object"
+                    },
+                    "didDocumentMetadata": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "didDocument",
+                    "didResolutionMetadata",
+                    "didDocumentMetadata"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid DID format"
+          },
+          "502": {
+            "description": "Upstream RPC failure"
+          }
+        },
+        "operationId": "resolveDid"
+      }
+    },
+    "/oauth/clients": {
+      "post": {
+        "tags": [
+          "oauth"
+        ],
+        "summary": "Register an OAuth 2.0 client",
+        "description": "Dynamically registers a client for the authorization code grant. The client_secret is returned only in this response and cannot be retrieved again.",
+        "security": [
+          {
+            "ApiKeyAuth": [
+              "admin:write"
+            ]
+          },
+          {
+            "BearerAuth": [
+              "admin:write"
+            ]
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "redirectUris"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "redirectUris": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "uri"
+                    },
+                    "minItems": 1
+                  },
+                  "scopes": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Subset of the API's scopes this client may ever be granted."
+                  },
+                  "grantTypes": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "authorization_code",
+                        "refresh_token"
+                      ]
+                    }
+                  }
+                }
+              },
+              "example": {
+                "name": "Partner Dashboard",
+                "redirectUris": [
+                  "https://partner.example.com/callback"
+                ],
+                "scopes": [
+                  "credentials:read"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Client registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "clientId": {
+                      "type": "string"
+                    },
+                    "clientSecret": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "redirectUris": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "scopes": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "grantTypes": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid registration request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing admin:write scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "registerOauthClient"
+      }
+    },
+    "/oauth/authorize": {
+      "get": {
+        "tags": [
+          "oauth"
+        ],
+        "summary": "Authorization endpoint (authorization code grant)",
+        "description": "Issues a short-lived authorization code and redirects to redirect_uri. There is no separate login/consent page: the resource owner is whoever this request is already authenticated as, and a requested scope can never exceed both the client's registered scopes and the caller's own.",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "response_type",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "code"
+              ]
+            }
+          },
+          {
+            "name": "client_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "redirect_uri",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            }
+          },
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Space-delimited scopes. Defaults to the client's full registered scope set."
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Opaque value echoed back unchanged, to protect against CSRF."
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Redirect to redirect_uri with code and state query parameters."
+          },
+          "400": {
+            "description": "Invalid request, unknown client, or unregistered redirect_uri",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller does not hold a requested scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "oauthAuthorize"
+      }
+    },
+    "/oauth/token": {
+      "post": {
+        "tags": [
+          "oauth"
+        ],
+        "summary": "Token endpoint",
+        "description": "Exchanges an authorization code, or a refresh token, for an access token. Accepts a JSON body (not the RFC 6749 form-encoding) to match the rest of this API.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "grant_type",
+                  "client_id",
+                  "client_secret"
+                ],
+                "properties": {
+                  "grant_type": {
+                    "type": "string",
+                    "enum": [
+                      "authorization_code",
+                      "refresh_token"
+                    ]
+                  },
+                  "code": {
+                    "type": "string",
+                    "description": "Required for grant_type=authorization_code"
+                  },
+                  "redirect_uri": {
+                    "type": "string",
+                    "format": "uri",
+                    "description": "Required for grant_type=authorization_code; must match the value used at /oauth/authorize"
+                  },
+                  "refresh_token": {
+                    "type": "string",
+                    "description": "Required for grant_type=refresh_token"
+                  },
+                  "client_id": {
+                    "type": "string"
+                  },
+                  "client_secret": {
+                    "type": "string"
+                  },
+                  "scope": {
+                    "type": "string",
+                    "description": "Optional on refresh; may only narrow the original grant"
+                  }
+                }
+              },
+              "example": {
+                "grant_type": "authorization_code",
+                "code": "ac_...",
+                "redirect_uri": "https://partner.example.com/callback",
+                "client_id": "client_...",
+                "client_secret": "secret_..."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Token issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "access_token": {
+                      "type": "string"
+                    },
+                    "token_type": {
+                      "type": "string",
+                      "example": "Bearer"
+                    },
+                    "expires_in": {
+                      "type": "integer",
+                      "description": "Seconds until access_token expires"
+                    },
+                    "refresh_token": {
+                      "type": "string"
+                    },
+                    "scope": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_request / invalid_grant / invalid_scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid_client",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "oauthToken"
+      }
+    },
+    "/oauth/introspect": {
+      "post": {
+        "tags": [
+          "oauth"
+        ],
+        "summary": "Token introspection (RFC 7662)",
+        "description": "Reports whether a token is currently active. Callers authenticate either as the OAuth client the token was issued to (client_id/client_secret in the body) or as an admin (admin:read).",
+        "security": [
+          {
+            "ApiKeyAuth": [
+              "admin:read"
+            ]
+          },
+          {
+            "BearerAuth": [
+              "admin:read"
+            ]
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "token"
+                ],
+                "properties": {
+                  "token": {
+                    "type": "string"
+                  },
+                  "token_type_hint": {
+                    "type": "string",
+                    "enum": [
+                      "access_token",
+                      "refresh_token"
+                    ]
+                  },
+                  "client_id": {
+                    "type": "string"
+                  },
+                  "client_secret": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Introspection result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "active": {
+                      "type": "boolean"
+                    },
+                    "scope": {
+                      "type": "string"
+                    },
+                    "client_id": {
+                      "type": "string"
+                    },
+                    "token_type": {
+                      "type": "string"
+                    },
+                    "exp": {
+                      "type": "integer"
+                    },
+                    "iat": {
+                      "type": "integer"
+                    },
+                    "sub": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "example": {
+                  "active": true,
+                  "scope": "credentials:read",
+                  "client_id": "client_abc",
+                  "token_type": "Bearer",
+                  "exp": 1893456000,
+                  "iat": 1893452400
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "oauthIntrospect"
+      }
+    },
+    "/oauth/revoke": {
+      "post": {
+        "tags": [
+          "oauth"
+        ],
+        "summary": "Token revocation (RFC 7009)",
+        "description": "Revokes an access or refresh token. Always responds 200 once the caller's own credentials check out, whether or not the token was recognized, so a caller cannot use this endpoint to probe for valid tokens.",
+        "security": [
+          {
+            "ApiKeyAuth": [
+              "admin:write"
+            ]
+          },
+          {
+            "BearerAuth": [
+              "admin:write"
+            ]
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "token"
+                ],
+                "properties": {
+                  "token": {
+                    "type": "string"
+                  },
+                  "token_type_hint": {
+                    "type": "string",
+                    "enum": [
+                      "access_token",
+                      "refresh_token"
+                    ]
+                  },
+                  "client_id": {
+                    "type": "string"
+                  },
+                  "client_secret": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Revoked (or already inactive)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "revoked": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "oauthRevoke"
+      }
+    },
+    "/credentials/verify/batch": {
+      "post": {
+        "summary": "Verify multiple credentials in a single batch request",
+        "description": "Verifies up to 50 credentials in a single request for efficiency with partial success handling.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "ids"
+                ],
+                "properties": {
+                  "ids": {
+                    "type": "array",
+                    "maxItems": 50,
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Batch verification results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "results",
+                    "total",
+                    "verifiedCount"
+                  ],
+                  "properties": {
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "id",
+                          "verified"
+                        ],
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "verified": {
+                            "type": "boolean"
+                          },
+                          "reason": {
+                            "type": "string"
+                          },
+                          "credential": {
+                            "type": "object"
+                          }
+                        }
+                      }
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
+                    "verifiedCount": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request format or limit exceeded"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "operationId": "verifyCredentialsBatch"
+      }
+    },
+    "/admin/api-keys": {
+      "post": {
+        "summary": "Issue a new API key",
+        "description": "Issue an API key with configurable permissions and subscription tier.",
+        "responses": {
+          "201": {
+            "description": "API key created"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "operationId": "createApiKey"
+      },
+      "get": {
+        "summary": "List API keys",
+        "description": "Returns metadata for all issued API keys.",
+        "responses": {
+          "200": {
+            "description": "List of API keys"
+          }
+        },
+        "operationId": "listApiKeys"
+      }
+    },
+    "/admin/api-keys/{id}": {
+      "get": {
+        "summary": "Get API key metadata",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "API key metadata"
+          },
+          "404": {
+            "description": "API key not found"
+          }
+        },
+        "operationId": "getApiKey"
+      },
+      "delete": {
+        "summary": "Revoke an API key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "API key revoked"
+          },
+          "404": {
+            "description": "API key not found"
+          }
+        },
+        "operationId": "deleteApiKey"
+      }
+    },
+    "/admin/api-keys/{id}/rotate": {
+      "post": {
+        "summary": "Rotate an API key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "API key rotated"
+          },
+          "404": {
+            "description": "API key not found"
+          }
+        },
+        "operationId": "rotateApiKey"
+      }
+    },
+    "/batch": {
+      "post": {
+        "summary": "Execute multiple credential operations in one request (#749)",
+        "description": "Processes up to 100 issue/verify/revoke operations in a single request, returning one result per operation. Partial failures do not abort the batch unless `atomic` is true, in which case the batch stops at the first failure and rolls back any credentials it already issued in this batch.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "operations"
+                ],
+                "properties": {
+                  "atomic": {
+                    "type": "boolean",
+                    "description": "Stop at the first failure and revoke any credentials issued earlier in this batch, instead of continuing through the remaining operations."
+                  },
+                  "operations": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 100,
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "type",
+                        "payload"
+                      ],
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "description": "Optional client-supplied reference echoed back on the matching result."
+                        },
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "issue",
+                            "verify",
+                            "revoke"
+                          ]
+                        },
+                        "payload": {
+                          "type": "object",
+                          "description": "issue: a full credential body. verify/revoke: { credentialId }."
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Batch processed; check each result's `success` field for its individual outcome.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "type": {
+                            "type": "string"
+                          },
+                          "success": {
+                            "type": "boolean"
+                          },
+                          "status": {
+                            "type": "string"
+                          },
+                          "data": {
+                            "type": "object"
+                          },
+                          "error": {
+                            "type": "object"
+                          }
+                        }
+                      }
+                    },
+                    "summary": {
+                      "type": "object",
+                      "properties": {
+                        "total": {
+                          "type": "integer"
+                        },
+                        "succeeded": {
+                          "type": "integer"
+                        },
+                        "failed": {
+                          "type": "integer"
+                        }
+                      }
+                    },
+                    "atomic": {
+                      "type": "boolean"
+                    },
+                    "aborted": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid batch: empty, over 100 operations, or a malformed operation"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Missing credentials:read/credentials:write scope for the operation types present"
+          }
+        },
+        "operationId": "executeBatch"
+      }
+    },
+    "/quota": {
+      "get": {
+        "summary": "Get current API quota usage (#748)",
+        "description": "Returns the caller's daily and monthly quota usage for its subscription tier. Independent of rate limiting (X-RateLimit-* headers), which is a separate, rolling per-minute budget.",
+        "responses": {
+          "200": {
+            "description": "Current quota usage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "tier": {
+                      "type": "string",
+                      "enum": [
+                        "free",
+                        "pro",
+                        "enterprise"
+                      ]
+                    },
+                    "daily": {
+                      "type": "object",
+                      "properties": {
+                        "limit": {
+                          "type": "integer"
+                        },
+                        "used": {
+                          "type": "integer"
+                        },
+                        "remaining": {
+                          "type": "integer"
+                        },
+                        "resetAt": {
+                          "type": "integer",
+                          "description": "Unix seconds, next UTC midnight"
+                        }
+                      }
+                    },
+                    "monthly": {
+                      "type": "object",
+                      "properties": {
+                        "limit": {
+                          "type": "integer"
+                        },
+                        "used": {
+                          "type": "integer"
+                        },
+                        "remaining": {
+                          "type": "integer"
+                        },
+                        "resetAt": {
+                          "type": "integer",
+                          "description": "Unix seconds, 1st of next UTC month"
+                        }
+                      }
+                    },
+                    "overageMode": {
+                      "type": "string",
+                      "enum": [
+                        "block",
+                        "allow"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "operationId": "getQuota"
+      }
+    },
+    "/events/poll": {
+      "get": {
+        "summary": "Long-poll for contract events (#750)",
+        "description": "Alternative to the GET /events SSE stream for clients that cannot hold an open text/event-stream connection. Holds the request open until at least one matching event arrives or the timeout elapses, then responds once with a JSON batch and closes.",
+        "parameters": [
+          {
+            "name": "contractId",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Filter to events from one contract."
+          },
+          {
+            "name": "topic",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated topic filter, positional (e.g. IDENTITY,updated)."
+          },
+          {
+            "name": "timeout",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Requested timeout in milliseconds, clamped to [1000, LONG_POLL_MAX_TIMEOUT_MS] (default 30000, max 60000)."
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Ledger cursor to resume from; also accepted as a `lastEventId` or `since` query param."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One batch of matching events, or an empty batch if the request timed out first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "lastEventId": {
+                      "type": "string",
+                      "description": "Cursor to send back on the next call."
+                    },
+                    "count": {
+                      "type": "integer"
+                    },
+                    "timedOut": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "operationId": "pollEvents"
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-api-key",
+        "description": "API Key token (e.g. `secret_key:credentials:read,credentials:write` or admin key)."
+      },
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Bearer authorization header token."
+      }
+    },
+    "schemas": {
+      "Credential": {
+        "type": "object",
+        "required": [
+          "id",
+          "subject",
+          "issuer"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "cred-kyc-2026-001"
+          },
+          "subject": {
+            "type": "string",
+            "example": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"
+          },
+          "issuer": {
+            "type": "string",
+            "example": "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF"
+          },
+          "expiresAt": {
+            "type": "number",
+            "example": 1893456000
+          },
+          "revoked": {
+            "type": "boolean",
+            "example": false
+          },
+          "revokedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "schema": {
+            "type": "string",
+            "example": "https://schema.org/KYCCredential"
+          },
+          "claims": {
+            "type": "object"
+          },
+          "source": {
+            "type": "string",
+            "example": "http"
+          },
+          "expiry_notified_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "IssueCredentialRequest": {
+        "type": "object",
+        "required": [
+          "id",
+          "subject",
+          "issuer"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Unique identifier for the credential"
+          },
+          "subject": {
+            "type": "string",
+            "description": "Stellar public address of the credential subject"
+          },
+          "issuer": {
+            "type": "string",
+            "description": "Stellar public address of the credential issuer"
+          },
+          "expiresAt": {
+            "type": "number",
+            "description": "Unix timestamp in seconds (0 = no expiry)"
+          },
+          "schema": {
+            "type": "string",
+            "description": "Schema URI"
+          },
+          "claims": {
+            "type": "object",
+            "description": "Arbitrary claim dictionary"
+          }
+        }
+      },
+      "CredentialVerifyResponse": {
+        "type": "object",
+        "required": [
+          "verified"
+        ],
+        "properties": {
+          "verified": {
+            "type": "boolean",
+            "description": "True if valid, active, and unexpired"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "not_found",
+              "revoked",
+              "expired"
+            ],
+            "nullable": true
+          },
+          "credential": {
+            "$ref": "#/components/schemas/Credential"
+          }
+        }
+      },
+      "CredentialRevokeResponse": {
+        "type": "object",
+        "required": [
+          "revoked",
+          "credential"
+        ],
+        "properties": {
+          "revoked": {
+            "type": "boolean",
+            "example": true
+          },
+          "credential": {
+            "$ref": "#/components/schemas/Credential"
+          }
+        }
+      },
+      "PaginatedCredentials": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Credential"
+            }
+          },
+          "nextCursor": {
+            "type": "string",
+            "example": "cred-050",
+            "nullable": true
+          }
+        }
+      },
+      "Webhook": {
+        "type": "object",
+        "required": [
+          "id",
+          "url",
+          "events",
+          "active"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "whk_a1b2c3d4"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "example": "https://example.com/webhooks"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "example": [
+              "credential.issued",
+              "credential.revoked"
+            ]
+          },
+          "secret": {
+            "type": "string"
+          },
+          "authToken": {
+            "type": "string",
+            "nullable": true
+          },
+          "active": {
+            "type": "boolean",
+            "example": true
+          },
+          "description": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "RegisterWebhookRequest": {
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [
+              "*"
+            ]
+          },
+          "secret": {
+            "type": "string"
+          },
+          "authToken": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          }
+        }
+      },
+      "WebhookLog": {
+        "type": "object",
+        "required": [
+          "deliveryId",
+          "webhookId",
+          "event",
+          "success"
+        ],
+        "properties": {
+          "deliveryId": {
+            "type": "string",
+            "example": "del_123"
+          },
+          "webhookId": {
+            "type": "string",
+            "example": "whk_456"
+          },
+          "url": {
+            "type": "string"
+          },
+          "event": {
+            "type": "string",
+            "example": "credential.issued"
+          },
+          "statusCode": {
+            "type": "integer",
+            "example": 200
+          },
+          "success": {
+            "type": "boolean",
+            "example": true
+          },
+          "attempt": {
+            "type": "integer",
+            "example": 1
+          },
+          "durationMs": {
+            "type": "integer",
+            "example": 45
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "error": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "ServerInfo": {
+        "type": "object",
+        "required": [
+          "version",
+          "features",
+          "minSdkVersion"
+        ],
+        "properties": {
+          "version": {
+            "type": "string",
+            "example": "0.1.0"
+          },
+          "apiVersion": {
+            "type": "string",
+            "example": "v1"
+          },
+          "supportedVersions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "minSdkVersion": {
+            "type": "string",
+            "example": "0.1.0"
+          }
+        }
+      },
+      "HealthResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "contracts",
+          "circuitBreaker"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded"
+            ]
+          },
+          "apiVersion": {
+            "type": "string"
+          },
+          "supportedVersions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "deprecatedVersions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "defaultVersion": {
+            "type": "string"
+          },
+          "contracts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "boolean"
+            }
+          },
+          "circuitBreaker": {
+            "type": "object"
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "example": "INVALID_REQUEST"
+          },
+          "error": {
+            "type": "string",
+            "example": "unauthorized"
+          },
+          "message": {
+            "type": "string",
+            "example": "Request body must include a credential id."
+          },
+          "requiredScopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "missingScopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "details": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "field": {
+                  "type": "string"
+                },
+                "value": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

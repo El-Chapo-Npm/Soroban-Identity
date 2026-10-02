@@ -1,4 +1,5 @@
 import type { Credential } from "../../../sdk/src/types";
+import { BUILT_IN_TEMPLATES } from "../export/templates";
 
 interface ExportOptions {
   includeMetadata?: boolean;
@@ -75,9 +76,10 @@ export function exportCredentialsAsCSV(credentials: Credential[]): string {
 }
 
 /**
- * Export credentials as PDF with QR codes
- * Note: This requires a PDF library like pdfkit or similar
- * For now, returning a placeholder implementation
+ * Plain-text summary of credentials.
+ *
+ * @deprecated This is not a real PDF. Use `credentialsToPdf` from
+ * `src/export` (jsPDF, with verification QR codes and templates) instead.
  */
 export function exportCredentialsAsPDF(credentials: Credential[]): Blob {
   // This would require a PDF library in production
@@ -157,7 +159,7 @@ export async function exportCredentialsWithProgress(
         break;
 
       case "pdf":
-        content = exportCredentialsAsPDF(credentials);
+        content = await (await import("../export/pdf")).credentialsToPdf(credentials, BUILT_IN_TEMPLATES[0]);
         filename = `credentials_export_${Date.now()}.pdf`;
         mimeType = "application/pdf";
         break;

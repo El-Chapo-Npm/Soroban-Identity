@@ -6,6 +6,7 @@ import { ExpiryNotificationJob } from './expiry.js';
 import { MetricsAggregator, MetricsService } from './metrics.js';
 import { AnalyticsService } from './analytics.js';
 import { SorobanClient } from './soroban.js';
+import { logger, withRequestLogging } from './logger.js';
 import { DidCache } from './did-cache.js';
 import { WebhookDeliveryService } from './webhooks.js';
 import { ApiKeyService } from './api-keys.js';
@@ -99,6 +100,9 @@ const expiryJob = new ExpiryNotificationJob(config, soroban);
 
 if (process.env.DISABLE_EXPIRY_JOB !== 'true') expiryJob.start();
 
+const server = http.createServer(withRequestLogging(createApp({ config, soroban, metrics, metricsAggregator })));
+server.listen(config.port, () => {
+  logger.info(`Soroban Identity server listening on :${config.port}`);
 const server = http.createServer(createApp({ config, soroban, metrics, metricsAggregator, analytics }));
 const apiKeyService = new ApiKeyService(config);
 

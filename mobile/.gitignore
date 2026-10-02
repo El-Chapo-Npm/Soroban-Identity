@@ -1,0 +1,4 @@
+node_modules/
+.expo/
+.env
+play-service-account.json

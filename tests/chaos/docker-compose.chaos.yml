@@ -1,0 +1,25 @@
+# Chaos test harness: API server and its dependencies are routed through Toxiproxy
+services:
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    ports: ["8474:8474", "3002:3002", "6380:6380", "8001:8001"]
+
+  redis:
+    image: redis:7-alpine
+
+  rpc-mock:
+    image: node:20-alpine
+    command: ["node", "/mock/rpc-mock.mjs"]
+    volumes: ["./rpc-mock.mjs:/mock/rpc-mock.mjs:ro"]
+
+  api:
+    build:
+      context: ../../server
+      dockerfile: ../tests/chaos/Dockerfile.api
+    restart: unless-stopped
+    environment:
+      PORT: "3001"
+      REDIS_URL: redis://toxiproxy:6380
+      STELLAR_RPC_URL: http://toxiproxy:8001
+    tmpfs: ["/tmp:size=16m"]
+    depends_on: [toxiproxy, redis, rpc-mock]

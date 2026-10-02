@@ -7,6 +7,7 @@ import { ThemeProvider } from "./context/ThemeContext";
 import { KeyboardShortcutsProvider } from "./context/KeyboardShortcutsContext";
 import "./i18n";
 import "./index.css";
+import "./styles/index.css";
 
 // Initialize theme before React renders to prevent flicker
 (function initializeTheme() {

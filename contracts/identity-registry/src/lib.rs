@@ -7,6 +7,8 @@ use soroban_sdk::{
 };
 use soroban_sdk::xdr::ToXdr;
 
+pub mod recovery;
+
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 #[contracterror]
@@ -30,6 +32,18 @@ pub enum ContractError {
     BatchTooLarge = 15,
     /// `create_dids_batch` was called with an empty entry list.
     EmptyBatch = 16,
+    /// `set_recovery_address` / `initiate_recovery` called but no recovery address is stored.
+    RecoveryNotSet = 17,
+    /// `initiate_recovery` called while a recovery request is already pending.
+    RecoveryPending = 18,
+    /// `cancel_recovery` or `recover_did` called but no pending recovery exists.
+    NoPendingRecovery = 19,
+    /// `recover_did` called before the timelock window has elapsed.
+    RecoveryTimelockActive = 20,
+    /// The caller is not the registered recovery address for the target DID.
+    RecoveryNotAuthorized = 21,
+    /// `recover_did` would transfer the DID to an address that already owns one.
+    RecoveryTargetExists = 22,
 }
 
 /// Version returned by `ping` for deployment health checks.
@@ -54,6 +68,12 @@ const DID_STELLAR_PREFIX: &[u8] = b"did:stellar:";
 /// ~1 year in ledgers (5-second ledger close time).
 /// Used as the TTL extension on every persistent read/write.
 const TTL_LEDGERS: u32 = 6_312_000;
+/// Extend a persistent entry's TTL only once it has dropped below this many
+/// ledgers (#866). With the threshold equal to the target, every access
+/// re-extended the TTL and paid rent again; now an entry that is read or
+/// written often is extended at most about once every 30 days
+/// (518_400 ledgers at 5 s), while never having less than ~11 months left.
+const TTL_BUMP_THRESHOLD: u32 = TTL_LEDGERS - 518_400;
 
 /// Maximum number of service endpoints allowed on a DID document.
 /// Exceeding this limit returns [`ContractError::MaxServicesReached`].
@@ -62,6 +82,17 @@ const MAX_SERVICES: u32 = 10;
 /// Maximum number of entries accepted by [`IdentityRegistry::create_dids_batch`]
 /// in a single call, chosen to stay well within Soroban instruction limits.
 pub const MAX_BATCH_DIDS: u32 = 50;
+/// Maximum depth of a delegation chain, including the direct parent edge.
+pub const MAX_DELEGATION_DEPTH: u32 = 3;
+const DELEGATION: Symbol = symbol_short!("DELEG");
+const DELEGATION_CHILDREN: Symbol = symbol_short!("DELGCH");
+const DELEGATION_PARENT: Symbol = symbol_short!("DELGPAR");
+const MAX_DELEGATION_SCOPE_LEN: u32 = 128;
+
+/// Maximum number of entries accepted by [`IdentityRegistry::update_dids_batch`]
+/// in a single call. Set lower than creation batch to account for additional
+/// validation overhead (existence checks, deactivation status).
+pub const MAX_BATCH_UPDATE_SIZE: u32 = 20;
 
 // ── Data types ────────────────────────────────────────────────────────────────
 
@@ -90,6 +121,20 @@ pub struct DidDocument {
     pub updated_at: u64,
     pub active: bool,
     pub services: Vec<ServiceEndpoint>,
+    /// Parent controller. A root DID stores its own controller here.
+    pub parent: Address,
+    pub delegation_depth: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Delegation {
+    pub parent: Address,
+    pub child: Address,
+    pub scope: String,
+    pub depth: u32,
+    pub created_at: u64,
+    pub active: bool,
 }
 
 #[contract]
@@ -309,7 +354,7 @@ impl IdentityRegistry {
         doc.updated_at = env.ledger().timestamp();
         doc.services.push_back(service.clone());
         storage.set(&key, &doc);
-        storage.extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+        storage.extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_LEDGERS);
         env.events().publish((IDENTITY, symbol_short!("svc_add")), (EVENT_VERSION, controller, doc.updated_at));
         Ok(())
     }
@@ -330,12 +375,137 @@ impl IdentityRegistry {
         doc.metadata = metadata;
         doc.updated_at = env.ledger().timestamp();
         storage.set(&key, &doc);
-        storage.extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+        storage.extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_LEDGERS);
         let mut hash_input = Self::string_to_bytes(&env, &doc.id);
         hash_input.extend_from_array(&doc.updated_at.to_be_bytes());
         let meta_hash: BytesN<32> = env.crypto().sha256(&hash_input).into();
         env.events().publish((IDENTITY, symbol_short!("updated")), (EVENT_VERSION, controller, meta_hash));
         Ok(())
+    }
+
+    /// Updates multiple DIDs (up to [`MAX_BATCH_UPDATE_SIZE`]) in one transaction.
+    /// Each controller must sign. All updates are validated before any writes occur,
+    /// ensuring atomic success or failure. Returns a vector of results indicating
+    /// success or failure for each DID update.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `entries` - A vector of tuples, each containing an address (controller) and
+    ///   the new metadata map for that DID.
+    ///
+    /// # Returns
+    /// A vector of `Result<(), ContractError>` in the same order as `entries`.
+    /// Each element indicates whether the corresponding update succeeded or failed.
+    ///
+    /// # Errors
+    /// Returns [`ContractError::ContractPaused`] if the contract is paused.
+    /// Returns [`ContractError::EmptyBatch`] if the entries vector is empty.
+    /// Returns [`ContractError::BatchTooLarge`] if entries exceed [`MAX_BATCH_UPDATE_SIZE`].
+    ///
+    /// Individual update failures are captured in the returned vector and do not
+    /// halt processing of remaining entries. Common per-entry errors include:
+    /// - [`ContractError::DidNotFound`] if the DID doesn't exist
+    /// - [`ContractError::DidDeactivated`] if the DID is deactivated
+    /// - [`ContractError::EmptyMetadata`] if metadata is empty
+    /// - [`ContractError::MetadataTooLong`] or [`ContractError::MetadataTooLarge`] on validation failure
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let entries = vec![
+    ///     &env,
+    ///     (user1.clone(), metadata1.clone()),
+    ///     (user2.clone(), metadata2.clone()),
+    /// ];
+    /// let results = contract.update_dids_batch(&entries);
+    /// // results[0] -> Ok(()) or Err(...)
+    /// // results[1] -> Ok(()) or Err(...)
+    /// ```
+    pub fn update_dids_batch(
+        env: Env,
+        entries: Vec<(Address, Map<String, String>)>,
+    ) -> Result<Vec<Result<(), ContractError>>, ContractError> {
+        Self::require_not_paused(&env)?;
+
+        // Validate batch size constraints
+        if entries.is_empty() {
+            return Err(ContractError::EmptyBatch);
+        }
+        if entries.len() > MAX_BATCH_UPDATE_SIZE {
+            return Err(ContractError::BatchTooLarge);
+        }
+
+        let storage = env.storage().persistent();
+        let now = env.ledger().timestamp();
+        let mut results = Vec::new(&env);
+
+        // Phase 1: Validate all entries before applying any updates
+        // This ensures we can provide meaningful per-entry error information
+        // while still validating the entire batch upfront
+        let mut validation_results = Vec::new(&env);
+        
+        for (controller, metadata) in entries.iter() {
+            // Require authorization for each controller
+            controller.require_auth();
+
+            // Validate this entry
+            let validation_result: Result<(), ContractError> = (|| {
+                if metadata.is_empty() {
+                    return Err(ContractError::EmptyMetadata);
+                }
+                Self::validate_metadata(&metadata)?;
+                
+                let key = Self::did_key(&env, &controller);
+                let doc: DidDocument = storage.get(&key).ok_or(ContractError::DidNotFound)?;
+                
+                if !doc.active {
+                    return Err(ContractError::DidDeactivated);
+                }
+                
+                Ok(())
+            })();
+            
+            validation_results.push_back(validation_result);
+        }
+
+        // Phase 2: Apply updates for entries that passed validation
+        for (i, (controller, metadata)) in entries.iter().enumerate() {
+            // Check if validation passed for this entry
+            let validation_passed = validation_results.get(i).unwrap_or(Err(ContractError::DidNotFound));
+            
+            if validation_passed.is_err() {
+                // Validation failed, record the error and skip update
+                results.push_back(validation_passed);
+                continue;
+            }
+
+            // Validation passed, perform the update
+            let update_result: Result<(), ContractError> = (|| {
+                let key = Self::did_key(&env, &controller);
+                let mut doc: DidDocument = storage.get(&key).ok_or(ContractError::DidNotFound)?;
+                
+                doc.metadata = metadata.clone();
+                doc.updated_at = now;
+                
+                storage.set(&key, &doc);
+                storage.extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+                
+                // Emit update event with metadata hash
+                let mut hash_input = Self::string_to_bytes(&env, &doc.id);
+                hash_input.extend_from_array(&doc.updated_at.to_be_bytes());
+                let meta_hash: BytesN<32> = env.crypto().sha256(&hash_input).into();
+                
+                env.events().publish(
+                    (IDENTITY, symbol_short!("updated")),
+                    (EVENT_VERSION, controller.clone(), meta_hash),
+                );
+                
+                Ok(())
+            })();
+            
+            results.push_back(update_result);
+        }
+
+        Ok(results)
     }
 
     /// Deactivates a DID. Only its controller can call this.
@@ -356,7 +526,7 @@ impl IdentityRegistry {
         doc.active = false;
         doc.updated_at = env.ledger().timestamp();
         storage.set(&key, &doc);
-        storage.extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+        storage.extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_LEDGERS);
         let count: u32 = env.storage().instance().get(&DID_COUNT).unwrap_or(0);
         if count > 0 {
             env.storage().instance().set(&DID_COUNT, &(count - 1));
@@ -404,7 +574,7 @@ impl IdentityRegistry {
         doc.updated_at = env.ledger().timestamp();
 
         storage.set(&key, &doc);
-        storage.extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+        storage.extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_LEDGERS);
 
         // Increment active DID count
         let count: u32 = env.storage().instance().get(&DID_COUNT).unwrap_or(0);
@@ -419,10 +589,9 @@ impl IdentityRegistry {
 
     pub fn resolve_did(env: Env, controller: Address) -> Result<DidDocument, ContractError> {
         let key = Self::did_key(&env, &controller);
-        if env.storage().persistent().has(&key) {
-            env.storage().persistent().extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
-        }
+        // Read once and extend the TTL only on a hit, instead of has() + get().
         let doc: DidDocument = env.storage().persistent().get(&key).ok_or(ContractError::DidNotFound)?;
+        env.storage().persistent().extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_LEDGERS);
         if !doc.active {
             return Err(ContractError::DidDeactivated);
         }
@@ -431,11 +600,11 @@ impl IdentityRegistry {
 
     pub fn has_active_did(env: Env, controller: Address) -> bool {
         let key = Self::did_key(&env, &controller);
-        if env.storage().persistent().has(&key) {
-            env.storage().persistent().extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
-        }
         match env.storage().persistent().get::<_, DidDocument>(&key) {
-            Some(doc) => doc.active,
+            Some(doc) => {
+                env.storage().persistent().extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_LEDGERS);
+                doc.active
+            }
             None => false,
         }
     }
@@ -468,6 +637,92 @@ impl IdentityRegistry {
         }
     }
 
+    // ── Recovery (#879) ───────────────────────────────────────────────────────
+
+    /// Register a recovery address for the caller's DID.
+    /// The recovery address can later initiate a time-locked ownership transfer.
+    pub fn set_recovery_address(
+        env: Env,
+        controller: Address,
+        recovery_addr: Address,
+    ) -> Result<(), ContractError> {
+        controller.require_auth();
+        Self::require_not_paused(&env)?;
+        let key = Self::did_key(&env, &controller);
+        if !env.storage().persistent().has(&key) {
+            return Err(ContractError::DidNotFound);
+        }
+        recovery::store_recovery_address(&env, &controller, &recovery_addr);
+        Ok(())
+    }
+
+    /// Return the registered recovery address for `controller`, or `None`.
+    pub fn get_recovery_address(env: Env, controller: Address) -> Option<Address> {
+        recovery::load_recovery_address(&env, &controller)
+    }
+
+    /// Phase 1: recovery address initiates a time-locked challenge to transfer the DID.
+    pub fn initiate_recovery(
+        env: Env,
+        recovery_addr: Address,
+        controller: Address,
+        new_controller: Address,
+    ) -> Result<(), ContractError> {
+        recovery_addr.require_auth();
+        Self::require_not_paused(&env)?;
+        recovery::initiate(&env, &recovery_addr, &controller, &new_controller)
+    }
+
+    /// Phase 1b: original DID owner responds to cancel a pending recovery request.
+    pub fn cancel_recovery(env: Env, controller: Address) -> Result<(), ContractError> {
+        controller.require_auth();
+        recovery::cancel(&env, &controller)
+    }
+
+    /// Phase 2: after the timelock elapses, recovery address completes the transfer.
+    /// The DID document is re-keyed to `new_controller`; the original key is removed.
+    pub fn recover_did(
+        env: Env,
+        recovery_addr: Address,
+        controller: Address,
+    ) -> Result<(), ContractError> {
+        recovery_addr.require_auth();
+        Self::require_not_paused(&env)?;
+        let new_controller = recovery::finalize(&env, &recovery_addr, &controller)?;
+
+        // Guard: new_controller must not already own a DID.
+        let new_key = Self::did_key(&env, &new_controller);
+        if env.storage().persistent().has(&new_key) {
+            return Err(ContractError::RecoveryTargetExists);
+        }
+
+        // Re-key the DID document from old controller to new controller.
+        let old_key = Self::did_key(&env, &controller);
+        let mut doc: DidDocument = env
+            .storage()
+            .persistent()
+            .get(&old_key)
+            .ok_or(ContractError::DidNotFound)?;
+        doc.controller = new_controller.clone();
+        doc.updated_at = env.ledger().timestamp();
+        env.storage().persistent().set(&new_key, &doc);
+        env.storage().persistent().extend_ttl(&new_key, TTL_LEDGERS, TTL_LEDGERS);
+        env.storage().persistent().remove(&old_key);
+        env.events().publish(
+            (IDENTITY, symbol_short!("rec_done")),
+            (EVENT_VERSION, controller, new_controller, doc.updated_at),
+        );
+        Ok(())
+    }
+
+    /// Return the pending recovery request for `controller`, if any.
+    pub fn get_pending_recovery(
+        env: Env,
+        controller: Address,
+    ) -> Option<recovery::RecoveryRequest> {
+        recovery::get_pending(&env, &controller)
+    }
+
     // ── Service endpoints ─────────────────────────────────────────────────────
     pub fn remove_service(env: Env, controller: Address, service_id: String) -> Result<(), ContractError> {
         controller.require_auth();
@@ -490,7 +745,7 @@ impl IdentityRegistry {
         doc.services = updated;
         doc.updated_at = env.ledger().timestamp();
         env.storage().persistent().set(&key, &doc);
-        env.storage().persistent().extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+        env.storage().persistent().extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_LEDGERS);
         env.events().publish((IDENTITY, symbol_short!("svc_rmvd")), (EVENT_VERSION, controller, service_id));
         Ok(())
     }
@@ -558,9 +813,11 @@ impl IdentityRegistry {
             updated_at: now,
             active: true,
             services: Vec::new(env),
+            parent: controller.clone(),
+            delegation_depth: 0,
         };
         storage.set(&key, &doc);
-        storage.extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+        storage.extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_LEDGERS);
         let count: u32 = env.storage().instance().get(&DID_COUNT).unwrap_or(0);
         env.storage().instance().set(&DID_COUNT, &(count + 1));
         let total: u32 = env.storage().instance().get(&TOTAL_DIDS).unwrap_or(0);
@@ -1242,5 +1499,117 @@ mod tests {
         let mut entries = Vec::new(&env);
         entries.push_back((Address::generate(&env), Map::new(&env)));
         assert_eq!(client.try_create_dids_batch(&entries), Err(Ok(ContractError::ContractPaused)));
+    }
+
+    #[test]
+    fn test_hierarchical_delegation_updates_document_and_chain() {
+        let (env, client) = setup();
+        let root = Address::generate(&env);
+        let child = Address::generate(&env);
+        let grandchild = Address::generate(&env);
+        client.create_did(&root, &Map::new(&env));
+        client.create_did(&child, &Map::new(&env));
+        client.create_did(&grandchild, &Map::new(&env));
+
+        client.delegate_authority(&root, &child, &String::from_str(&env, "issue"));
+        client.delegate_authority(&child, &grandchild, &String::from_str(&env, "verify"));
+
+        let doc = client.resolve_did(&grandchild);
+        assert_eq!(doc.parent, child.clone());
+        assert_eq!(doc.delegation_depth, 2);
+        assert!(client.is_delegation_authorized(&root, &grandchild));
+        assert_eq!(client.get_delegation_chain(&grandchild).len(), 2);
+        assert_eq!(client.get_delegations(&root).len(), 1);
+    }
+
+    #[test]
+    fn test_delegation_depth_is_limited_to_three_edges() {
+        let (env, client) = setup();
+        let root = Address::generate(&env);
+        let first = Address::generate(&env);
+        let second = Address::generate(&env);
+        let third = Address::generate(&env);
+        let fourth = Address::generate(&env);
+        for address in [&root, &first, &second, &third, &fourth] {
+            client.create_did(address, &Map::new(&env));
+        }
+        let scope = String::from_str(&env, "all");
+        client.delegate_authority(&root, &first, &scope);
+        client.delegate_authority(&first, &second, &scope);
+        client.delegate_authority(&second, &third, &scope);
+        assert_eq!(
+            client.try_delegate_authority(&third, &fourth, &scope),
+            Err(Ok(ContractError::DelegationDepthExceeded))
+        );
+    }
+
+    #[test]
+    fn test_delegation_rejects_cycles_and_duplicate_parent() {
+        let (env, client) = setup();
+        let parent = Address::generate(&env);
+        let child = Address::generate(&env);
+        let other_parent = Address::generate(&env);
+        for address in [&parent, &child, &other_parent] {
+            client.create_did(address, &Map::new(&env));
+        }
+        let scope = String::from_str(&env, "read");
+        assert_eq!(
+            client.try_delegate_authority(&parent, &parent, &scope),
+            Err(Ok(ContractError::DelegationCycle))
+        );
+        client.delegate_authority(&parent, &child, &scope);
+        assert_eq!(
+            client.try_delegate_authority(&other_parent, &child, &scope),
+            Err(Ok(ContractError::DelegationAlreadyExists))
+        );
+    }
+
+    #[test]
+    fn test_revoke_delegation_clears_child_parent_and_authorization() {
+        let (env, client) = setup();
+        let parent = Address::generate(&env);
+        let child = Address::generate(&env);
+        client.create_did(&parent, &Map::new(&env));
+        client.create_did(&child, &Map::new(&env));
+        client.delegate_authority(&parent, &child, &String::from_str(&env, "read"));
+        client.revoke_delegation(&parent, &child);
+        let doc = client.resolve_did(&child);
+        assert_eq!(doc.parent, child.clone());
+        assert_eq!(doc.delegation_depth, 0);
+        assert!(!client.is_delegation_authorized(&parent, &child));
+        assert_eq!(
+            client.try_revoke_delegation(&parent, &child),
+            Err(Ok(ContractError::DelegationRevoked))
+        );
+    }
+
+    /// #866: an access only extends the TTL once it has dropped below
+    /// `TTL_BUMP_THRESHOLD`, instead of on every call.
+    #[test]
+    fn test_reads_extend_ttl_only_below_threshold() {
+        use soroban_sdk::testutils::{storage::Persistent as _, Ledger as _};
+        let (env, client) = setup();
+        let controller = Address::generate(&env);
+        client.create_did(&controller, &Map::new(&env));
+        let ttl = || {
+            env.as_contract(&client.address, || {
+                let key = IdentityRegistry::did_key(&env, &controller);
+                env.storage().persistent().get_ttl(&key)
+            })
+        };
+        let full = ttl();
+        // Keep the contract instance itself alive across the ledger jumps below.
+        env.as_contract(&client.address, || {
+            env.storage().instance().extend_ttl(6_000_000, 6_000_000)
+        });
+
+        env.ledger().with_mut(|li| li.sequence_number += 1_000);
+        client.resolve_did(&controller);
+        assert!(client.has_active_did(&controller));
+        assert_eq!(ttl(), full - 1_000);
+
+        env.ledger().with_mut(|li| li.sequence_number += 518_400);
+        client.resolve_did(&controller);
+        assert_eq!(ttl(), full);
     }
 }

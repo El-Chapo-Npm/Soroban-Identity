@@ -30,7 +30,17 @@ The server configuration can be customized using the following environment varia
 | `EXPIRY_CONCURRENCY` | Maximum concurrent credential expiry notifications. Controls parallelism to prevent event loop blocking. | `8` |
 | `RATE_LIMIT_WHITELIST` | Comma-separated IPs or CIDR ranges exempt from rate limiting. | unset |
 | `RATE_LIMIT_MAX_BUCKETS` | Bucket count that triggers eviction of expired windows. | `10000` |
+| `RATE_LIMIT_IP_PER_MINUTE` | Sustained per-IP request rate (token refill). | `300` |
+| `RATE_LIMIT_IP_BURST` | Extra per-IP requests allowed in a spike. | `60` |
+| `RATE_LIMIT_USER_PER_MINUTE` | Sustained per-API-key/user request rate. | `600` |
+| `RATE_LIMIT_USER_BURST` | Extra per-user requests allowed in a spike. | `120` |
+| `RATE_LIMIT_PREMIUM_TIERS` | Tiers that bypass all rate limits. | `premium,enterprise` |
+| `RATE_LIMIT_PREMIUM_KEYS` | Comma-separated API key ids that bypass all rate limits. | unset |
 | `TRUST_PROXY` | Trust `X-Forwarded-For` when resolving the client IP. | `false` |
+
+## Container image and health checks
+
+Build the image from the repository root with `docker build -f server/Dockerfile -t soroban-identity .`. The image reports its health through `HEALTHCHECK` using `scripts/healthcheck.mjs` against `/live`. `/ready` and `/health` are available for readiness and detailed status. See [docs/container-health-checks.md](../docs/container-health-checks.md) for probe semantics, the Docker, compose, Kubernetes and ECS settings, and how to verify restarts.
 
 ## Rate Limiting
 
@@ -316,6 +326,37 @@ answered with `X-RateLimit-Bypass: whitelist`.
 Whitelist matching uses the socket address unless `TRUST_PROXY=true`. Without
 that, a caller could whitelist itself simply by sending an `X-Forwarded-For`
 header.
+
+### Multi-strategy limits (#956)
+
+`src/middleware/ratelimit.js` (types in `ratelimit.d.ts`) runs four budgets in
+order; a request must pass every one:
+
+1. **Premium bypass**: callers whose authenticated tier is in
+   `RATE_LIMIT_PREMIUM_TIERS`, or whose API key id is in
+   `RATE_LIMIT_PREMIUM_KEYS`, skip every check and get
+   `X-RateLimit-Bypass: premium`. The client-supplied `X-User-Tier` header
+   never grants a bypass.
+2. **Per-IP**: a token bucket per client address.
+3. **Per-user**: a token bucket per API key / user id, so rotating hosts does
+   not multiply an account's budget.
+4. **Endpoint and tier**: the rules described above.
+
+Per-IP and per-user buckets refill at `*_PER_MINUTE` and hold `*_PER_MINUTE +
+*_BURST` tokens, so an idle client can absorb a short spike. A denial from
+either returns `429` with `scope: "ip"` or `scope: "user"` and no upgrade
+prompt. `X-RateLimit-*` headers always describe the budget closest to
+exhaustion.
+
+### Metrics dashboard
+
+Every decision increments `rate_limit_decisions_total{outcome, scope}`
+(`outcome` is `allowed`, `denied` or `bypass`). Import
+`infra/monitoring/grafana/soroban-identity-rate-limits.json` into Grafana for
+decision rate, denials by scope, denial percentage, bypasses and 429s by route.
+`GET /admin/rate-limits` (`admin:read`) returns the live picture: bucket
+counts, decision totals, violations by scope and the 200 most recent
+violations.
 
 ### Violations and memory
 

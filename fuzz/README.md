@@ -100,6 +100,20 @@ a bug the fuzzer would otherwise walk straight past.
 Beyond reachability, generate a line-level report for a specific target with
 the [coverage instructions](#coverage-reports) below.
 
+### 4. `fuzz_verify_credentials_batch`
+
+Arbitrary mixes of issued, revoked, unknown, and repeated credential ids,
+including batches over the 50-id cap and both `fail_fast` modes.
+
+### 5. `fuzz_revoke_and_delegate`
+
+Arbitrary revoke and delegation sequences against issued credentials.
+
+### 6. `fuzz_resolve_external_did`
+
+Arbitrary DID bytes, documents, sibling lists, and chain selectors against
+the oracle bridge. A rejected proof must not be treated as a cached document.
+
 ### Known gaps
 
 - Administrative entry points (issuer allow-listing, admin transfer) are
@@ -107,6 +121,8 @@ the [coverage instructions](#coverage-reports) below.
 - Each target drives one contract in isolation; cross-contract sequences — a
   credential issued against a DID that is deactivated mid-flight — are not yet
   modelled.
+- Schema registry, revocation registry, selective disclosure, and governance
+  still have no libFuzzer target. See `FINDINGS.md`.
 
 ## Interpreting Results
 

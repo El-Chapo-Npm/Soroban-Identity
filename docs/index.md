@@ -9,6 +9,7 @@ Soroban Identity provides identity, credential, reputation, and selective-disclo
 - [API server](/api-server) — configure and operate the HTTP service.
 - [Migration guides](/migrations/) — upgrade safely between major versions.
 - [SDK tutorials](/tutorials/) — step-by-step guides with live sandboxes.
+- [CLI](https://github.com/El-Chapo-Npm/Soroban-Identity/tree/main/cli#readme) — manage DIDs and credentials from the terminal with `soroban-id`.
 - [Video documentation](/videos/) — video walkthroughs and advanced topics.
 - [Architecture decision records](/adr/) — why the system is built the way it is.
 - [Changelog and releases](/changelog-and-releases) — commit conventions and release flow.

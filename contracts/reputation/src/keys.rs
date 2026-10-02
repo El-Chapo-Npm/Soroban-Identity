@@ -22,3 +22,26 @@ pub const MAX_SCORE: i128 = 100;
 pub fn is_valid_score(score: i128) -> bool {
     score >= MIN_SCORE && score <= MAX_SCORE
 }
+
+/// Number of score buckets used by the aggregation helpers.
+///
+/// Scores are integers in `[MIN_SCORE, MAX_SCORE]`, so a fixed-size histogram
+/// lets the aggregation queries compute averages and percentiles in a single
+/// pass without repeatedly scanning the full record set.
+pub const SCORE_BUCKETS: usize = (MAX_SCORE - MIN_SCORE + 1) as usize;
+
+/// Maps a valid `score` to its histogram bucket index.
+///
+/// Returns `None` for out-of-range scores so callers can skip malformed
+/// entries instead of panicking on the subtraction below.
+pub fn score_bucket(score: i128) -> Option<usize> {
+    if !is_valid_score(score) {
+        return None;
+    }
+    Some((score - MIN_SCORE) as usize)
+}
+
+/// Converts a histogram bucket index back into the score it represents.
+pub fn bucket_score(bucket: usize) -> i128 {
+    MIN_SCORE + bucket as i128
+}

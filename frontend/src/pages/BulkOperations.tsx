@@ -1,6 +1,12 @@
 import React, { useState, useRef, useMemo } from "react";
 import { StrKey } from "@stellar/stellar-sdk";
 import type { CredentialType } from "../../../sdk/src/types";
+import {
+  REVOCATION_REASONS,
+  REVOCATION_REASON_LABELS,
+  RevocationReason,
+  normalizeRevocationReason,
+} from "../../../sdk/src/types";
 import { CredentialClient } from "../../../sdk/src";
 import { getNetworkConfig } from "../network";
 import { useWalletContext } from "../context/WalletContext";
@@ -217,7 +223,11 @@ export const BulkOperations: React.FC = () => {
       const rowNum = index + 1;
       const cols = parseCsvLine(line);
       const id = cols[0] || "";
-      const reason = cols[1] || "Bulk revocation";
+      const rawReason = cols[1]?.trim() || RevocationReason.AdminRevoked;
+      // #937: the contract only accepts its own enum variants, so an unknown
+      // reason is reported as a row error instead of producing a transaction
+      // that the host rejects.
+      const reason = normalizeRevocationReason(rawReason);
       const errors: string[] = [];
 
       if (!id) {
@@ -226,10 +236,16 @@ export const BulkOperations: React.FC = () => {
         errors.push("Invalid 32-byte hex Credential ID format (must be 64 hex characters)");
       }
 
+      if (!reason) {
+        errors.push(
+          `Unknown revocation reason "${rawReason}" — use one of: ${REVOCATION_REASONS.join(", ")}`
+        );
+      }
+
       return {
         rowNumber: rowNum,
         credentialId: id.trim(),
-        reason,
+        reason: reason ?? rawReason,
         isValid: errors.length === 0,
         errors,
       };
@@ -310,9 +326,24 @@ export const BulkOperations: React.FC = () => {
             });
           } else {
             const row = item as RevocationRow;
-            // Revocation call
+            // #937: the reason must be one of the contract's enum variants, so a
+            // typo in the CSV is reported instead of revoking with a symbol the
+            // contract cannot decode.
+            const reason = normalizeRevocationReason(row.reason);
+            if (!reason) {
+              currentResults.push({
+                rowNumber: row.rowNumber,
+                idOrSubject: row.credentialId,
+                type: "Revocation",
+                status: "failure",
+                message: `Unknown revocation reason "${row.reason ?? ""}" — use one of: ${REVOCATION_REASONS.join(", ")}`,
+                txHash: "-",
+                timestamp: new Date().toISOString(),
+              });
+              continue;
+            }
             try {
-              await credentialClient.revokeCredential(caller, row.credentialId);
+              await credentialClient.revokeCredential(caller, row.credentialId, reason);
             } catch {
               // Simulating on testnet if account is mock
             }
@@ -321,7 +352,7 @@ export const BulkOperations: React.FC = () => {
               idOrSubject: row.credentialId,
               type: "Revocation",
               status: "success",
-              message: `Revoked: ${row.reason || "N/A"}`,
+              message: `Revoked (${REVOCATION_REASON_LABELS[reason]})`,
               txHash: `0x${row.credentialId.slice(0, 16)}...`,
               timestamp: new Date().toISOString(),
             });

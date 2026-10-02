@@ -15,27 +15,43 @@ spec:
       labels:
         app: soroban-identity
     spec:
+      # Longer than the server's graceful shutdown timeout (30 s by default).
+      terminationGracePeriodSeconds: 35
       containers:
         - name: server
           image: ghcr.io/el-chapo-npm/soroban-identity:${IMAGE_TAG}
           ports:
             - name: http
               containerPort: 3001
+          # Probe semantics: docs/container-health-checks.md (#883).
+          # Startup: holds off the other probes until the process first
+          # answers, allowing up to 30 x 2 s = 60 s for boot.
+          startupProbe:
+            httpGet:
+              path: /live
+              port: http
+            periodSeconds: 2
+            timeoutSeconds: 3
+            failureThreshold: 30
+          # Readiness: /ready checks the dependencies a request needs
+          # (storage, Soroban RPC) and takes the pod out of the Service while
+          # they are down, without restarting it.
           readinessProbe:
             httpGet:
-              path: /health
+              path: /ready
               port: http
-            initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 3
             failureThreshold: 3
+          # Liveness: /live never touches a dependency, so only a hung or
+          # crashed process gets restarted, not a pod whose RPC is down.
           livenessProbe:
             httpGet:
-              path: /health
+              path: /live
               port: http
-            initialDelaySeconds: 20
             periodSeconds: 20
             timeoutSeconds: 3
+            failureThreshold: 3
           envFrom:
             - secretRef:
                 name: soroban-identity-secrets

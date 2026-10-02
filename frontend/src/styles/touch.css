@@ -1,0 +1,53 @@
+/* ── Touch targets (#882) ────────────────────────────────────────────────────
+   Every control is at least 44 × 44 CSS px (WCAG 2.5.5, Apple HIG), which also
+   covers the many buttons that set their own padding inline: min-height and
+   min-width still apply on top of inline padding.
+
+   Links inside running text are exempt (WCAG 2.5.5 "inline" exception). */
+
+button,
+select,
+[role="button"],
+[role="tab"],
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not(
+    [type="hidden"]
+  ) {
+  min-height: 44px;
+}
+
+button,
+[role="button"],
+[role="tab"] {
+  min-width: 44px;
+  touch-action: manipulation;
+}
+
+/* Centre the label now that short buttons are taller than their text. */
+button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+}
+
+/* Checkboxes and radios keep their native size; their label is the target. */
+label:has(> input[type="checkbox"]),
+label:has(> input[type="radio"]) {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  cursor: pointer;
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  width: 1.125rem;
+  height: 1.125rem;
+}
+
+/* Stand-alone links used as actions (e.g. "Deployment guide"). */
+a[href]:not(p a):not(li a):not(span a) {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+}

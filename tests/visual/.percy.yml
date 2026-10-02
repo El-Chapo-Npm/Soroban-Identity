@@ -1,0 +1,13 @@
+version: 2
+snapshot:
+  # Responsive breakpoints: mobile, tablet, desktop
+  widths: [375, 768, 1280]
+  min-height: 1024
+  percy-css: |
+    /* Hide dynamic content that causes false positives */
+    [data-visual-ignore], time, .timestamp { visibility: hidden !important; }
+discovery:
+  network-idle-timeout: 250
+diff:
+  # Acceptable difference threshold (0-1). Changes below this are auto-approved.
+  sensitivity: 0.1

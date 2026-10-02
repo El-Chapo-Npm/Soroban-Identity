@@ -1,0 +1,7 @@
+# cargo-mutants configuration (see tests/mutation/README.md)
+# Operators enabled by default: arithmetic (+ - * /), logical (&& ||),
+# comparison/conditionals (== != < > <= >=), boolean returns and early returns.
+exclude_globs = ["**/test.rs", "**/tests/**", "**/test_*.rs", "target/**"]
+exclude_re = ["impl Debug", "impl Display", "fmt\\("]
+timeout_multiplier = 2.0
+test_tool = "cargo"
