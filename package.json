@@ -11,5 +11,6 @@
     "build:sdk": "npm run build --workspace=sdk",
     "build:frontend": "npm run build --workspace=frontend",
     "build:cli": "npm run build --workspace=sdk && npm run build --workspace=cli"
-  }
+  },
+  "version": "0.2.0"
 }
