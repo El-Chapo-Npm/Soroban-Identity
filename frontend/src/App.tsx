@@ -11,11 +11,14 @@ import { useKeyboardShortcutsContext } from "./context/KeyboardShortcutsContext"
 const IdentityPanel = lazy(() => import("./components/IdentityPanel"));
 const CredentialsPanel = lazy(() => import("./components/CredentialsPanel"));
 const IssuerDashboard = lazy(() => import("./pages/IssuerDashboard"));
+const CredentialRecipientVerify = lazy(() => import("./components/CredentialRecipientVerify"));
+
 const preloadCredentialsPanel = () => {
   void import("./components/CredentialsPanel");
 };
-import QRScanner from "./components/QRScanner";
-import CredentialRecipientVerify from "./components/CredentialRecipientVerify";
+const preloadCredentialRecipientVerify = () => {
+  void import("./components/CredentialRecipientVerify");
+};
 import WalletButton from "./components/WalletButton";
 import ErrorBoundary from "./components/ErrorBoundary";
 import Toast from "./components/Toast";

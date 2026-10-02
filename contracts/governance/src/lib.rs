@@ -228,7 +228,7 @@ impl Governance {
         voter.require_auth();
         env.storage().instance().remove(&(DELEGATIONS, voter.clone()));
         env.events().publish(
-            (PROPOSAL, symbol_short!("undelegate")),
+            (PROPOSAL, symbol_short!("undelg")),
             (EVENT_VERSION, voter),
         );
         Ok(())
@@ -328,6 +328,7 @@ mod test {
     #[test]
     fn governance_profile_smoke() {
         let env = Env::default();
+        env.mock_all_auths();
         let admin = Address::generate(&env);
         let contract_id = env.register_contract(None, Governance);
         let client = GovernanceClient::new(&env, &contract_id);

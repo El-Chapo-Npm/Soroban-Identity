@@ -38,6 +38,7 @@ soroban-sdk = { version = "=21.1.1", features = ["testutils"] }
 identity-registry = { path = "../contracts/identity-registry", features = ["testutils"] }
 credential-manager = { path = "../contracts/credential-manager", features = ["testutils"] }
 reputation = { path = "../contracts/reputation", features = ["testutils"] }
+did-bridge = { path = "../contracts/bridge", features = ["testutils"] }
 
 [[bin]]
 name = "fuzz_create_did"
@@ -66,6 +67,12 @@ doc = false
 [[bin]]
 name = "fuzz_revoke_and_delegate"
 path = "fuzz_targets/fuzz_revoke_and_delegate.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_resolve_external_did"
+path = "fuzz_targets/fuzz_resolve_external_did.rs"
 test = false
 doc = false
 

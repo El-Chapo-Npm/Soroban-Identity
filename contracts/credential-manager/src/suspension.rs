@@ -537,7 +537,7 @@ mod tests {
 
         let results =
             s.client
-                .verify_credentials_batch(&vec![&s.env, active.clone(), suspended.clone()]);
+                .verify_credentials_batch(&vec![&s.env, active.clone(), suspended.clone()], &false);
 
         assert_eq!(
             results,
@@ -545,11 +545,13 @@ mod tests {
                 &s.env,
                 BatchVerifyResult {
                     id: active,
-                    valid: true
+                    valid: true,
+                    reason: crate::BatchFailureReason::Valid,
                 },
                 BatchVerifyResult {
                     id: suspended,
-                    valid: false
+                    valid: false,
+                    reason: crate::BatchFailureReason::Suspended,
                 },
             ]
         );

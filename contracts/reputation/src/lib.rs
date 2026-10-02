@@ -3,6 +3,13 @@
 
 //! Reputation contract — on-chain activity scoring and anti-sybil signals.
 
+mod events;
+pub use events::{
+    handle_credential_issued, handle_credential_revoked,
+    subscribe_to_credential_events, unsubscribe_from_credential_events,
+    ReputationEventConfig,
+};
+
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short,
     Address, BytesN, Env, Symbol, Vec,

@@ -54,6 +54,8 @@ pub enum BatchFailureReason {
     /// The credential (or one of its prerequisites) has been revoked, or its
     /// time-locked activation was cancelled (#731).
     Revoked,
+    /// The credential is temporarily suspended.
+    Suspended,
     /// The credential has passed its `expires_at`.
     Expired,
     /// The credential's `activation_time` has not yet been reached (#731).
@@ -151,6 +153,8 @@ fn check_one(
         Some(cred) => {
             if cred.revoked || cred.activation_cancelled {
                 BatchFailureReason::Revoked
+            } else if crate::suspension::is_suspended(env, id) {
+                BatchFailureReason::Suspended
             } else {
                 let now = env.ledger().timestamp();
                 if cred.activation_time != 0 && now < cred.activation_time {

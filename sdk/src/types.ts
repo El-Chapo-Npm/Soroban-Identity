@@ -191,6 +191,8 @@ export interface RevocationRecord {
   reason: RevocationReason;
   /** Unix timestamp (seconds) of the ledger that recorded the revocation. */
   revokedAt: number;
+  /** Address that submitted the revocation, when the contract returns it. */
+  revokedBy?: string;
 }
 
 export interface RevokedCredential extends Credential {
@@ -201,77 +203,12 @@ export interface RevokedCredential extends Credential {
   revocationReason?: RevocationReason;
 }
 
-/**
- * Standardized revocation reasons, mirroring the contract's
- * `RevocationReason` enum (stored on-chain as a `u32`). #951
- */
-export const RevocationReason = {
-  Unspecified: 0,
-  KeyCompromise: 1,
-  IssuerCompromise: 2,
-  AffiliationChanged: 3,
-  Superseded: 4,
-  CessationOfOperation: 5,
-  PrivilegeWithdrawn: 6,
-  Fraudulent: 7,
-  SubjectRequest: 8,
-  DependencyRevoked: 9,
-} as const;
-
-export type RevocationReason = (typeof RevocationReason)[keyof typeof RevocationReason];
-
-/** Human-readable name of a {@link RevocationReason} value. */
-export type RevocationReasonName = keyof typeof RevocationReason;
-
-/** Returns the name of a {@link RevocationReason} value, or `undefined` if unknown. */
-export function revocationReasonName(reason: number): RevocationReasonName | undefined {
-  return (Object.keys(RevocationReason) as RevocationReasonName[]).find(
-    (name) => RevocationReason[name] === reason
-  );
-}
-
-/** Revocation metadata returned by {@link CredentialClient.getRevocationRecord}. #951 */
-export interface RevocationRecord {
-  credentialId: string;
-  reason: RevocationReason;
-  revokedBy: string;
-  /** Unix timestamp (seconds) of the revocation. */
-  revokedAt: number;
-}
-
 /** Options for {@link CredentialClient.revokeCredential}. */
 export interface RevokeOptions extends CallOptions {
-  /** Standardized revocation reason. Defaults to `RevocationReason.Unspecified`. */
+  /** Standardized revocation reason. Omit to revoke without a reason code. */
   reason?: RevocationReason;
 }
 
-export type RevocationReason =
-  | "Unspecified"
-  | "Compromised"
-  | "Expired"
-  | "Superseded"
-  | "IssuerRevoked"
-  | "SubjectRequest"
-  | "PolicyViolation";
-
-export const REVOCATION_REASONS: RevocationReason[] = [
-  "Unspecified",
-  "Compromised",
-  "Expired",
-  "Superseded",
-  "IssuerRevoked",
-  "SubjectRequest",
-  "PolicyViolation",
-];
-
-export interface RevocationRecord {
-  credentialId: string; // hex
-  issuer: string;
-  reason: RevocationReason;
-  revokedAt: number;
-}
-
-export type VerifyFailReason = "not_found" | "revoked" | "expired" | "unknown";
 /**
  * Reason a credential is invalid. Returned in {@link VerifyResult}.
  *

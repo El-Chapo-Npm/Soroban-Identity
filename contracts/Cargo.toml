@@ -8,6 +8,7 @@ publish = false
 members = [
     ".",
     "shared-errors",
+    "shared-events",
     "identity-registry",
     "credential-manager",
     "reputation",
@@ -16,10 +17,12 @@ members = [
     "schema-registry",
     "revocation-registry",
     "selective-disclosure",
+    "bridge",
 ]
 default-members = [
     ".",
     "shared-errors",
+    "shared-events",
     "identity-registry",
     "credential-manager",
     "reputation",
@@ -28,19 +31,22 @@ default-members = [
     "schema-registry",
     "revocation-registry",
     "selective-disclosure",
+    "bridge",
 ]
 resolver = "2"
 
 [dev-dependencies]
-credential-manager = { path = "credential-manager" }
-identity-registry = { path = "identity-registry" }
-reputation = { path = "reputation" }
+credential-manager = { path = "credential-manager", features = ["testutils"] }
+identity-registry = { path = "identity-registry", features = ["testutils"] }
+reputation = { path = "reputation", features = ["testutils"] }
 governance = { path = "governance" }
 shared-errors = { path = "shared-errors" }
+shared-events = { path = "shared-events" }
 soroban-identity-interface = { path = "soroban-identity-interface" }
 schema-registry = { path = "schema-registry" }
 revocation-registry = { path = "revocation-registry" }
 selective-disclosure = { path = "selective-disclosure" }
+did-bridge = { path = "bridge", features = ["testutils"] }
 soroban-sdk = { version = "21.0.0", features = ["testutils"] }
 
 [[test]]
