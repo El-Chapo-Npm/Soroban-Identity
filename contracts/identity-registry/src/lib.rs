@@ -1581,6 +1581,8 @@ mod tests {
             client.try_revoke_delegation(&parent, &child),
             Err(Ok(ContractError::DelegationRevoked))
         );
+    }
+
     /// #866: an access only extends the TTL once it has dropped below
     /// `TTL_BUMP_THRESHOLD`, instead of on every call.
     #[test]

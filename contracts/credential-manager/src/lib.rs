@@ -2817,11 +2817,41 @@ impl CredentialManager {
             return Err(ContractError::ChallengeNotFound);
         }
 
-        return Err(ContractError::UnsupportedSignatureScheme);
+        match challenge.sig_scheme {
+            SIG_SCHEME_ED25519 => {
+                let pubkey = Self::subject_public_key(env, subject)?;
+                if signed_challenge.len() != 64 {
+                    return Err(ContractError::InvalidProof);
+                }
+                let mut sig_arr = [0u8; 64];
+                for i in 0..64u32 {
+                    sig_arr[i as usize] = signed_challenge.get(i).unwrap_or(0);
+                }
+                let signature = BytesN::<64>::from_array(env, &sig_arr);
+                env.crypto().ed25519_verify(&pubkey, &challenge.nonce, &signature);
+            }
+            SIG_SCHEME_SECP256K1 => return Err(ContractError::UnsupportedSignatureScheme),
+            _ => return Err(ContractError::UnsupportedSignatureScheme),
+        }
+
         // Clear the challenge after successful verification
         env.storage().temporary().remove(&challenge_key);
 
         Ok(())
+    }
+
+    fn subject_public_key(env: &Env, subject: &Address) -> Result<BytesN<32>, ContractError> {
+        // ScVal::Address (18), ScAddress::Account (0), PublicKey::Ed25519 (0), then 32 bytes.
+        let encoded = subject.clone().to_xdr(env);
+        if encoded.len() != 44
+            || encoded.slice(0..12)
+                != Bytes::from_array(env, &[0, 0, 0, 18, 0, 0, 0, 0, 0, 0, 0, 0])
+        {
+            return Err(ContractError::UnsupportedSignatureScheme);
+        }
+        let mut key = [0u8; 32];
+        encoded.slice(12..44).copy_into_slice(&mut key);
+        Ok(BytesN::from_array(env, &key))
     }
 
     /// Issue #658: Execute an admin action after threshold is reached.
