@@ -74,7 +74,13 @@
     "expiresInHours": "{{count}} 小时后过期",
     "expiresInHours_plural": "{{count}} 小时后过期",
     "expiresInMins": "{{count}} 分钟后过期",
-    "expiresInMins_plural": "{{count}} 分钟后过期"
+    "expiresInMins_plural": "{{count}} 分钟后过期",
+    "exportCredential": "导出凭证",
+    "exportJson": "JSON",
+    "exportXml": "XML",
+    "exportPdf": "PDF",
+    "exportedAs": "已导出 {{filename}}",
+    "exportFailed": "导出失败——未下载任何内容"
   },
   "a11y": {
     "skipToContent": "跳至主内容",

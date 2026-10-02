@@ -211,7 +211,7 @@ export const IssuerDashboard: React.FC<IssuerAnalyticsProps> = ({ issuerAddress:
       ref={dashboardRef}
       className="issuer-dashboard-container"
       style={{
-        padding: "1.5rem",
+        // Padding is responsive; see .issuer-dashboard-container in styles/layout.css.
         display: "flex",
         flexDirection: "column",
         gap: "1.5rem",

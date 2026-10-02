@@ -1,188 +1,163 @@
-/**
- * Configuration resolution.
- *
- * Order of precedence, lowest first:
- *
- *   1. the config file (see below)
- *   2. environment variables (`SOROBAN_IDENTITY_*`)
- *   3. command-line flags
- *
- * The config file is the first of these that exists:
- *   `--config <path>` → `$SOROBAN_IDENTITY_CONFIG` →
- *   `$XDG_CONFIG_HOME/soroban-identity/config.json` →
- *   `~/.config/soroban-identity/config.json`
- */
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import type { SorobanIdentityConfig } from '@soroban-identity/sdk';
 
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-import { CliFailure, EXIT_CODES } from "./output";
-
+/** Settings persisted in a CLI config file. All fields are optional. */
 export interface CliConfig {
-  rpcUrl: string;
-  networkPassphrase: string;
-  identityRegistryId: string;
-  credentialManagerId: string;
-  reputationId: string;
-  txTimeout?: number;
-}
-
-export interface NetworkPreset {
-  networkPassphrase: string;
-  rpcUrl: string;
-}
-
-export const NETWORK_PRESETS: Record<string, NetworkPreset> = {
-  testnet: {
-    networkPassphrase: "Test SDF Network ; September 2015",
-    rpcUrl: "https://soroban-testnet.stellar.org",
-  },
-  futurenet: {
-    networkPassphrase: "Test SDF Future Network ; October 2022",
-    rpcUrl: "https://rpc-futurenet.stellar.org",
-  },
-  mainnet: {
-    networkPassphrase: "Public Global Stellar Network ; September 2015",
-    rpcUrl: "https://mainnet.sorobanrpc.com",
-  },
-};
-
-export function defaultConfigPath(env: NodeJS.ProcessEnv = process.env): string {
-  const base = env.XDG_CONFIG_HOME && env.XDG_CONFIG_HOME.trim().length > 0
-    ? env.XDG_CONFIG_HOME
-    : path.join(os.homedir(), ".config");
-  return path.join(base, "soroban-identity", "config.json");
-}
-
-export interface ConfigSources {
-  /** `--config <path>` */
-  configPath?: string;
-  /** `--rpc-url <url>` */
+  network?: 'testnet' | 'mainnet' | 'futurenet' | 'custom';
   rpcUrl?: string;
-  /** `--network <testnet|futurenet|mainnet>` */
-  network?: string;
+  networkPassphrase?: string;
   identityRegistryId?: string;
   credentialManagerId?: string;
   reputationId?: string;
+  /** Default issuer/controller public key, used when a command needs a caller address. */
+  defaultAccount?: string;
+  txTimeout?: number;
 }
 
-export interface ResolvedConfig {
-  config: CliConfig;
-  /** Where each value came from — printed by `config show`, handy in bug reports. */
-  origin: Record<string, string>;
-  configPath?: string;
-}
+export const CONFIG_KEYS: (keyof CliConfig)[] = [
+  'network',
+  'rpcUrl',
+  'networkPassphrase',
+  'identityRegistryId',
+  'credentialManagerId',
+  'reputationId',
+  'defaultAccount',
+  'txTimeout',
+];
 
-const FIELD_ENV: Record<keyof CliConfig, string | undefined> = {
-  rpcUrl: "SOROBAN_IDENTITY_RPC_URL",
-  networkPassphrase: "SOROBAN_IDENTITY_NETWORK_PASSPHRASE",
-  identityRegistryId: "SOROBAN_IDENTITY_IDENTITY_REGISTRY_ID",
-  credentialManagerId: "SOROBAN_IDENTITY_CREDENTIAL_MANAGER_ID",
-  reputationId: "SOROBAN_IDENTITY_REPUTATION_ID",
-  txTimeout: undefined,
+const NETWORKS: Record<string, { rpcUrl: string; networkPassphrase: string }> = {
+  testnet: {
+    rpcUrl: 'https://soroban-testnet.stellar.org',
+    networkPassphrase: 'Test SDF Network ; September 2015',
+  },
+  futurenet: {
+    rpcUrl: 'https://rpc-futurenet.stellar.org',
+    networkPassphrase: 'Test SDF Future Network ; October 2022',
+  },
+  mainnet: {
+    rpcUrl: 'https://mainnet.sorobanrpc.com',
+    networkPassphrase: 'Public Global Stellar Network ; September 2015',
+  },
 };
 
-export function resolveConfig(
-  sources: ConfigSources = {},
-  env: NodeJS.ProcessEnv = process.env,
-  readFile: (file: string) => string = (file) => fs.readFileSync(file, "utf8")
-): ResolvedConfig {
-  const candidate = sources.configPath ?? env.SOROBAN_IDENTITY_CONFIG ?? defaultConfigPath(env);
-  const origin: Record<string, string> = {};
+/** Project-local config file name, looked up from the current directory upwards. */
+export const LOCAL_CONFIG_NAME = '.soroban-identity.json';
 
-  let fileConfig: Partial<CliConfig> = {};
-  let usedPath: string | undefined;
-  if (fs.existsSync(candidate)) {
-    usedPath = candidate;
-    try {
-      fileConfig = JSON.parse(readFile(candidate)) as Partial<CliConfig>;
-    } catch (error) {
-      throw new CliFailure(
-        "CONFIG_INVALID",
-        `${candidate} is not valid JSON: ${(error as Error).message}`,
-        EXIT_CODES.config
-      );
-    }
-    for (const key of Object.keys(fileConfig)) origin[key] = `file:${candidate}`;
-  } else if (sources.configPath ?? env.SOROBAN_IDENTITY_CONFIG) {
-    // An explicitly requested file that does not exist is an error, a missing
-    // default file is not.
-    throw new CliFailure(
-      "CONFIG_NOT_FOUND",
-      `config file not found: ${candidate}`,
-      EXIT_CODES.config
-    );
-  }
-
-  const preset = sources.network
-    ? NETWORK_PRESETS[sources.network]
-    : env.SOROBAN_IDENTITY_NETWORK
-      ? NETWORK_PRESETS[env.SOROBAN_IDENTITY_NETWORK]
-      : undefined;
-  if (sources.network && !NETWORK_PRESETS[sources.network]) {
-    throw new CliFailure(
-      "UNKNOWN_NETWORK",
-      `unknown network "${sources.network}" — known presets: ${Object.keys(NETWORK_PRESETS).join(", ")}`,
-      EXIT_CODES.usage
-    );
-  }
-  if (preset) origin.networkPassphrase = `preset:${sources.network ?? env.SOROBAN_IDENTITY_NETWORK}`;
-
-  const pick = (key: keyof CliConfig, flag: string | undefined): string | undefined => {
-    if (flag !== undefined && flag !== "") {
-      origin[key] = "flag";
-      return flag;
-    }
-    const envName = FIELD_ENV[key];
-    const fromEnv = envName ? env[envName] : undefined;
-    if (fromEnv !== undefined && fromEnv !== "") {
-      origin[key] = `env:${envName}`;
-      return fromEnv;
-    }
-    return undefined;
-  };
-
-  const config: CliConfig = {
-    rpcUrl:
-      pick("rpcUrl", sources.rpcUrl) ??
-      fileConfig.rpcUrl ??
-      preset?.rpcUrl ??
-      NETWORK_PRESETS.testnet.rpcUrl,
-    networkPassphrase:
-      pick("networkPassphrase", undefined) ??
-      fileConfig.networkPassphrase ??
-      preset?.networkPassphrase ??
-      NETWORK_PRESETS.testnet.networkPassphrase,
-    identityRegistryId: pick("identityRegistryId", sources.identityRegistryId) ?? fileConfig.identityRegistryId ?? "",
-    credentialManagerId: pick("credentialManagerId", sources.credentialManagerId) ?? fileConfig.credentialManagerId ?? "",
-    reputationId: pick("reputationId", sources.reputationId) ?? fileConfig.reputationId ?? "",
-    txTimeout: fileConfig.txTimeout,
-  };
-
-  const missing = (["identityRegistryId", "credentialManagerId", "reputationId"] as const).filter(
-    (key) => !config[key] || config[key].trim().length === 0
+/** Global config path: `$SOROBAN_IDENTITY_CONFIG` or `~/.config/soroban-identity/config.json`. */
+export function globalConfigPath(): string {
+  return (
+    process.env.SOROBAN_IDENTITY_CONFIG ??
+    join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'soroban-identity', 'config.json')
   );
-  if (missing.length > 0) {
-    throw new CliFailure(
-      "CONFIG_MISSING",
-      `missing contract id(s): ${missing.join(", ")}. Run "soroban-identity config init", pass the flags, or set ${missing
-        .map((key) => FIELD_ENV[key])
-        .join(", ")}.`,
-      EXIT_CODES.config,
-      { missing, configPath: usedPath ?? candidate }
-    );
-  }
-
-  return { config, origin, configPath: usedPath };
 }
 
-/** Config file template written by `config init`. */
-export function configTemplate(partial: Partial<CliConfig> = {}): CliConfig {
+function findLocalConfig(start = process.cwd()): string | undefined {
+  let dir = resolve(start);
+  for (;;) {
+    const candidate = join(dir, LOCAL_CONFIG_NAME);
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
+}
+
+export function readConfigFile(path: string): CliConfig {
+  if (!existsSync(path)) return {};
+  try {
+    return JSON.parse(readFileSync(path, 'utf8')) as CliConfig;
+  } catch (e) {
+    throw new Error(`Invalid JSON in config file ${path}: ${(e as Error).message}`);
+  }
+}
+
+export function writeConfigFile(path: string, config: CliConfig): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+}
+
+function fromEnv(): CliConfig {
+  const env = process.env;
+  const cfg: CliConfig = {
+    network: env.SOROBAN_IDENTITY_NETWORK as CliConfig['network'],
+    rpcUrl: env.SOROBAN_RPC_URL,
+    networkPassphrase: env.SOROBAN_NETWORK_PASSPHRASE,
+    identityRegistryId: env.IDENTITY_REGISTRY_ID,
+    credentialManagerId: env.CREDENTIAL_MANAGER_ID,
+    reputationId: env.REPUTATION_ID,
+    defaultAccount: env.SOROBAN_IDENTITY_ACCOUNT,
+    txTimeout: env.SOROBAN_TX_TIMEOUT ? Number(env.SOROBAN_TX_TIMEOUT) : undefined,
+  };
+  return Object.fromEntries(Object.entries(cfg).filter(([, v]) => v !== undefined)) as CliConfig;
+}
+
+/**
+ * Resolve the effective config. Precedence (highest first):
+ * `overrides` (command-line flags), explicit `--config` file, environment variables, project-local
+ * `.soroban-identity.json`, global config file, network presets.
+ */
+export function loadConfig(
+  explicitPath?: string,
+  overrides: CliConfig = {}
+): { config: CliConfig; sources: string[] } {
+  const sources: string[] = [];
+  const layers: CliConfig[] = [];
+
+  const globalPath = globalConfigPath();
+  if (existsSync(globalPath)) {
+    layers.push(readConfigFile(globalPath));
+    sources.push(globalPath);
+  }
+  const localPath = findLocalConfig();
+  if (localPath) {
+    layers.push(readConfigFile(localPath));
+    sources.push(localPath);
+  }
+  layers.push(fromEnv());
+  if (explicitPath) {
+    const abs = resolve(explicitPath);
+    if (!existsSync(abs)) throw new Error(`Config file not found: ${abs}`);
+    layers.push(readConfigFile(abs));
+    sources.push(abs);
+  }
+
+  const merged: CliConfig = Object.assign({}, ...layers);
+  // Switching network on the command line must not reuse another network's endpoints.
+  if (overrides.network && overrides.network !== merged.network && NETWORKS[overrides.network]) {
+    delete merged.rpcUrl;
+    delete merged.networkPassphrase;
+  }
+  Object.assign(merged, overrides);
+  const preset = NETWORKS[merged.network ?? 'testnet'];
+  if (preset) {
+    merged.rpcUrl ??= preset.rpcUrl;
+    merged.networkPassphrase ??= preset.networkPassphrase;
+  }
+  return { config: merged, sources };
+}
+
+/** Convert CLI config into an SDK config, failing with a helpful message on missing fields. */
+export function toSdkConfig(
+  config: CliConfig,
+  required: ('identityRegistryId' | 'credentialManagerId')[]
+): SorobanIdentityConfig {
+  const missing = required.filter((k) => !config[k]);
+  if (!config.rpcUrl) missing.unshift('rpcUrl' as never);
+  if (!config.networkPassphrase) missing.unshift('networkPassphrase' as never);
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing configuration: ${missing.join(', ')}. ` +
+        `Run "soroban-id config init" or "soroban-id config set <key> <value>".`
+    );
+  }
   return {
-    rpcUrl: partial.rpcUrl ?? NETWORK_PRESETS.testnet.rpcUrl,
-    networkPassphrase: partial.networkPassphrase ?? NETWORK_PRESETS.testnet.networkPassphrase,
-    identityRegistryId: partial.identityRegistryId ?? "",
-    credentialManagerId: partial.credentialManagerId ?? "",
-    reputationId: partial.reputationId ?? "",
+    rpcUrl: config.rpcUrl!,
+    networkPassphrase: config.networkPassphrase!,
+    identityRegistryId: config.identityRegistryId ?? '',
+    credentialManagerId: config.credentialManagerId ?? '',
+    reputationId: config.reputationId ?? '',
+    txTimeout: config.txTimeout,
   };
 }

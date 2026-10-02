@@ -112,10 +112,12 @@ export default function WalletButton() {
 
   return (
     <div
+      // Alignment is responsive (stretched in the mobile drawer); see
+      // .wallet-button in styles/navigation.css.
+      className="wallet-button"
       style={{
         display: "flex",
         flexDirection: "column",
-        alignItems: "flex-end",
         gap: "0.25rem",
         position: "relative",
       }}

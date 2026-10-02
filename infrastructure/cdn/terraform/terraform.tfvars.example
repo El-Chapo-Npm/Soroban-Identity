@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars and fill in. Do not commit terraform.tfvars.
+# Supply the API token as TF_VAR_cloudflare_api_token.
+
+cloudflare_zone_id = "fedcba9876543210fedcba9876543210"
+app_hostname       = "app.example.com"
+
+# hashed_asset_ttl = 31536000

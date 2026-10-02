@@ -1,0 +1,22 @@
+coverage:
+  status:
+    project:
+      contracts:
+        target: 80%
+        threshold: 1%
+        flags: [contracts]
+    patch:
+      default:
+        target: 70%
+flags:
+  contracts:
+    paths: [contracts/]
+    carryforward: true
+ignore:
+  - "contracts/**/tests/**"
+  - "contracts/**/test.rs"
+  - "contracts/target/**"
+  - "fuzz/**"
+comment:
+  layout: "header, diff, flags, files"
+  require_changes: true

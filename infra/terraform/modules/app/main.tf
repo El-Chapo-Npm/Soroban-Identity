@@ -38,7 +38,9 @@ resource "aws_ecs_task_definition" "this" {
       { name = "NODE_ENV", value = var.name },
       { name = "REDIS_URL", value = "rediss://${var.redis_endpoint}:6379" }
     ]
-    healthCheck = { command = ["CMD-SHELL", "curl -fsS http://localhost:3001/health || exit 1"], interval = 30, timeout = 5, retries = 3 }
+    # Liveness only (#883): the image has no curl, and /health fails on a
+    # dependency outage, which would make ECS replace healthy tasks.
+    healthCheck = { command = ["CMD", "node", "scripts/healthcheck.mjs", "/live"], interval = 30, timeout = 5, retries = 3, startPeriod = 30 }
     logConfiguration = {
       logDriver = "awslogs"
       options = {

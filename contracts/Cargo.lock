@@ -263,6 +263,7 @@ name = "credential-manager"
 version = "0.1.0"
 dependencies = [
  "shared-errors",
+ "shared-events",
  "soroban-sdk",
 ]
 
@@ -430,6 +431,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "did-bridge"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
 ]
 
 [[package]]
@@ -611,6 +619,13 @@ name = "gimli"
 version = "0.28.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4271d37baee1b8c7e4b708028c57d816cf9d2434acb33a549475f78c181f6253"
+
+[[package]]
+name = "governance"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
 
 [[package]]
 name = "group"
@@ -1067,6 +1082,7 @@ name = "reputation"
 version = "0.1.0"
 dependencies = [
  "shared-errors",
+ "shared-events",
  "soroban-sdk",
 ]
 
@@ -1249,6 +1265,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "shared-events"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1370,12 +1393,15 @@ name = "soroban-identity-contracts"
 version = "0.1.0"
 dependencies = [
  "credential-manager",
+ "did-bridge",
+ "governance",
  "identity-registry",
  "reputation",
  "revocation-registry",
  "schema-registry",
  "selective-disclosure",
  "shared-errors",
+ "shared-events",
  "soroban-identity-interface",
  "soroban-sdk",
 ]

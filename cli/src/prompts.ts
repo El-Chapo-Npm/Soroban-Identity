@@ -1,75 +1,64 @@
+import { input, password, select, confirm } from '@inquirer/prompts';
+import { output } from './output';
+
 /**
- * Interactive prompts.
- *
- * Prompts are only ever used when a required value is missing *and* stdin is a
- * TTY. With `--yes`, in a pipe, or in CI a missing value is an error instead, so
- * a script can never hang on a question nobody can answer.
+ * Prompts are only shown on an interactive TTY and never in `--json` or
+ * `--no-input` mode; otherwise a missing value is an error.
  */
+export const promptState = { enabled: true };
 
-import * as readline from "node:readline/promises";
-import { CliFailure, EXIT_CODES } from "./output";
-
-export function isInteractive(): boolean {
-  return Boolean(process.stdin.isTTY && process.stdout.isTTY);
+export function canPrompt(): boolean {
+  return promptState.enabled && !output.json && Boolean(process.stdin.isTTY && process.stdout.isTTY);
 }
 
-export interface AskOptions {
-  /** `--yes`: never prompt. */
-  yes?: boolean;
-  /** Value that came from a flag/env — returned as-is when present. */
-  provided?: string;
-  /** What to ask for when nothing was provided. */
-  question: string;
-  /** Error code used when prompting is not possible. */
-  code: string;
-  /** Set for secrets: input is not echoed. */
-  secret?: boolean;
+function missing(name: string, flag: string): never {
+  throw new Error(`Missing required value "${name}". Pass ${flag} or run in an interactive terminal.`);
 }
 
-export async function askValue(options: AskOptions): Promise<string> {
-  // `provided` comes from Commander, where a repeatable option yields an array
-  // and an absent one yields `undefined` — only accept a real string here.
-  const provided = typeof options.provided === "string" ? options.provided.trim() : undefined;
-  if (provided) return provided;
-
-  if (options.yes || !isInteractive()) {
-    throw new CliFailure(
-      options.code,
-      `${options.question.replace(/\?\s*$/, "")} is required — pass it as a flag, set the matching environment variable, or run interactively.`,
-      EXIT_CODES.usage
-    );
+export async function askText(
+  value: string | undefined,
+  opts: { name: string; flag: string; message: string; default?: string; validate?: (v: string) => true | string }
+): Promise<string> {
+  if (value !== undefined && value !== '') return value;
+  if (!canPrompt()) {
+    if (opts.default !== undefined) return opts.default;
+    missing(opts.name, opts.flag);
   }
-
-  const answer = options.secret ? await questionHidden(options.question) : await questionText(options.question);
-  const trimmed = answer.trim();
-  if (!trimmed) {
-    throw new CliFailure(options.code, `${options.question} — empty value`, EXIT_CODES.usage);
-  }
-  return trimmed;
+  return input({ message: opts.message, default: opts.default, validate: opts.validate });
 }
 
-export async function questionText(question: string): Promise<string> {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    return await rl.question(`${question} `);
-  } finally {
-    rl.close();
-  }
+export async function askSecret(
+  value: string | undefined,
+  opts: { name: string; flag: string; message: string }
+): Promise<string> {
+  if (value) return value;
+  if (!canPrompt()) missing(opts.name, opts.flag);
+  return password({ message: opts.message, mask: '*' });
 }
 
-export async function questionHidden(question: string): Promise<string> {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-  // Keep the answer off the screen and out of the scrollback.
-  const mute = () => {
-    (rl as unknown as { _writeToOutput: (text: string) => void })._writeToOutput = () => undefined;
-  };
-  process.stdout.write(`${question} `);
-  mute();
-  try {
-    const answer = await rl.question("");
-    process.stdout.write("\n");
-    return answer;
-  } finally {
-    rl.close();
+export async function askChoice<T extends string>(
+  value: string | undefined,
+  opts: { name: string; flag: string; message: string; choices: readonly T[]; default?: T }
+): Promise<T> {
+  if (value !== undefined) {
+    if (!opts.choices.includes(value as T)) {
+      throw new Error(`Invalid ${opts.name} "${value}". Expected one of: ${opts.choices.join(', ')}`);
+    }
+    return value as T;
   }
+  if (!canPrompt()) {
+    if (opts.default !== undefined) return opts.default;
+    missing(opts.name, opts.flag);
+  }
+  return select({
+    message: opts.message,
+    choices: opts.choices.map((c) => ({ name: c, value: c })),
+    default: opts.default,
+  });
+}
+
+/** Ask for confirmation. Returns `true` without asking when `--yes` was passed or prompts are unavailable. */
+export async function askConfirm(message: string, yes: boolean | undefined): Promise<boolean> {
+  if (yes || !canPrompt()) return true;
+  return confirm({ message, default: false });
 }

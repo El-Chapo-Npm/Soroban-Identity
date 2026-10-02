@@ -1,0 +1,21 @@
+{
+  "expo": {
+    "name": "Soroban Identity",
+    "slug": "soroban-identity",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "sorobanid",
+    "ios": {
+      "bundleIdentifier": "org.sorobanidentity.app",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Scan credential QR codes",
+        "NSFaceIDUsageDescription": "Unlock your identity wallet"
+      }
+    },
+    "android": {
+      "package": "org.sorobanidentity.app",
+      "permissions": ["CAMERA", "USE_BIOMETRIC", "USE_FINGERPRINT"]
+    },
+    "plugins": ["expo-camera", "expo-local-authentication"]
+  }
+}

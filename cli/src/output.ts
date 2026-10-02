@@ -1,79 +1,42 @@
-/**
- * Output and exit-code handling for the CLI.
- *
- * Every command has exactly two shapes of output:
- *
- * - `--json`: one JSON object, on stdout when the command succeeded and on
- *   stderr when it failed. Nothing else is printed, so `... --json | jq` works.
- * - human: a short summary on stdout, or `error: <message>` on stderr.
- *
- * Exit codes are part of the interface (documented in cli/README.md):
- * 0 ok · 1 the operation failed · 2 bad usage/arguments · 3 configuration.
- */
+/** Global output settings, set once from the root command's options. */
+export const output = { json: false, quiet: false };
 
-export const EXIT_CODES = {
-  ok: 0,
-  failure: 1,
-  usage: 2,
-  config: 3,
-} as const;
-
-export type ExitCode = (typeof EXIT_CODES)[keyof typeof EXIT_CODES];
-
-/** An error with a stable machine-readable code and an exit code. */
-export class CliFailure extends Error {
-  readonly code: string;
-  readonly exitCode: number;
-  readonly details: unknown;
-
-  constructor(code: string, message: string, exitCode: number = EXIT_CODES.failure, details?: unknown) {
-    super(message);
-    this.name = "CliFailure";
-    this.code = code;
-    this.exitCode = exitCode;
-    this.details = details;
+/** Print a command result: pretty JSON in `--json` mode, otherwise `human()` text. */
+export function printResult(data: unknown, human: () => string): void {
+  if (output.json) {
+    process.stdout.write(JSON.stringify(data, jsonReplacer, 2) + '\n');
+  } else if (!output.quiet) {
+    process.stdout.write(human() + '\n');
   }
 }
 
-export interface OutputOptions {
-  json?: boolean;
-  command?: string;
+/** Progress/info message. Goes to stderr so it never pollutes `--json` stdout. */
+export function info(message: string): void {
+  if (!output.quiet && !output.json) process.stderr.write(message + '\n');
 }
 
-export function printResult(data: unknown, options: OutputOptions = {}): void {
-  if (options.json) {
-    process.stdout.write(JSON.stringify({ ok: true, command: options.command, data }) + "\n");
-    return;
+/** Print an error (as `{ "error": ... }` in JSON mode) and set a failing exit code. */
+export function printError(err: unknown): void {
+  const e = err as { message?: string; code?: string };
+  const message = e?.message ?? String(err);
+  if (output.json) {
+    process.stdout.write(JSON.stringify({ error: { message, code: e?.code } }, null, 2) + '\n');
+  } else {
+    process.stderr.write(`Error: ${message}\n`);
   }
-  if (typeof data === "string") {
-    process.stdout.write(data + "\n");
-    return;
-  }
-  process.stdout.write(JSON.stringify(data, null, 2) + "\n");
+  process.exitCode = 1;
 }
 
-export function printError(error: CliFailure, options: OutputOptions = {}): void {
-  if (options.json) {
-    process.stderr.write(
-      JSON.stringify({
-        ok: false,
-        command: options.command,
-        error: { code: error.code, message: error.message, details: error.details },
-      }) + "\n"
-    );
-    return;
-  }
-  process.stderr.write(`error: ${error.message}\n`);
-  if (error.details !== undefined) {
-    process.stderr.write(`  ${JSON.stringify(error.details)}\n`);
-  }
+/** Format key/value rows as aligned text. */
+export function table(rows: [string, unknown][]): string {
+  const width = Math.max(...rows.map(([k]) => k.length));
+  return rows
+    .map(([k, v]) => `${k.padEnd(width)}  ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`)
+    .join('\n');
 }
 
-/** Turns anything thrown inside a command into a {@link CliFailure}. */
-export function toCliFailure(error: unknown): CliFailure {
-  if (error instanceof CliFailure) return error;
-  const message =
-    error instanceof Error ? error.message : typeof error === "string" ? error : JSON.stringify(error);
-  const code = (error as { code?: string })?.code;
-  return new CliFailure(code && typeof code === "string" ? code : "UNEXPECTED", message);
+function jsonReplacer(_key: string, value: unknown): unknown {
+  if (typeof value === 'bigint') return value.toString();
+  if (value instanceof Uint8Array) return Buffer.from(value).toString('hex');
+  return value;
 }

@@ -30,6 +30,8 @@ Each `contract-event` message includes:
 | --- | --- |
 | `CRED,issued` | `[id: string, subject: string, issuer: string, credentialType: string]` |
 | `CRED,revoked` | `[id: string, issuer: string]` |
+| `CRED,suspended` | `[id: string, issuer: string, reason: number, suspendedAt: number]` — credential temporarily suspended; see `SuspensionReason` |
+| `CRED,unsuspend` | `[id: string, issuer: string, reactivatedAt: number]` — suspension lifted by `reactivate_credential` |
 | `CRED,evicted` | `[issuer: string, evictedId: string]` — emitted when the per-issuer credential ring buffer (`MAX_ISSUER_CREDS`) is full and the oldest entry is dropped to make room for a new one |
 
 ## reputation events

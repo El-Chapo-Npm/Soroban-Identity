@@ -3,6 +3,13 @@
 
 //! Reputation contract — on-chain activity scoring and anti-sybil signals.
 
+mod events;
+pub use events::{
+    handle_credential_issued, handle_credential_revoked,
+    subscribe_to_credential_events, unsubscribe_from_credential_events,
+    ReputationEventConfig,
+};
+
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short,
     Address, BytesN, Env, Symbol, Vec,
@@ -96,6 +103,8 @@ pub enum ContractError {
     ContractPaused         = 15,
     /// Issue #733: batch too large.
     BatchTooLarge          = 16,
+    /// Issue #657: decay rate exceeds MAX_DECAY_RATE_BPS.
+    InvalidDecayRate       = 17,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -216,9 +225,9 @@ impl Reputation {
     pub fn initialize(env: Env, admin: Address) -> Result<(), ContractError> {
         Self::require_uninitialized(&env)?;
         Self::set_admin(&env, &admin);
-        env.storage()
-            .instance()
-            .set(&MIN_INTERVAL_KEY, &DEFAULT_MIN_INTERVAL);
+        // #949: the rate-limit window is not written here — every read falls
+        // back to DEFAULT_MIN_INTERVAL, so storing the default at deploy time
+        // only adds a ledger write to the initialization transaction.
         env.events().publish(
             (ADMIN, symbol_short!("init")),
             (EVENT_VERSION, admin),

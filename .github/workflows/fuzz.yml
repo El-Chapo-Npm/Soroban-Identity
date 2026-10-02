@@ -46,6 +46,12 @@ jobs:
             contract: credential-manager
           - target: fuzz_submit_score
             contract: reputation
+          - target: fuzz_verify_credentials_batch
+            contract: credential-manager
+          - target: fuzz_revoke_and_delegate
+            contract: credential-manager
+          - target: fuzz_resolve_external_did
+            contract: did-bridge
 
     steps:
       - name: Checkout code
@@ -137,7 +143,7 @@ jobs:
         run: |
           cd fuzz
           set -o pipefail
-          cargo +nightly fuzz run ${{ matrix.target }} \
+          cargo +nightly fuzz run --fuzz-dir . ${{ matrix.target }} \
             corpus/${{ matrix.target }} \
             -- \
             -max_total_time=${{ steps.budget.outputs.seconds }} \
@@ -238,7 +244,7 @@ jobs:
               '',
               '```bash',
               'cd fuzz',
-              `cargo +nightly fuzz run ${target} artifacts/${target}/<crash-file>`,
+              `cargo +nightly fuzz run --fuzz-dir . ${target} artifacts/${target}/<crash-file>`,
               '```',
             ].join('\n');
 

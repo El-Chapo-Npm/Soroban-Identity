@@ -6,7 +6,7 @@
 | API endpoints and DB-backed queries | `benches/api/bench.mjs` | `node benches/api/bench.mjs --base http://localhost:3000` |
 
 ## What gets measured
-- **Contracts:** wall-clock time for each `identity-registry` entry point (`create_did`, `update_did`, `resolve_did`, `has_active_did`, `deactivate_did`, `get_did_count`). The suite also reports the Soroban **CPU instructions** and **memory bytes** used, which covers allocations. Criterion writes HTML reports with charts to `contracts/target/criterion/report/index.html`.
+- **Contracts:** wall-clock time for each `identity-registry` entry point (`create_did`, `update_did`, `resolve_did`, `has_active_did`, `deactivate_did`, `get_did_count`). The suite also reports the Soroban **CPU instructions** and **memory bytes** used, which covers allocations. It also reports that budget for `resolve_did`, `has_active_did` and `update_did` run 100 ledgers after the DID was written, which is the steady state for an entry that is used often. See [docs/storage-optimization.md](../docs/storage-optimization.md) for the storage patterns these numbers track. Criterion writes HTML reports with charts to `contracts/target/criterion/report/index.html`.
 - **API:** p50/p95/p99 latency, error count and client memory for each endpoint. The storage-backed endpoints (`/dids`, `/credentials`) show how database queries perform.
 
 ## Comparing commits and regressions

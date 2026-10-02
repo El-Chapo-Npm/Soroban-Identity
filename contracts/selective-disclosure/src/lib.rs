@@ -19,6 +19,12 @@ const DISCLOSURE: Symbol = symbol_short!("DISCL");
 const DISC_CNT: Symbol = symbol_short!("DISCNT");
 const TOTAL_DISC: Symbol = symbol_short!("TOTDISC");
 const TTL_MAX: u32 = 6_312_000;
+/// Extend a persistent entry's TTL only once it has dropped below this many
+/// ledgers (#866). With the threshold equal to the target, every access
+/// re-extended the TTL and paid rent again; now an entry that is read or
+/// written often is extended at most about once every 30 days
+/// (518_400 ledgers at 5 s), while never having less than ~11 months left.
+const TTL_BUMP_THRESHOLD: u32 = TTL_MAX - 518_400;
 const TTL_MIN: u32 = 17_280;
 const PAGE_CAP: u32 = 100;
 const MAX_DISCLOSED_ATTRS: u32 = 50;
@@ -243,13 +249,13 @@ impl SelectiveDisclosure {
         env.storage().persistent().set(&key, &commitment);
         env.storage()
             .persistent()
-            .extend_ttl(&key, TTL_MAX, TTL_MAX);
+            .extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
 
         let cred_key = Self::commitment_key_for_credential(&credential_id);
         env.storage().persistent().set(&cred_key, &commitment_id);
         env.storage()
             .persistent()
-            .extend_ttl(&cred_key, TTL_MAX, TTL_MAX);
+            .extend_ttl(&cred_key, TTL_BUMP_THRESHOLD, TTL_MAX);
 
         let cnt: u32 = env
             .storage()
@@ -356,7 +362,7 @@ impl SelectiveDisclosure {
         env.storage().persistent().set(&proof_key, &proof);
         env.storage()
             .persistent()
-            .extend_ttl(&proof_key, TTL_MAX, TTL_MAX);
+            .extend_ttl(&proof_key, TTL_BUMP_THRESHOLD, TTL_MAX);
 
         env.events().publish(
             (DISCLOSURE, symbol_short!("proof_gen")),
@@ -414,7 +420,7 @@ impl SelectiveDisclosure {
                 .set(&proof_key, &updated_proof);
             env.storage()
                 .persistent()
-                .extend_ttl(&proof_key, TTL_MAX, TTL_MAX);
+                .extend_ttl(&proof_key, TTL_BUMP_THRESHOLD, TTL_MAX);
         }
 
         Ok(VerificationResult {
@@ -439,7 +445,7 @@ impl SelectiveDisclosure {
             Some(commitment) => {
                 env.storage()
                     .persistent()
-                    .extend_ttl(&key, TTL_MAX, TTL_MAX);
+                    .extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
                 Ok(commitment)
             }
         }
@@ -460,7 +466,7 @@ impl SelectiveDisclosure {
             Some(proof) => {
                 env.storage()
                     .persistent()
-                    .extend_ttl(&key, TTL_MAX, TTL_MAX);
+                    .extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
                 Ok(proof)
             }
         }
@@ -490,7 +496,7 @@ impl SelectiveDisclosure {
         env.storage().persistent().set(&key, &commitment);
         env.storage()
             .persistent()
-            .extend_ttl(&key, TTL_MAX, TTL_MAX);
+            .extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
 
         env.events().publish(
             (DISCLOSURE, symbol_short!("deactvtd")),
@@ -811,5 +817,42 @@ mod tests {
             &0u64,
         );
         assert_eq!(result, Err(Ok(ContractError::EmptyDisclosure)));
+    }
+
+    /// #866: an access only extends the TTL once it has dropped below
+    /// `TTL_BUMP_THRESHOLD`, instead of on every call.
+    #[test]
+    fn test_reads_extend_ttl_only_below_threshold() {
+        use soroban_sdk::testutils::storage::Persistent as _;
+        let (env, _admin, client) = setup();
+        let hash = BytesN::from_array(&env, &[2u8; 32]);
+        let commitment_id = client.create_commitment(
+            &Address::generate(&env),
+            &Address::generate(&env),
+            &BytesN::from_array(&env, &[1u8; 32]),
+            &hash,
+            &ProofScheme::HashCommitment,
+            &hash,
+        );
+        let ttl = || {
+            env.as_contract(&client.address, || {
+                env.storage()
+                    .persistent()
+                    .get_ttl(&SelectiveDisclosure::commitment_key(&commitment_id))
+            })
+        };
+        let full = ttl();
+        // Keep the contract instance itself alive across the ledger jumps below.
+        env.as_contract(&client.address, || {
+            env.storage().instance().extend_ttl(6_000_000, 6_000_000)
+        });
+
+        env.ledger().with_mut(|li| li.sequence_number += 1_000);
+        client.get_commitment(&commitment_id);
+        assert_eq!(ttl(), full - 1_000);
+
+        env.ledger().with_mut(|li| li.sequence_number += 518_400);
+        client.get_commitment(&commitment_id);
+        assert_eq!(ttl(), full);
     }
 }

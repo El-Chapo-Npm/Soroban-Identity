@@ -1,0 +1,10 @@
+# OpenAPI Generator Ignore
+# Managed by tools/codegen/scripts/generate.mjs
+
+# Generator boilerplate that must never be committed (pruned after each run):
+git_push.sh
+.travis.yml
+.gitlab-ci.yml
+.github
+tox.ini
+test-requirements.txt

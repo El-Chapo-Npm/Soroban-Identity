@@ -1,0 +1,38 @@
+name: Chaos Tests
+
+on:
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: "Space-separated scenario filter (default: all)"
+        required: false
+
+jobs:
+  chaos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: tests/chaos
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Start stack
+        run: docker compose -f docker-compose.chaos.yml up -d --build --wait || docker compose -f docker-compose.chaos.yml up -d --build
+      - name: Run chaos experiments
+        run: node run-chaos.mjs ${{ inputs.scenarios }}
+      - name: Logs
+        if: failure()
+        run: docker compose -f docker-compose.chaos.yml logs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chaos-report
+          path: tests/chaos/chaos-report.json
+      - name: Teardown
+        if: always()
+        run: docker compose -f docker-compose.chaos.yml down -v

@@ -74,7 +74,13 @@
     "expiresInHours": "Expires in {{count}} hour",
     "expiresInHours_plural": "Expires in {{count}} hours",
     "expiresInMins": "Expires in {{count}} min",
-    "expiresInMins_plural": "Expires in {{count}} mins"
+    "expiresInMins_plural": "Expires in {{count}} mins",
+    "exportCredential": "Export credential",
+    "exportJson": "JSON",
+    "exportXml": "XML",
+    "exportPdf": "PDF",
+    "exportedAs": "Exported {{filename}}",
+    "exportFailed": "Export failed — nothing was downloaded"
   },
   "a11y": {
     "skipToContent": "Skip to main content",

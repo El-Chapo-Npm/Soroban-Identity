@@ -6,9 +6,17 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Enable testutils for use in fuzzing or integration test harnesses outside
+# of `cargo test` (where testutils is auto-enabled via dev-dependencies).
+# Activates soroban-sdk's testutils, which generates ContractFunctionSet for
+# every contract type so env.register_contract() works in non-test builds.
+testutils = ["soroban-sdk/testutils"]
+
 [dependencies]
 soroban-sdk = { version = "21.0.0", features = ["alloc"] }
 shared-errors = { path = "../shared-errors" }
+shared-events = { path = "../shared-events" }
 
 [dev-dependencies]
 soroban-sdk = { version = "21.0.0", features = ["testutils"] }

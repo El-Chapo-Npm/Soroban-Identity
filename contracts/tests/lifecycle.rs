@@ -1,5 +1,6 @@
 use credential_manager::{
     ContractError as CredentialError, CredentialManager, CredentialManagerClient, CredentialType,
+    RevocationReason,
 };
 use identity_registry::{ContractError as IdentityError, IdentityRegistry, IdentityRegistryClient};
 use reputation::{ContractError as ReputationError, Reputation, ReputationClient};
@@ -37,7 +38,7 @@ fn did_and_credential_lifecycle() {
     let subject = Address::generate(&env);
 
     identity.initialize(&admin);
-    credentials.initialize(&admin);
+    credentials.initialize(&admin, &identity.address);
     reputation.initialize(&admin);
 
     // Create a DID before issuing credentials so the subject has an on-chain identity.
@@ -64,16 +65,19 @@ fn did_and_credential_lifecycle() {
         &claims_hash,
         &signature,
         &0u64,
-    );
+            &0u64,
+            &None,
+            &None,
+        );
 
-    assert!(credentials.verify_credential(&credential_id));
+    credentials.verify_credential(&credential_id);
     let credential = credentials.get_credential(&credential_id);
     assert_eq!(credential.subject, subject);
     assert_eq!(credential.issuer, issuer);
 
     // Revocation must immediately make the same credential fail verification.
-    credentials.revoke_credential(&issuer, &credential_id);
-    assert!(!credentials.verify_credential(&credential_id));
+    credentials.revoke_credential(&issuer, &credential_id, &RevocationReason::KeyCompromise);
+    assert!(credentials.try_verify_credential(&credential_id).is_err());
 }
 
 #[test]
@@ -163,8 +167,11 @@ fn cross_contract_lifecycle() {
         &BytesN::from_array(&env, &[0u8; 32]),
         &Bytes::from_array(&env, &[1u8; 64]),
         &0u64,
-    );
-    assert!(credentials.verify_credential(&cred_id));
+            &0u64,
+            &None,
+            &None,
+        );
+    credentials.verify_credential(&cred_id);
     let cred = credentials.get_credential(&cred_id);
     assert_eq!(cred.subject, subject);
 
@@ -175,7 +182,7 @@ fn cross_contract_lifecycle() {
 
     // Assert final state across all three contracts is consistent
     assert!(identity.has_active_did(&subject));          // DID still active
-    assert!(credentials.verify_credential(&cred_id));    // credential still valid
+    credentials.verify_credential(&cred_id);    // credential still valid
     let rec = reputation.get_reputation(&subject);
     assert!(rec.score > 0);                              // reputation score is non-zero
     assert_eq!(rec.reporter_count, 1);
@@ -226,8 +233,11 @@ fn full_credential_lifecycle_across_contracts() {
         &BytesN::from_array(&env, &[3u8; 32]),
         &Bytes::from_array(&env, &[2u8; 64]),
         &0u64,
-    );
-    assert!(credentials.verify_credential(&cred_id));
+            &0u64,
+            &None,
+            &None,
+        );
+    credentials.verify_credential(&cred_id);
 
     // Reputation accrues while the credential is valid.
     reputation.add_reporter(&reporter);
@@ -236,12 +246,12 @@ fn full_credential_lifecycle_across_contracts() {
     assert!(reputation.get_reputation(&subject).score > 0);
 
     // Revoke: credential verification must fail immediately.
-    credentials.revoke_credential(&issuer, &cred_id);
-    assert!(!credentials.verify_credential(&cred_id));
+    credentials.revoke_credential(&issuer, &cred_id, &RevocationReason::Superseded);
+    assert!(credentials.try_verify_credential(&cred_id).is_err());
 
     // Terminal state is consistent across all three contracts.
     assert!(identity.has_active_did(&subject));
-    assert!(!credentials.verify_credential(&cred_id));
+    assert!(credentials.try_verify_credential(&cred_id).is_err());
     assert_eq!(reputation.get_reputation(&subject).reporter_count, 1);
 }
 
@@ -283,6 +293,9 @@ fn cross_contract_authorization_checks() {
             &BytesN::from_array(&env, &[4u8; 32]),
             &Bytes::from_array(&env, &[3u8; 64]),
             &0u64,
+            &0u64,
+            &None,
+            &None,
         )
         .is_err());
 
@@ -295,13 +308,18 @@ fn cross_contract_authorization_checks() {
         &BytesN::from_array(&env, &[5u8; 32]),
         &Bytes::from_array(&env, &[4u8; 64]),
         &0u64,
-    );
-    assert!(credentials.try_revoke_credential(&rogue, &cred_id).is_err());
-    assert!(credentials.verify_credential(&cred_id));
+            &0u64,
+            &None,
+            &None,
+        );
+    assert!(credentials
+        .try_revoke_credential(&rogue, &cred_id, &RevocationReason::Unspecified)
+        .is_err());
+    credentials.verify_credential(&cred_id);
 
     // Only the original issuer can revoke successfully.
-    credentials.revoke_credential(&issuer, &cred_id);
-    assert!(!credentials.verify_credential(&cred_id));
+    credentials.revoke_credential(&issuer, &cred_id, &RevocationReason::Superseded);
+    assert!(credentials.try_verify_credential(&cred_id).is_err());
 }
 
 /// Reputation integration with credentials: reputation reads/writes are tied to
@@ -344,8 +362,11 @@ fn reputation_integration_with_credentials() {
         &BytesN::from_array(&env, &[6u8; 32]),
         &Bytes::from_array(&env, &[5u8; 64]),
         &0u64,
-    );
-    assert!(credentials.verify_credential(&cred_id));
+            &0u64,
+            &None,
+            &None,
+        );
+    credentials.verify_credential(&cred_id);
 
     let reason = String::from_str(&env, "credential-backed reputation");
     reputation.submit_score(&reporter, &subject, &80, &reason);
@@ -355,8 +376,8 @@ fn reputation_integration_with_credentials() {
     assert!(reputation.passes_sybil_check(&subject, &50, &1));
 
     // Revoking the credential does not silently erase reputation history.
-    credentials.revoke_credential(&issuer, &cred_id);
-    assert!(!credentials.verify_credential(&cred_id));
+    credentials.revoke_credential(&issuer, &cred_id, &RevocationReason::Superseded);
+    assert!(credentials.try_verify_credential(&cred_id).is_err());
     assert_eq!(reputation.get_reputation(&subject).score, 80);
 }
 
@@ -391,13 +412,14 @@ fn edge_cases_and_error_propagation() {
         Err(Ok(IdentityError::DidAlreadyExists))
     );
 
-    // Registering the same issuer twice is rejected.
+    // Registering the same issuer twice is idempotent.
     credentials.add_issuer(&issuer);
-    assert!(credentials.try_add_issuer(&issuer).is_err());
+    credentials.add_issuer(&issuer);
+    assert_eq!(credentials.get_issuers().len(), 1);
 
     // Verifying an unknown credential id fails rather than panicking.
     let unknown = BytesN::from_array(&env, &[9u8; 32]);
-    assert!(!credentials.verify_credential(&unknown));
+    assert!(credentials.try_verify_credential(&unknown).is_err());
 
     // The DID remains active and reputation is untouched by the failed calls.
     assert!(identity.has_active_did(&subject));
@@ -437,6 +459,8 @@ fn update_did_with_empty_metadata_returns_empty_metadata() {
     identity.initialize(&admin);
     identity.create_did(&subject, &Map::new(&env));
 
-    assert_
-
-/* … truncated 11366 chars — edit only what you need near the top … */
+    assert_eq!(
+        identity.try_update_did(&subject, &Map::new(&env)),
+        Err(Ok(IdentityError::EmptyMetadata))
+    );
+}

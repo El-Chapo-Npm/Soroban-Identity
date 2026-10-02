@@ -22,7 +22,14 @@ cd "$(dirname "$0")"
 TIME_BUDGET="${1:-60}"
 shift || true
 
-ALL_TARGETS=("fuzz_create_did" "fuzz_issue_credential" "fuzz_submit_score")
+ALL_TARGETS=(
+  "fuzz_create_did"
+  "fuzz_issue_credential"
+  "fuzz_submit_score"
+  "fuzz_verify_credentials_batch"
+  "fuzz_revoke_and_delegate"
+  "fuzz_resolve_external_did"
+)
 if [ "$#" -gt 0 ]; then
   TARGETS=("$@")
 else
@@ -49,7 +56,7 @@ for target in "${TARGETS[@]}"; do
 
   echo "Corpus: $(find "corpus/$target" -type f | wc -l) inputs"
 
-  if cargo +nightly fuzz run "$target" "corpus/$target" -- \
+  if cargo +nightly fuzz run --fuzz-dir . "$target" "corpus/$target" -- \
       -max_total_time="$TIME_BUDGET" \
       -rss_limit_mb=2048 \
       -print_final_stats=1; then
@@ -79,7 +86,7 @@ else
   echo "❌ Some fuzz targets found crashes. See artifacts/ for reproducers."
   echo
   echo "To reproduce a crash:"
-  echo "  cargo +nightly fuzz run <target> artifacts/<target>/<crash-file>"
+  echo "  cargo +nightly fuzz run --fuzz-dir . <target> artifacts/<target>/<crash-file>"
   echo
   echo "To minimize a crash:"
   echo "  cargo +nightly fuzz tmin <target> artifacts/<target>/<crash-file>"

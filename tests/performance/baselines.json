@@ -1,0 +1,76 @@
+{
+  "_comment": "Performance baselines for regression detection. Update by running: node tests/performance/report.js --update",
+  "_version": 1,
+  "api": {
+    "GET /health": {
+      "p50_ms": 5,
+      "p95_ms": 20,
+      "p99_ms": 50
+    },
+    "GET /info": {
+      "p50_ms": 5,
+      "p95_ms": 20,
+      "p99_ms": 50
+    },
+    "GET /credentials": {
+      "p50_ms": 30,
+      "p95_ms": 100,
+      "p99_ms": 200
+    },
+    "POST /credentials": {
+      "p50_ms": 50,
+      "p95_ms": 150,
+      "p99_ms": 300
+    },
+    "GET /credentials/:id": {
+      "p50_ms": 20,
+      "p95_ms": 80,
+      "p99_ms": 150
+    },
+    "POST /credentials/:id/verify": {
+      "p50_ms": 20,
+      "p95_ms": 80,
+      "p99_ms": 150
+    },
+    "POST /credentials/:id/revoke": {
+      "p50_ms": 50,
+      "p95_ms": 150,
+      "p99_ms": 300
+    },
+    "POST /batch": {
+      "p50_ms": 100,
+      "p95_ms": 300,
+      "p99_ms": 600
+    }
+  },
+  "contract": {
+    "create_did": {
+      "cpu_insns_max": 5000000,
+      "mem_bytes_max": 512000
+    },
+    "resolve_did": {
+      "cpu_insns_max": 2000000,
+      "mem_bytes_max": 256000
+    },
+    "update_did": {
+      "cpu_insns_max": 4000000,
+      "mem_bytes_max": 512000
+    },
+    "deactivate_did": {
+      "cpu_insns_max": 3000000,
+      "mem_bytes_max": 256000
+    },
+    "set_recovery_address": {
+      "cpu_insns_max": 3000000,
+      "mem_bytes_max": 256000
+    },
+    "initiate_recovery": {
+      "cpu_insns_max": 4000000,
+      "mem_bytes_max": 256000
+    },
+    "recover_did": {
+      "cpu_insns_max": 6000000,
+      "mem_bytes_max": 512000
+    }
+  }
+}

@@ -38,6 +38,30 @@ Requests to unversioned endpoints (e.g. `/credentials`, `/health`, `/info`) defa
 
 ---
 
+## Route Structure
+
+Version-specific route helpers live under `server/src/routes/`:
+
+| File | Purpose |
+| :--- | :--- |
+| `server/src/routes/version-middleware.js` | `applyVersioning(req, res, url)` – resolves version, sets headers, attaches `req.apiVersion` |
+| `server/src/routes/v1.js` | v1 route map, `withV1Prefix`, `stripV1Prefix`, pass-through `wrapResponse` |
+| `server/src/routes/v2.js` | v2 route map, `withV2Prefix`, v2 envelope `wrapResponse` / `toV2` |
+
+### Using the middleware in a route handler
+
+```js
+import { applyVersioning } from "./routes/version-middleware.js";
+import { toV2 } from "./routes/v2.js";
+
+// Inside the request handler:
+const { version, normalizedPath } = applyVersioning(req, res, url);
+const payload = { items: [...], nextCursor: null };
+return sendJson(res, 200, version === "v2" ? toV2(payload) : payload);
+```
+
+---
+
 ## 2. Supported Versions
 
 | Version | Status | Release Date | Deprecation Date | Sunset Date |

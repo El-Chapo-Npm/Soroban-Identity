@@ -1,0 +1,12 @@
+{
+  "name": "soroban-identity-e2e",
+  "private": true,
+  "scripts": {
+    "test": "playwright test -c playwright.config.ts",
+    "test:update": "playwright test -c playwright.config.ts --update-snapshots"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.10.0",
+    "@playwright/test": "^1.47.0"
+  }
+}

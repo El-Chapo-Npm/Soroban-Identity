@@ -58,6 +58,9 @@ soroban-identity/
 ├── frontend/                  # React + TypeScript dApp (Vite)
 ├── sdk/                       # TypeScript SDK for dApp integration
 ├── server/                    # Operational API, expiry jobs, health, and metrics
+├── analytics/                 # On-chain analytics indexer + live dashboard
+├── infrastructure/
+│   └── cdn/                   # CDN config, cache purge, multi-region tests, metrics
 ├── scripts/
 │   └── deploy.sh              # Build + deploy all contracts to testnet
 └── docs/
@@ -239,6 +242,7 @@ Features:
 - Create your own on-chain DID
 - Verify credentials by ID
 - Issue credentials (registered issuers)
+- Export credentials as PDF (with a verification QR code), JSON (W3C VC + export metadata), XML or CSV, individually or in batches (one combined file or a ZIP), using built-in or custom PDF templates
 
 ---
 
@@ -363,6 +367,20 @@ bash scripts/deploy.sh
 
 - `MAX_RETRIES` — Maximum number of retry attempts (default: `3`)
 - `RETRY_DELAY` — Initial delay in seconds before first retry (default: `2`)
+
+---
+
+## Video Tutorials
+
+<!-- videos:start -->
+1. Introduction *(coming soon)* (05:00)
+2. Quick Start on Testnet *(coming soon)* (10:00)
+3. Creating and Managing DIDs *(coming soon)* (08:00)
+4. The Credential Lifecycle *(coming soon)* (15:00)
+5. Integration Guide *(coming soon)* (20:00)
+
+Scripts, captions and transcripts are in [docs/videos](docs/videos/README.md).
+<!-- videos:end -->
 
 ---
 

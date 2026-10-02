@@ -1,0 +1,90 @@
+name: Container health checks
+
+# Exercises the API image's HEALTHCHECK end to end (#883): the probe script,
+# the healthy -> unhealthy -> healthy transitions, and restart on exit.
+on:
+  pull_request:
+    paths:
+      - server/Dockerfile
+      - server/Dockerfile.dockerignore
+      - server/scripts/healthcheck.mjs
+      - server/test/healthcheck.test.js
+      - infrastructure/deployment/docker-compose.yml
+      - .github/workflows/container-health.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  healthcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      IMAGE: soroban-identity:ci
+      # Stand-in for the server process: answers /live with 200, like
+      # src/index.js does. Keeps this job independent of server start-up
+      # configuration while still running the image's own HEALTHCHECK.
+      STUB: >-
+        import('node:http').then(({ createServer }) =>
+        createServer((req, res) => { res.writeHead(req.url === '/live' ? 200 : 404); res.end(); })
+        .listen(3001))
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Unit-test the probe script
+        run: node --test server/test/healthcheck.test.js
+
+      - name: Validate the compose file
+        run: IMAGE="$IMAGE" docker compose -f infrastructure/deployment/docker-compose.yml config --quiet
+
+      - name: Build the image
+        run: docker build -f server/Dockerfile -t "$IMAGE" .
+
+      - name: The image declares a HEALTHCHECK against /live
+        run: |
+          docker image inspect "$IMAGE" --format '{{json .Config.Healthcheck}}' | tee healthcheck.json
+          grep -q 'scripts/healthcheck.mjs' healthcheck.json
+
+      - name: Healthy, unhealthy when hung, healthy again
+        run: |
+          wait_for() {
+            local want="$1" status
+            for _ in $(seq 1 60); do
+              status="$(docker inspect --format '{{.State.Health.Status}}' hc)"
+              [ "$status" = "$want" ] && { echo "health: $status"; return 0; }
+              sleep 1
+            done
+            echo "expected $want, still $status" >&2
+            docker inspect --format '{{json .State.Health}}' hc >&2
+            return 1
+          }
+          # Faster timings than the image defaults; the probe command is the
+          # image's own.
+          docker run -d --name hc \
+            -e HEALTHCHECK_TIMEOUT_MS=1000 \
+            --health-interval=2s --health-timeout=3s --health-retries=2 --health-start-period=0s \
+            "$IMAGE" node -e "$STUB"
+          wait_for healthy
+          # A frozen process keeps its socket open but never answers.
+          docker kill --signal=SIGSTOP hc
+          wait_for unhealthy
+          docker kill --signal=SIGCONT hc
+          wait_for healthy
+          docker rm -f hc
+
+      - name: Restarted after the process exits
+        run: |
+          docker run -d --name crash --restart unless-stopped \
+            "$IMAGE" node -e "setTimeout(() => process.exit(1), 2000)"
+          for _ in $(seq 1 30); do
+            count="$(docker inspect --format '{{.RestartCount}}' crash)"
+            [ "$count" -ge 1 ] && { echo "restarts: $count"; docker rm -f crash; exit 0; }
+            sleep 1
+          done
+          echo "container was not restarted" >&2
+          exit 1

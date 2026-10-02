@@ -622,6 +622,7 @@ export function setCorsHeaders(req, res, config) {
 
   const exposedHeaders = config.corsExposedHeaders ?? [
     "X-Request-ID",
+    "X-Correlation-ID",
     "Content-Type",
   ];
   if (exposedHeaders.length > 0) {
@@ -643,6 +644,7 @@ export function setCorsHeaders(req, res, config) {
       "Authorization",
       "X-API-Key",
       "X-Request-ID",
+      "X-Correlation-ID",
       "X-Actor",
     ];
     res.setHeader("Access-Control-Allow-Methods", methods.join(", "));

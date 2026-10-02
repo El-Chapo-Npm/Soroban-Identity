@@ -18,6 +18,12 @@ const REV_REASON: Symbol = symbol_short!("REVRSN");
 const REV_COUNT: Symbol = symbol_short!("REVCNT");
 const TOTAL_REV: Symbol = symbol_short!("TOTREV");
 const TTL_MAX: u32 = 6_312_000;
+/// Extend a persistent entry's TTL only once it has dropped below this many
+/// ledgers (#866). With the threshold equal to the target, every access
+/// re-extended the TTL and paid rent again; now an entry that is read or
+/// written often is extended at most about once every 30 days
+/// (518_400 ledgers at 5 s), while never having less than ~11 months left.
+const TTL_BUMP_THRESHOLD: u32 = TTL_MAX - 518_400;
 const TTL_MIN: u32 = 17_280;
 const PAGE_CAP: u32 = 100;
 const BITMAP_WORDS: u32 = 16;
@@ -193,7 +199,7 @@ impl RevocationRegistry {
         env.storage().persistent().set(&key, &bitmap);
         env.storage()
             .persistent()
-            .extend_ttl(&key, TTL_MAX, TTL_MAX);
+            .extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
 
         env.events().publish(
             (REV_MAP, symbol_short!("init")),
@@ -240,7 +246,7 @@ impl RevocationRegistry {
         env.storage().persistent().set(&key, &bitmap);
         env.storage()
             .persistent()
-            .extend_ttl(&key, TTL_MAX, TTL_MAX);
+            .extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
 
         let now = env.ledger().timestamp();
         let record = RevocationRecord {
@@ -258,7 +264,7 @@ impl RevocationRegistry {
         env.storage().persistent().set(&record_key, &record);
         env.storage()
             .persistent()
-            .extend_ttl(&record_key, TTL_MAX, TTL_MAX);
+            .extend_ttl(&record_key, TTL_BUMP_THRESHOLD, TTL_MAX);
 
         let cnt: u32 = env
             .storage()
@@ -349,13 +355,13 @@ impl RevocationRegistry {
             env.storage().persistent().set(&record_key, &record);
             env.storage()
                 .persistent()
-                .extend_ttl(&record_key, TTL_MAX, TTL_MAX);
+                .extend_ttl(&record_key, TTL_BUMP_THRESHOLD, TTL_MAX);
         }
 
         env.storage().persistent().set(&key, &bitmap);
         env.storage()
             .persistent()
-            .extend_ttl(&key, TTL_MAX, TTL_MAX);
+            .extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
 
         let cnt: u32 = env
             .storage()
@@ -509,7 +515,7 @@ impl RevocationRegistry {
         env.storage().persistent().set(&bitmap_key, &bitmap);
         env.storage()
             .persistent()
-            .extend_ttl(&bitmap_key, TTL_MAX, TTL_MAX);
+            .extend_ttl(&bitmap_key, TTL_BUMP_THRESHOLD, TTL_MAX);
 
         let now = env.ledger().timestamp();
         record.reversed = true;
@@ -517,7 +523,7 @@ impl RevocationRegistry {
         env.storage().persistent().set(&record_key, &record);
         env.storage()
             .persistent()
-            .extend_ttl(&record_key, TTL_MAX, TTL_MAX);
+            .extend_ttl(&record_key, TTL_BUMP_THRESHOLD, TTL_MAX);
 
         let cnt: u32 = env
             .storage()
@@ -550,7 +556,7 @@ impl RevocationRegistry {
             Some(record) => {
                 env.storage()
                     .persistent()
-                    .extend_ttl(&key, TTL_MAX, TTL_MAX);
+                    .extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
                 Ok(record)
             }
         }
@@ -568,7 +574,7 @@ impl RevocationRegistry {
             Some(bitmap) => {
                 env.storage()
                     .persistent()
-                    .extend_ttl(&key, TTL_MAX, TTL_MAX);
+                    .extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
                 Some(bitmap)
             }
         }
@@ -661,7 +667,7 @@ mod tests {
     use super::*;
     use soroban_sdk::{
         testutils::{Address as _, Events as _, Ledger as _},
-        Env, String,
+        BytesN, Env, String,
     };
 
     fn setup() -> (Env, Address, RevocationRegistryClient<'static>) {
@@ -769,5 +775,49 @@ mod tests {
 
         let result = client.try_revoke_credential(&issuer, &cred_id, &0, &REASON_KEY_COMPROMISE, &None);
         assert_eq!(result, Err(Ok(ContractError::AlreadyRevoked)));
+    }
+
+    /// #866: an access only extends the TTL once it has dropped below
+    /// `TTL_BUMP_THRESHOLD`, instead of on every call.
+    #[test]
+    fn test_writes_extend_ttl_only_below_threshold() {
+        use soroban_sdk::testutils::storage::Persistent as _;
+        let (env, _admin, client) = setup();
+        let issuer = Address::generate(&env);
+        client.init_bitmap(&issuer, &128);
+        let ttl = || {
+            env.as_contract(&client.address, || {
+                env.storage()
+                    .persistent()
+                    .get_ttl(&RevocationRegistry::bitmap_key(&issuer))
+            })
+        };
+        let full = ttl();
+        // Keep the contract instance itself alive across the ledger jumps below.
+        env.as_contract(&client.address, || {
+            env.storage().instance().extend_ttl(6_000_000, 6_000_000)
+        });
+
+        // Rewriting the bitmap keeps its TTL while it is above the threshold.
+        env.ledger().with_mut(|li| li.sequence_number += 1_000);
+        client.revoke_credential(
+            &issuer,
+            &BytesN::from_array(&env, &[1u8; 32]),
+            &0,
+            &REASON_KEY_COMPROMISE,
+            &None,
+        );
+        assert!(client.is_revoked(&issuer, &0));
+        assert_eq!(ttl(), full - 1_000);
+
+        env.ledger().with_mut(|li| li.sequence_number += 518_400);
+        client.revoke_credential(
+            &issuer,
+            &BytesN::from_array(&env, &[2u8; 32]),
+            &1,
+            &REASON_KEY_COMPROMISE,
+            &None,
+        );
+        assert_eq!(ttl(), full);
     }
 }

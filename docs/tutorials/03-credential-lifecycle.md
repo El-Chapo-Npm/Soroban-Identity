@@ -45,8 +45,16 @@ console.log(result);
 ## 4. Renew or revoke
 
 ```ts
-await credentials.revokeCredential(issuerKeypair, credentialId);
+import { RevocationReason } from "@soroban-identity/sdk";
+
+await credentials.revokeCredential(issuerKeypair, credentialId, RevocationReason.Superseded);
 ```
+
+The third argument is required since #937: the reason is stored with the
+revocation, indexed on-chain and emitted with the `revoked` event, so verifiers
+and auditors can see *why* a credential was pulled. The five reasons are
+`Compromised`, `Expired`, `Superseded`, `Lost` and `AdminRevoked`
+(`REVOCATION_REASONS` exports them in the contract's order).
 
 To revoke many credentials at once, use `revokeBatch`. To issue many, use `issueCredentialBatch`.
 

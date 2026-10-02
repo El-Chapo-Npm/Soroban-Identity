@@ -1,0 +1,310 @@
+/* ── Navigation (#882) ───────────────────────────────────────────────────────
+   Phones: the header controls (network status, language, network, theme,
+   wallet) sit in a drawer opened by the menu button, and the section tabs
+   stay pinned to the top of the screen while the page scrolls.
+   Tablets and up: the controls are shown inline in the header. */
+
+/* ── Menu button ─────────────────────────────────────────────────────────── */
+
+.hamburger-btn {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid var(--border-input);
+  border-radius: 8px;
+  cursor: pointer;
+  /* Stays above the open drawer so it doubles as the close button. */
+  position: relative;
+  z-index: 40;
+}
+
+.hamburger-btn:hover {
+  background: var(--bg-subtle);
+}
+
+.hamburger-icon,
+.hamburger-icon::before,
+.hamburger-icon::after {
+  display: block;
+  width: 20px;
+  height: 2px;
+  background: var(--text);
+  transition:
+    transform 0.2s ease,
+    opacity 0.2s ease;
+}
+
+.hamburger-icon {
+  position: relative;
+}
+
+.hamburger-icon::before,
+.hamburger-icon::after {
+  content: "";
+  position: absolute;
+  left: 0;
+}
+
+.hamburger-icon::before {
+  top: -6px;
+}
+.hamburger-icon::after {
+  top: 6px;
+}
+
+.hamburger-icon.open {
+  background: transparent;
+}
+.hamburger-icon.open::before {
+  top: 0;
+  transform: rotate(45deg);
+}
+.hamburger-icon.open::after {
+  top: 0;
+  transform: rotate(-45deg);
+}
+
+/* ── Drawer (phones) ─────────────────────────────────────────────────────── */
+
+.header-actions {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 35;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.75rem;
+  width: min(85vw, 320px);
+  padding: max(4.5rem, calc(env(safe-area-inset-top) + 4rem))
+    max(1.25rem, env(safe-area-inset-right)) max(1.5rem, env(safe-area-inset-bottom)) 1.25rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--card-bg);
+  border-left: 1px solid var(--card-border);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.25);
+  transform: translateX(100%);
+  /* Hidden (and so out of the tab order) once the slide-out has finished. */
+  visibility: hidden;
+  transition:
+    transform 0.25s ease,
+    visibility 0s linear 0.25s;
+}
+
+.header-actions.open {
+  transform: translateX(0);
+  visibility: visible;
+  transition:
+    transform 0.25s ease,
+    visibility 0s;
+}
+
+.header-actions > * {
+  width: 100%;
+}
+
+.header-actions .network-switcher {
+  justify-content: space-between;
+}
+
+.header-actions .network-switcher select {
+  flex: 1;
+}
+
+/* The select inside is the 44px target; the label adds no height of its own. */
+.network-switcher {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.wallet-button {
+  align-items: stretch;
+}
+
+.mobile-drawer-backdrop {
+  display: none;
+}
+
+.mobile-drawer-backdrop.open {
+  display: block;
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: rgba(0, 0, 0, 0.4);
+}
+
+/* The page behind an open drawer must not scroll. */
+html.nav-open,
+html.nav-open body {
+  overflow: hidden;
+}
+
+/* ── Network status pill ─────────────────────────────────────────────────── */
+
+.network-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.8rem;
+  border-radius: 0.25rem;
+  font-size: 0.85rem;
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
+
+.network-status.is-online {
+  background: var(--success-bg);
+  color: var(--success-text);
+}
+
+.network-status__dot {
+  display: inline-block;
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #dc3545;
+}
+
+.network-status.is-online .network-status__dot {
+  background: #28a745;
+}
+
+/* ── Section tabs ────────────────────────────────────────────────────────── */
+
+/* Pinned to the top while scrolling, and scrolled sideways when the labels
+   do not fit rather than wrapping onto a second row. */
+.tabs {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  gap: 0.4rem;
+  margin: 0 calc(-1 * max(0.75rem, env(safe-area-inset-left))) 1rem;
+  padding: 0.5rem max(0.75rem, env(safe-area-inset-left));
+  overflow-x: auto;
+  scroll-snap-type: x proximity;
+  scrollbar-width: none;
+  background: var(--bg);
+  border-bottom: 1px solid var(--header-border);
+}
+
+.tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.tab {
+  flex: 1 0 auto;
+  scroll-snap-align: start;
+  white-space: nowrap;
+  background: transparent;
+  border: 1px solid var(--tab-border);
+  color: var(--tab-color);
+  padding: 0.5rem 1rem;
+  border-radius: 8px;
+  font-size: 0.9rem;
+}
+
+.tab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--btn-text);
+}
+
+/* ── ≥ 600px ─────────────────────────────────────────────────────────────── */
+
+@media (min-width: 600px) {
+  .tabs {
+    margin-left: calc(-1 * max(1rem, env(safe-area-inset-left)));
+    margin-right: calc(-1 * max(1rem, env(safe-area-inset-right)));
+    padding-left: max(1rem, env(safe-area-inset-left));
+    padding-right: max(1rem, env(safe-area-inset-right));
+  }
+}
+
+/* ── ≥ 768px: controls inline in the header ──────────────────────────────── */
+
+@media (min-width: 768px) {
+  .hamburger-btn,
+  .mobile-drawer-backdrop,
+  .mobile-drawer-backdrop.open {
+    display: none;
+  }
+
+  html.nav-open,
+  html.nav-open body {
+    overflow: visible;
+  }
+
+  .header-actions,
+  .header-actions.open {
+    position: static;
+    flex: 1 0 100%;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    width: auto;
+    padding: 0;
+    overflow: visible;
+    background: none;
+    border: 0;
+    box-shadow: none;
+    transform: none;
+    visibility: visible;
+    transition: none;
+  }
+
+  .header-actions > * {
+    width: auto;
+  }
+
+  .wallet-button {
+    align-items: flex-end;
+  }
+
+  .tabs {
+    position: static;
+    margin: 0 0 2rem;
+    padding: 0;
+    overflow: visible;
+    background: none;
+    border-bottom: 0;
+  }
+
+  .tab {
+    flex: 0 0 auto;
+  }
+}
+
+/* ── ≥ 1024px: brand and controls share one row ──────────────────────────── */
+
+@media (min-width: 1024px) {
+  .header-actions,
+  .header-actions.open {
+    flex: 0 1 auto;
+    flex-wrap: nowrap;
+  }
+}
+
+/* ── Phones in landscape ─────────────────────────────────────────────────── */
+
+@media (orientation: landscape) and (max-height: 500px) and (max-width: 767px) {
+  .header-actions {
+    padding-top: max(4rem, calc(env(safe-area-inset-top) + 3.5rem));
+    gap: 0.5rem;
+  }
+
+  .tabs {
+    padding-top: 0.35rem;
+    padding-bottom: 0.35rem;
+    margin-bottom: 0.75rem;
+  }
+}
