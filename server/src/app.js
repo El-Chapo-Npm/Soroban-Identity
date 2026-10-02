@@ -89,6 +89,7 @@ import { logger } from "./logger.js";
 import { AnalyticsService, detectCountry } from "./analytics.js";
 import { createRateLimiter } from "./middleware/ratelimit.js";
 import { ApiKeyService } from "./api-keys.js";
+import { UsageTracker } from "./analytics/usage.js";
 import { EmailTransport } from "./email.js";
 import { pickQuotaBinding, QuotaTracker, notifyQuotaThresholdOwner } from "./quota.js";
 import { DeprecationRegistry, notifyDeprecatedEndpointOwner } from "./deprecation.js";
@@ -114,6 +115,8 @@ const SERVER_FEATURES = [
 export function createApp({ config, soroban, metrics, metricsAggregator, analytics = new AnalyticsService() }) {
   return function app(req, res) {
     const startTime = Date.now();
+const usageTracker = new UsageTracker();
+
 export function createApp({
   config,
   soroban,
@@ -297,6 +300,12 @@ export function createApp({
         req.headers.authorization?.replace(/^Bearer\s+/i, "") ||
         "anonymous";
       const country = detectCountry(req);
+
+      usageTracker.record(req.apiKeyId ?? consumer, {
+        method: req.method,
+        path: url.pathname,
+        statusCode: res.statusCode,
+      });
 
       analytics.recordRequest({
         method: req.method,
@@ -1105,6 +1114,16 @@ export function createApp({
         if (pathname.startsWith("/admin/traces")) {
           if (!requireAuth(req, res, config, ['admin:read'])) return;
           if (handleTraceRoutes(req, res, { pathname, searchParams: url.searchParams }, { sendJson, nonce: req.cspNonce })) return;
+        }
+
+        // Per-key API usage (#888)
+        if (req.method === "GET" && url.pathname === "/analytics/usage") {
+          if (!await requireAuth(req, res, config, [])) return;
+          const consumer = req.apiKeyId ?? req.headers["x-api-key"] ?? req.headers.authorization?.replace(/^Bearer\s+/i, "") ?? "anonymous";
+          return sendFormatted(req, res, 200, usageTracker.getUsage(consumer, {
+            period: url.searchParams.get("period") ?? "day",
+            tier: req.userTier ?? "free",
+          }));
         }
 
         // Analytics Dashboard
