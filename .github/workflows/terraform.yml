@@ -13,8 +13,8 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-terraform@v4
         with: { terraform_version: 1.8.5 }
       - name: Format check
         run: terraform -chdir=infra/terraform fmt -check -recursive
@@ -23,7 +23,7 @@ jobs:
       - name: Validate
         run: terraform -chdir=infra/terraform validate
       - name: IaC security scan
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
           scan-ref: infra/terraform
@@ -31,7 +31,7 @@ jobs:
           severity: HIGH,CRITICAL
       - name: Infracost estimate
         if: github.event_name == 'pull_request'
-        uses: infracost/actions/comment@v0.17
+        uses: infracost/actions/comment@v4
         env:
           INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -44,8 +44,8 @@ jobs:
     runs-on: ubuntu-latest
     environment: terraform-plan
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-terraform@v4
       - name: Plan each environment
         env:
           TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
