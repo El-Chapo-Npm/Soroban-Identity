@@ -42,6 +42,13 @@ pub fn score_bucket(score: i128) -> Option<usize> {
 }
 
 /// Converts a histogram bucket index back into the score it represents.
-pub fn bucket_score(bucket: usize) -> i128 {
-    MIN_SCORE + bucket as i128
+///
+/// Returns `None` for out-of-range bucket indices so callers can skip
+/// malformed entries instead of relying on the addition below to stay
+/// in range.
+pub fn bucket_score(bucket: usize) -> Option<i128> {
+    if bucket >= SCORE_BUCKETS {
+        return None;
+    }
+    Some(MIN_SCORE + bucket as i128)
 }

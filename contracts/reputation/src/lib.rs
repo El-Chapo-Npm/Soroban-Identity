@@ -1921,4 +1921,81 @@ mod tests {
             Err(Ok(ContractError::Unauthorized))
         );
     }
+
+    // ── Regression: extreme deltas must not panic ─────────────────────────────
+
+    #[test]
+    fn test_extreme_deltas_do_not_panic_and_clamp() {
+        let (env, _admin, client) = setup();
+        let reporter = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_reporter(&reporter);
+        let reason = String::from_str(&env, "extreme");
+
+        // i64::MIN delta must not panic and must clamp the score to MIN_SCORE.
+        client.submit_score(&reporter, &subject, &i64::MIN, &reason);
+        assert_eq!(client.get_reputation(&subject).score, MIN_SCORE);
+
+        // i64::MAX delta must not panic and must clamp to i64::MAX.
+        env.ledger().with_mut(|li| li.sequence_number += DEFAULT_RATE_LIMIT_WINDOW + 1);
+        client.submit_score(&reporter, &subject, &i64::MAX, &reason);
+        assert_eq!(client.get_reputation(&subject).score, i64::MAX);
+
+        // Another i64::MAX must saturate rather than overflow to negative.
+        env.ledger().with_mut(|li| li.sequence_number += DEFAULT_RATE_LIMIT_WINDOW + 1);
+        client.submit_score(&reporter, &subject, &i64::MAX, &reason);
+        assert_eq!(client.get_reputation(&subject).score, i64::MAX);
+    }
+
+    #[test]
+    fn test_zero_delta_with_unusual_reason_strings() {
+        let (env, _admin, client) = setup();
+        let reporter = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_reporter(&reporter);
+
+        // Empty reason string.
+        let empty = String::from_str(&env, "");
+        client.submit_score(&reporter, &subject, &0, &empty);
+        assert_eq!(client.get_reputation(&subject).score, MIN_SCORE);
+
+        // Reason at the maximum allowed length (256 bytes) must be accepted.
+        let max_reason = String::from_str(
+            &env,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        assert_eq!(max_reason.len(), 256);
+        env.ledger().with_mut(|li| li.sequence_number += DEFAULT_RATE_LIMIT_WINDOW + 1);
+        client.submit_score(&reporter, &subject, &0, &max_reason);
+        assert_eq!(client.get_reputation(&subject).score, MIN_SCORE);
+
+        // Reason one byte over the limit must return a typed error, not panic.
+        let too_long = String::from_str(
+            &env,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        assert_eq!(too_long.len(), 257);
+        env.ledger().with_mut(|li| li.sequence_number += DEFAULT_RATE_LIMIT_WINDOW + 1);
+        assert_eq!(
+            client.try_submit_score(&reporter, &subject, &0, &too_long),
+            Err(Ok(ContractError::ReasonTooLong))
+        );
+    }
+
+    #[test]
+    fn test_repeated_max_submissions_do_not_panic() {
+        let (env, _admin, client) = setup();
+        let reporter = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_reporter(&reporter);
+        let reason = String::from_str(&env, "max");
+
+        // Repeatedly submit i64::MAX; score must saturate at i64::MAX and never
+        // wrap to a negative value or panic.
+        for _ in 0..5 {
+            client.submit_score(&reporter, &subject, &i64::MAX, &reason);
+            assert_eq!(client.get_reputation(&subject).score, i64::MAX);
+            env.ledger().with_mut(|li| li.sequence_number += DEFAULT_RATE_LIMIT_WINDOW + 1);
+        }
+    }
 }

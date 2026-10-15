@@ -137,6 +137,9 @@ pub fn get_percentile_threshold(records: &[ReputationRecord], percentile: u32) -
     }
     sort_i64_asc(&mut sorted);
 
+    if sorted.is_empty() {
+        return None;
+    }
     let idx = if target > sorted.len() {
         sorted.len() - 1
     } else {
@@ -178,8 +181,9 @@ fn worst_index(records: &Vec<ReputationRecord>) -> u32 {
     let mut idx: u32 = 0;
     let mut i: u32 = 1;
     while i < records.len() {
-        let current = records.get(i).unwrap();
-        let worst = records.get(idx).unwrap();
+        let (Some(current), Some(worst)) = (records.get(i), records.get(idx)) else {
+            break;
+        };
         if is_better(&worst, &current) {
             idx = i;
         }
@@ -196,10 +200,14 @@ fn sort_desc(records: &mut Vec<ReputationRecord>) {
     let len = records.len();
     let mut i: u32 = 1;
     while i < len {
-        let key = records.get(i).unwrap();
+        let Some(key) = records.get(i) else {
+            break;
+        };
         let mut j = i;
         while j > 0 {
-            let prev = records.get(j - 1).unwrap();
+            let Some(prev) = records.get(j - 1) else {
+                break;
+            };
             if is_better(&prev, &key) {
                 break;
             }
@@ -216,10 +224,14 @@ fn sort_i64_asc(values: &mut Vec<i64>) {
     let len = values.len();
     let mut i: u32 = 1;
     while i < len {
-        let key = values.get(i).unwrap();
+        let Some(key) = values.get(i) else {
+            break;
+        };
         let mut j = i;
         while j > 0 {
-            let prev = values.get(j - 1).unwrap();
+            let Some(prev) = values.get(j - 1) else {
+                break;
+            };
             if prev <= key {
                 break;
             }

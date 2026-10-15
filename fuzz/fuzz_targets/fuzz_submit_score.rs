@@ -6,7 +6,7 @@
 //! unexpected behavior that deterministic unit tests miss.
 //!
 //! Run with cargo-fuzz:
-//!   cargo fuzz run fuzz_submit_score -- -max_total_time=60
+//!   cargo fuzz run fuzz_submit_score -- -max_total_time=300
 #![no_main]
 
 use arbitrary::Arbitrary;
