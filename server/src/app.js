@@ -94,6 +94,7 @@ import { EmailTransport } from "./email.js";
 import { pickQuotaBinding, QuotaTracker, notifyQuotaThresholdOwner } from "./quota.js";
 import { DeprecationRegistry, notifyDeprecatedEndpointOwner } from "./deprecation.js";
 import { DdosProtection, ddosResponse } from "./ddos-protection.js";
+import { createGateway } from "./gateway.js";
 import { TenantRegistry, handleTenantRoutes, resolveTenantId } from "./tenancy/index.js";
 import { openTelemetryHttpMiddleware } from "./tracing/index.js";
 import { EventStore, EventReplayer, createEvent, EventTypes, handleEventSourcingRoutes } from "./events/index.js";
@@ -189,6 +190,20 @@ export function createApp({
         return notifyDeprecatedEndpointOwner({ config, apiKeyService, emailTransport, apiKeyId, rule });
       },
     });
+
+  // One gateway per app instance. It owns the auth, rate-limit, and quota
+  // stages that used to be inlined in the request handler below, so the
+  // pipeline runs in a single place and the route handlers only see requests
+  // that have already cleared it.
+  const gateway = createGateway({
+    config,
+    metrics,
+    apiKeyService,
+    limiter,
+    quota,
+    nonceStore,
+    logger,
+  });
 
   const tenantRegistry = new TenantRegistry(config);
   void tenantRegistry.init();
@@ -326,30 +341,6 @@ export function createApp({
       return;
     }
 
-    // Extract tier and API key ID from API key or headers early if present
-    const authHeader = req.headers["authorization"] || req.headers["x-api-key"];
-    if (authHeader) {
-      const token = typeof authHeader === "string" ? authHeader.replace(/^Bearer\s+/i, "") : "";
-      try {
-        const keyRecord = await apiKeyService.validateKey(token);
-        if (keyRecord) {
-          req.apiKeyId = keyRecord.id;
-          req.userTier = keyRecord.tier || 'free';
-          req.auth = { apiKey: keyRecord };
-        } else {
-          const parts = token.split(":");
-          if (parts.length >= 2 && ["free", "pro", "enterprise"].includes(parts[1].toLowerCase())) {
-            req.userTier = parts[1].toLowerCase();
-          }
-        }
-      } catch {
-        // fallback
-      }
-    }
-    if (req.headers["x-user-tier"]) {
-      req.userTier = req.headers["x-user-tier"].toLowerCase();
-    }
-
     // Per-endpoint deprecation warnings (#751), independent of the
     // per-version deprecation versioning.js already applied above. Runs
     // after API key extraction so usage logging/notification can be
@@ -357,169 +348,12 @@ export function createApp({
     const deprecationRule = deprecation.match(req.method, pathname);
     if (deprecationRule) deprecation.handle(req, res, deprecationRule);
 
-    // Rate limiting check (exempt /info, /health, /metrics)
-    const isExempt = ["/info", "/health", "/ready", "/live", "/metrics"].includes(url.pathname);
-
-    // HMAC request signing (#752). Verified before routing so no handler can
-    // act on a request whose body was tampered with or replayed. Operational
-    // endpoints are exempt for the same reason they skip rate limiting: a
-    // probe has to work without client credentials.
-    // A CSP violation report is posted by the browser itself, which has no
-    // API key and no signing secret, so it can never carry a signature.
-    const isSigningExempt = isExempt || pathname === "/csp-report";
-
-    if (config.requestSigningEnabled && !isSigningExempt) {
-      const mustBeSigned =
-        config.requestSigningEnforce === "all" ||
-        !["GET", "HEAD", "OPTIONS"].includes(req.method);
-
-      if (mustBeSigned) {
-        // Buffered here and memoised on the request; the route handler's
-        // readJson call reuses these exact bytes.
-        const { tooLarge, buffer } = await readRawBody(req, config);
-        if (tooLarge) {
-          return sendJson(res, 413, {
-            code: "PAYLOAD_TOO_LARGE",
-            message: "Request body exceeds the size limit.",
-          });
-        }
-
-        // An explicit key id lets a caller sign with a key it is not also
-        // authenticating with; otherwise the authenticated key supplies it.
-        const signingKeyId = req.headers[KEY_ID_HEADER] ?? req.apiKeyId ?? null;
-        const signingSecret = signingKeyId
-          ? await apiKeyService.getSigningSecret(signingKeyId)
-          : null;
-
-        const verdict = verifySignedRequest({
-          headers: req.headers,
-          method: req.method,
-          path: req.url,
-          body: buffer,
-          secret: signingSecret,
-          nonceStore,
-          maxAgeSeconds: config.requestSigningMaxAgeSeconds,
-          scope: signingKeyId ?? "",
-        });
-
-        if (!verdict.ok) {
-          logger.warn(
-            { code: verdict.code, keyId: signingKeyId, route: routeLabel(pathname) },
-            "Rejected request signature",
-          );
-          return sendJson(res, verdict.status, {
-            error: "invalid_signature",
-            code: verdict.code,
-            message: verdict.message,
-          });
-        }
-      }
-    }
-
-    if (!isExempt) {
-      const rateResult = limiter.check(req, url.pathname);
-
-      if (rateResult.whitelisted) {
-        res.setHeader("X-RateLimit-Bypass", rateResult.bypass ?? "whitelist");
-      } else {
-        // Report whichever budget is closest to exhaustion, so a client sees
-        // the limit that will actually stop it first.
-        const reported = rateResult.binding ?? rateResult;
-        res.setHeader("X-RateLimit-Tier", String(rateResult.tier ?? reported.rule ?? "free"));
-        res.setHeader("X-RateLimit-Limit", String(reported.limit));
-        res.setHeader("X-RateLimit-Remaining", String(reported.remaining));
-        res.setHeader("X-RateLimit-Reset", String(reported.resetAt));
-        if (!rateResult.allowed) {
-          res.setHeader("X-RateLimit-Scope", rateResult.scope);
-        } else if (reported.rule === "ip" || reported.rule === "user") {
-          res.setHeader("X-RateLimit-Scope", reported.rule);
-        } else if (rateResult.endpoint?.rule) {
-          res.setHeader("X-RateLimit-Scope", "tier");
-        }
-      }
-
-      if (!rateResult.allowed) {
-        res.setHeader("Retry-After", String(rateResult.retryAfter));
-
-        // An endpoint denial is not a tier problem, so it must not be dressed
-        // up as one — upgrading would not raise a per-endpoint limit.
-        const isEndpointDenial = rateResult.scope === "endpoint";
-        // Per-IP and per-user denials are abuse controls, not tier limits.
-        const isClientDenial = rateResult.scope === "ip" || rateResult.scope === "user";
-
-        if (isClientDenial) {
-          return sendJson(res, 429, {
-            error: "rate_limit_exceeded",
-            code: "RATE_LIMIT_EXCEEDED",
-            scope: rateResult.scope,
-            message: `Too many requests from this ${rateResult.scope === "ip" ? "IP address" : "account"}. Retry in ${rateResult.retryAfter}s.`,
-            limit: rateResult.limit,
-            retryAfter: rateResult.retryAfter,
-          });
-        }
-
-        if (!isEndpointDenial && rateResult.tier === "free") {
-          res.setHeader(
-            "X-Upgrade-Available",
-            "Upgrade to Pro or Enterprise for higher limits: https://soroban-identity.org/pricing"
-          );
-        }
-
-        const windowMinutes = Math.round(
-          ((rateResult.resetAt * 1000) - Date.now()) / 60000
-        );
-
-        return sendJson(res, 429, {
-          error: "rate_limit_exceeded",
-          code: "RATE_LIMIT_EXCEEDED",
-          scope: rateResult.scope,
-          message: isEndpointDenial
-            ? `Rate limit exceeded for '${rateResult.rule}' (${rateResult.limit} requests per window). Retry in ${rateResult.retryAfter}s.`
-            : rateResult.tier === "free"
-              ? `Free tier rate limit exceeded (${rateResult.limit} req/min). Upgrade to Pro (300 req/min) or Enterprise (1200 req/min) for higher limits.`
-              : `Rate limit exceeded for tier '${rateResult.tier}' (${rateResult.limit} req/min).`,
-          ...(isEndpointDenial ? { rule: rateResult.rule, windowMinutes } : { tier: rateResult.tier }),
-          ...(!isEndpointDenial && rateResult.tier === "free"
-            ? {
-                upgrade: {
-                  message: "Upgrade to Pro or Enterprise for increased rate limits.",
-                  upgradeUrl: "https://soroban-identity.org/pricing",
-                  availableTiers: ["pro", "enterprise"],
-                },
-              }
-            : {}),
-          limit: rateResult.limit,
-          retryAfter: rateResult.retryAfter,
-        });
-      }
-    }
-
-    // Quota check (#748): a separate budget from the rate limit above,
-    // measured against calendar day/month boundaries rather than a rolling
-    // window. GET /quota itself is exempt so checking your own usage never
-    // consumes it.
-    if (!isExempt && pathname !== "/quota") {
-      const quotaResult = quota.consume(req);
-      const binding = pickQuotaBinding(quotaResult);
-      res.setHeader("X-Quota-Tier", quotaResult.tier);
-      res.setHeader("X-Quota-Period", binding.period);
-      res.setHeader("X-Quota-Limit", String(binding.limit));
-      res.setHeader("X-Quota-Remaining", String(binding.remaining));
-      res.setHeader("X-Quota-Reset", String(binding.resetAt));
-      if (quotaResult.overage) res.setHeader("X-Quota-Overage", "true");
-
-      if (!quotaResult.allowed) {
-        return sendJson(res, 429, {
-          error: "quota_exceeded",
-          code: "QUOTA_EXCEEDED",
-          scope: quotaResult.scope,
-          tier: quotaResult.tier,
-          message: `${quotaResult.scope === "daily" ? "Daily" : "Monthly"} API quota exceeded for tier '${quotaResult.tier}'.`,
-          daily: quotaResult.daily,
-          monthly: quotaResult.monthly,
-        });
-      }
-    }
+    // Run the gateway pipeline: auth, request signing, rate limiting, and
+    // quota. It short-circuits with the same response shapes and headers the
+    // inline stages used to produce, so route handlers below only run for
+    // requests that cleared every stage.
+    const gatewayResult = await gateway.run(req, res, { url, pathname });
+    if (gatewayResult?.handled) return;
 
     return requestContextStore.run({ ...(requestContextStore.getStore() || {}), requestId, tenantId }, async () => {
       try {

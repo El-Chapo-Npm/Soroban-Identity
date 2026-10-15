@@ -10,8 +10,11 @@ import { logger, withRequestLogging } from './logger.js';
 import { DidCache } from './did-cache.js';
 import { WebhookDeliveryService } from './webhooks.js';
 import { ApiKeyService } from './api-keys.js';
+import { OAuthService } from './oauth.js';
+import { RateLimiter } from './rate-limiter.js';
+import { QuotaTracker } from './quota-tracker.js';
+import { TenantRegistry } from './tenant-registry.js';
 import { WebSocketHub } from './websocket.js';
-import { logger } from './logger.js';
 import { RotatingFileSink } from './access-log.js';
 import { VaultLeaseManager } from './vault.js';
 import { initFeatureFlags, getFlag } from './feature-flags.js';
@@ -100,11 +103,11 @@ const expiryJob = new ExpiryNotificationJob(config, soroban);
 
 if (process.env.DISABLE_EXPIRY_JOB !== 'true') expiryJob.start();
 
-const server = http.createServer(withRequestLogging(createApp({ config, soroban, metrics, metricsAggregator })));
-server.listen(config.port, () => {
-  logger.info(`Soroban Identity server listening on :${config.port}`);
-const server = http.createServer(createApp({ config, soroban, metrics, metricsAggregator, analytics }));
 const apiKeyService = new ApiKeyService(config);
+const oauthService = new OAuthService(config);
+const rateLimiter = new RateLimiter(config, { metrics });
+const quotaTracker = new QuotaTracker(config, { metrics });
+const tenantRegistry = new TenantRegistry(config);
 
 // Initialize job queues for async processing (#716)
 let credentialIssueQueue = null;
@@ -164,9 +167,14 @@ const server = http.createServer(
     soroban,
     metrics,
     metricsAggregator,
+    analytics,
     didCache,
     webhookService,
     apiKeyService,
+    oauthService,
+    rateLimiter,
+    quotaTracker,
+    tenantRegistry,
     accessLogSink,
     realtime,
     ddosProtection,

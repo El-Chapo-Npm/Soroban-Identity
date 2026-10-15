@@ -368,6 +368,24 @@ export function loadConfig(env = process.env) {
       credential: env.CREDENTIAL_CONTRACT_ID ?? env.CREDENTIAL_MANAGER_ID ?? "",
       reputation: env.REPUTATION_ID ?? "",
     },
+    // API gateway integration. Off by default: the gateway is an optional
+    // front door, and enabling it changes how client identity and rate limits
+    // are derived from request headers.
+    gatewayEnabled: parseBoolean(env.GATEWAY_ENABLED, false),
+    // Comma-separated list of gateway plugins to activate, e.g.
+    // "auth,ratelimit,logging". Empty means no plugins.
+    gatewayPlugins: parseList(env.GATEWAY_PLUGINS, []),
+    // Header carrying the correlation id the gateway propagates. Requests
+    // without it get one generated, so downstream logs stay joinable.
+    gatewayCorrelationHeader:
+      env.GATEWAY_CORRELATION_HEADER ?? "X-Correlation-ID",
+    // Tenant-aware rate-limit and quota overrides. Each is a JSON object
+    // mapping tenant id to a numeric limit, e.g. '{"acme":1200}'.
+    gatewayTenantRateLimits: parseJson(env.GATEWAY_TENANT_RATE_LIMITS, {}),
+    gatewayTenantQuotas: parseJson(env.GATEWAY_TENANT_QUOTAS, {}),
+    // Fallbacks applied to tenants with no explicit override.
+    gatewayDefaultRateLimit: parseInteger(env.GATEWAY_DEFAULT_RATE_LIMIT, 600),
+    gatewayDefaultQuota: parseInteger(env.GATEWAY_DEFAULT_QUOTA, 100000),
     // Jaeger distributed tracing (#714)
     jaegerEnabled: parseBoolean(env.JAEGER_ENABLED, false),
     jaegerServiceName: env.JAEGER_SERVICE_NAME ?? "soroban-identity-server",
@@ -597,6 +615,13 @@ export function logDefaultValues(env = process.env) {
     { key: "CORS_ALLOWED_HEADERS", defaultVal: DEFAULT_CORS_ALLOWED_HEADERS.join(",") },
     { key: "CORS_EXPOSED_HEADERS", defaultVal: DEFAULT_CORS_EXPOSED_HEADERS.join(",") },
     { key: "CORS_MAX_AGE", defaultVal: String(DEFAULT_CORS_MAX_AGE) },
+    { key: "GATEWAY_ENABLED", defaultVal: "false" },
+    { key: "GATEWAY_PLUGINS", defaultVal: "'' (no plugins)" },
+    { key: "GATEWAY_CORRELATION_HEADER", defaultVal: "'X-Correlation-ID'" },
+    { key: "GATEWAY_TENANT_RATE_LIMITS", defaultVal: "{}" },
+    { key: "GATEWAY_TENANT_QUOTAS", defaultVal: "{}" },
+    { key: "GATEWAY_DEFAULT_RATE_LIMIT", defaultVal: "600" },
+    { key: "GATEWAY_DEFAULT_QUOTA", defaultVal: "100000" },
     { key: "JAEGER_ENABLED", defaultVal: "false" },
     { key: "JAEGER_SERVICE_NAME", defaultVal: "'soroban-identity-server'" },
     { key: "JAEGER_AGENT_HOST", defaultVal: "'localhost'" },
