@@ -168,6 +168,54 @@ export class MetricsService {
       labelNames: ['type'],
       registers: [this.registry],
     });
+
+    this.dbPoolTotalConnections = new client.Gauge({
+      name: 'db_pool_total_connections',
+      help: 'Total number of connections in the database pool',
+      registers: [this.registry],
+    });
+
+    this.dbPoolActiveConnections = new client.Gauge({
+      name: 'db_pool_active_connections',
+      help: 'Number of database pool connections currently in use',
+      registers: [this.registry],
+    });
+
+    this.dbPoolIdleConnections = new client.Gauge({
+      name: 'db_pool_idle_connections',
+      help: 'Number of idle database pool connections',
+      registers: [this.registry],
+    });
+
+    this.dbPoolWaitingConnections = new client.Gauge({
+      name: 'db_pool_waiting_connections',
+      help: 'Number of clients waiting for a database pool connection',
+      registers: [this.registry],
+    });
+
+    this.dbPoolAcquireTotal = new client.Counter({
+      name: 'db_pool_acquire_total',
+      help: 'Total number of database pool connection acquisitions',
+      registers: [this.registry],
+    });
+
+    this.dbPoolAcquireFailuresTotal = new client.Counter({
+      name: 'db_pool_acquire_failures_total',
+      help: 'Total number of failed database pool connection acquisitions',
+      registers: [this.registry],
+    });
+
+    this.dbPoolQueryTimeoutsTotal = new client.Counter({
+      name: 'db_pool_query_timeouts_total',
+      help: 'Total number of database pool query timeouts',
+      registers: [this.registry],
+    });
+
+    this.dbPoolReconnectsTotal = new client.Counter({
+      name: 'db_pool_reconnects_total',
+      help: 'Total number of database pool reconnections',
+      registers: [this.registry],
+    });
     this.queryCacheLatency = new client.Histogram({
       name: 'query_cache_lookup_latency_seconds',
       help: 'Query-result cache lookup latency in seconds',
@@ -352,6 +400,41 @@ export class MetricsService {
   }
 
   observeDdosEvent(type) { this.ddosEvents.inc({ type: type || 'unknown' }); }
+
+  /**
+   * Update the database pool gauges from a pool snapshot.
+   * @param {object} metrics
+   * @param {number} [metrics.total]    - Total connections in the pool
+   * @param {number} [metrics.active]   - Connections currently in use
+   * @param {number} [metrics.idle]     - Idle connections
+   * @param {number} [metrics.waiting]  - Clients waiting for a connection
+   */
+  observeDbPool(metrics = {}) {
+    const { total, active, idle, waiting } = metrics;
+    if (Number.isFinite(total)) this.dbPoolTotalConnections.set(total);
+    if (Number.isFinite(active)) this.dbPoolActiveConnections.set(active);
+    if (Number.isFinite(idle)) this.dbPoolIdleConnections.set(idle);
+    if (Number.isFinite(waiting)) this.dbPoolWaitingConnections.set(waiting);
+  }
+
+  /**
+   * Record the outcome of a database pool connection acquisition.
+   * @param {'success'|'failure'} result
+   */
+  observeDbPoolAcquire(result) {
+    this.dbPoolAcquireTotal.inc();
+    if (result === 'failure') this.dbPoolAcquireFailuresTotal.inc();
+  }
+
+  /** Record a database pool query timeout. */
+  observeDbPoolQueryTimeout() {
+    this.dbPoolQueryTimeoutsTotal.inc();
+  }
+
+  /** Record a database pool reconnection. */
+  observeDbPoolReconnect() {
+    this.dbPoolReconnectsTotal.inc();
+  }
 
   observeCircuitBreakerState(toState, fromState) {
     const map = { CLOSED: 0, OPEN: 1, HALF_OPEN: 2 };

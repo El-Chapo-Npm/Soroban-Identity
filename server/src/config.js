@@ -355,6 +355,10 @@ export function loadConfig(env = process.env) {
     dbPoolIdleTimeoutMs: parseInteger(env.DB_POOL_IDLE_TIMEOUT_MS, 30000),
     dbPoolMaxConnectionAgeMs: parseInteger(env.DB_POOL_MAX_CONNECTION_AGE_MS, 3600000),
     dbPoolHealthCheckIntervalMs: parseInteger(env.DB_POOL_HEALTH_CHECK_INTERVAL_MS, 30000),
+    dbPoolQueryTimeoutMs: parseInteger(env.DB_POOL_QUERY_TIMEOUT_MS, 30000),
+    dbPoolMaxRetries: parseInteger(env.DB_POOL_MAX_RETRIES, 3),
+    dbPoolRetryDelayMs: parseInteger(env.DB_POOL_RETRY_DELAY_MS, 250),
+    dbPoolKeepAlive: parseBoolean(env.DB_POOL_KEEP_ALIVE, true),
     // Job queue for async processing (#716)
     jobQueueEnabled: parseBoolean(env.JOB_QUEUE_ENABLED, true),
     jobQueueConcurrency: parseInteger(env.JOB_QUEUE_CONCURRENCY, 4),
@@ -431,6 +435,9 @@ export function validateConfig(env = process.env) {
     { key: "OAUTH_AUTH_CODE_TTL_MS", desc: "must be a valid integer" },
     { key: "OAUTH_ACCESS_TOKEN_TTL_MS", desc: "must be a valid integer" },
     { key: "OAUTH_REFRESH_TOKEN_TTL_MS", desc: "must be a valid integer" },
+    { key: "DB_POOL_QUERY_TIMEOUT_MS", desc: "must be a valid integer" },
+    { key: "DB_POOL_MAX_RETRIES", desc: "must be a valid integer" },
+    { key: "DB_POOL_RETRY_DELAY_MS", desc: "must be a valid integer" },
   ];
 
   for (const item of numericVars) {
@@ -603,6 +610,10 @@ export function logDefaultValues(env = process.env) {
     { key: "JAEGER_AGENT_PORT", defaultVal: "6832" },
     { key: "JAEGER_SAMPLER_TYPE", defaultVal: "'const'" },
     { key: "JAEGER_SAMPLER_PARAM", defaultVal: "1" },
+    { key: "DB_POOL_QUERY_TIMEOUT_MS", defaultVal: "30000" },
+    { key: "DB_POOL_MAX_RETRIES", defaultVal: "3" },
+    { key: "DB_POOL_RETRY_DELAY_MS", defaultVal: "250" },
+    { key: "DB_POOL_KEEP_ALIVE", defaultVal: "true" },
   ];
 
   for (const item of defaults) {

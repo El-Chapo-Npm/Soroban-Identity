@@ -16,6 +16,19 @@ export interface PoolMetrics {
   waiting: number;
 }
 
+/** Minimal surface of a pg Pool used by DatabasePool (allows fakes in tests). */
+export interface PoolLike {
+  connect(): Promise<PoolClient>;
+  end(): Promise<void>;
+  on(event: string, listener: (...args: unknown[]) => void): unknown;
+  readonly totalCount: number;
+  readonly idleCount: number;
+  readonly waitingCount: number;
+}
+
+/** Factory used to construct the underlying pool (injectable for tests). */
+export type PoolFactory = (poolConfig: PoolConfig) => PoolLike;
+
 export interface PoolOptions {
   /** Maximum number of clients the pool will hold. Defaults to 10. */
   max?: number;
@@ -31,6 +44,10 @@ export interface PoolOptions {
   maxRetries?: number;
   /** Base delay (ms) between reconnect attempts (exponential backoff). */
   retryDelayMillis?: number;
+  /** Override the connection string (defaults to config.database.url). */
+  connectionString?: string;
+  /** Inject a custom pool factory (defaults to constructing a pg Pool). */
+  poolFactory?: PoolFactory;
 }
 
 const DEFAULT_POOL_SIZE = 10;
@@ -64,15 +81,18 @@ function sleep(ms: number): Promise<void> {
 }
 
 export class DatabasePool {
-  private readonly pool: Pool;
+  private pool: PoolLike | null = null;
+  private readonly poolConfig: PoolConfig;
+  private readonly poolFactory: PoolFactory;
   private readonly queryTimeoutMillis: number;
   private readonly maxRetries: number;
   private readonly retryDelayMillis: number;
   private shuttingDown = false;
+  private shutdownPromise: Promise<void> | null = null;
 
   constructor(options: PoolOptions = {}) {
-    const poolConfig: PoolConfig = {
-      connectionString: config.database.url,
+    this.poolConfig = {
+      connectionString: options.connectionString ?? config.database.url,
       max: options.max ?? DEFAULT_POOL_SIZE,
       min: options.min ?? 0,
       idleTimeoutMillis: options.idleTimeoutMillis ?? 30_000,
@@ -84,29 +104,55 @@ export class DatabasePool {
     this.queryTimeoutMillis = options.queryTimeoutMillis ?? DEFAULT_QUERY_TIMEOUT_MS;
     this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.retryDelayMillis = options.retryDelayMillis ?? DEFAULT_RETRY_DELAY_MS;
-    this.pool = new Pool(poolConfig);
+    this.poolFactory = options.poolFactory ?? ((cfg: PoolConfig) => new Pool(cfg));
 
-    this.pool.on('connect', () => {
-      logger.debug('db.pool: client connected');
-    });
-    this.pool.on('acquire', () => {
-      logger.debug('db.pool: client acquired');
-    });
-    this.pool.on('remove', () => {
-      logger.debug('db.pool: client removed');
-    });
-    this.pool.on('error', (err) => {
-      // Idle client errors must not crash the process.
-      logger.error('db.pool: idle client error', { error: err.message });
-    });
+    // Construct eagerly unless a factory was injected; tests may inject a
+    // fake driver and control construction timing themselves.
+    if (!options.poolFactory) {
+      this.getPool();
+    }
+  }
+
+  /** Lazily construct (or return) the underlying pool. */
+  getPool(): PoolLike {
+    if (!this.pool) {
+      const pool = this.poolFactory(this.poolConfig);
+      pool.on('connect', () => {
+        logger.debug('db.pool: client connected');
+      });
+      pool.on('acquire', () => {
+        logger.debug('db.pool: client acquired');
+      });
+      pool.on('remove', () => {
+        logger.debug('db.pool: client removed');
+      });
+      pool.on('error', (err) => {
+        // Idle client errors must not crash the process.
+        logger.error('db.pool: idle client error', {
+          error: (err as Error)?.message,
+        });
+      });
+      this.pool = pool;
+    }
+    return this.pool;
+  }
+
+  /** Whether the pool has begun (or completed) shutting down. */
+  isShuttingDown(): boolean {
+    return this.shuttingDown;
   }
 
   /** Current pool metrics: active, idle and waiting connections. */
   metrics(): PoolMetrics {
+    if (!this.pool) {
+      return { total: 0, active: 0, idle: 0, waiting: 0 };
+    }
+    const total = this.pool.totalCount;
+    const idle = this.pool.idleCount;
     return {
-      total: this.pool.totalCount,
-      active: this.pool.totalCount - this.pool.idleCount,
-      idle: this.pool.idleCount,
+      total,
+      active: total - idle,
+      idle,
       waiting: this.pool.waitingCount,
     };
   }
@@ -127,7 +173,7 @@ export class DatabasePool {
         throw new Error('db.pool: pool is shutting down');
       }
       try {
-        const client = await this.pool.connect();
+        const client = await this.getPool().connect();
         try {
           await this.healthCheck(client);
           return client;
@@ -195,12 +241,14 @@ export class DatabasePool {
     timeoutMillis: number = this.queryTimeoutMillis,
   ): Promise<T> {
     const client = await this.acquireHealthyClient();
+    let caughtError: unknown;
     try {
       await this.withTimeout(client.query('BEGIN'), timeoutMillis);
       const result = await this.withTimeout(fn(client), timeoutMillis);
       await this.withTimeout(client.query('COMMIT'), timeoutMillis);
       return result;
     } catch (err) {
+      caughtError = err;
       try {
         await client.query('ROLLBACK');
       } catch (rollbackErr) {
@@ -210,7 +258,8 @@ export class DatabasePool {
       }
       throw err;
     } finally {
-      client.release(isRetryable(err0(err)));
+      // Discard the client if the connection was lost mid-transaction.
+      client.release(isRetryable(caughtError));
     }
   }
 
@@ -237,18 +286,21 @@ export class DatabasePool {
     });
   }
 
-  /** Gracefully drain and close the pool on server shutdown. */
+  /** Gracefully drain and close the pool on server shutdown (idempotent). */
   async shutdown(): Promise<void> {
+    if (this.shutdownPromise) {
+      return this.shutdownPromise;
+    }
     this.shuttingDown = true;
-    logger.info('db.pool: shutting down', this.metrics());
-    await this.pool.end();
-    logger.info('db.pool: shutdown complete');
+    this.shutdownPromise = (async () => {
+      logger.info('db.pool: shutting down', this.metrics());
+      if (this.pool) {
+        await this.pool.end();
+      }
+      logger.info('db.pool: shutdown complete');
+    })();
+    return this.shutdownPromise;
   }
-}
-
-// Small helper so the transaction finally block can inspect the caught error.
-function err0(err: unknown): unknown {
-  return err;
 }
 
 export const dbPool = new DatabasePool();

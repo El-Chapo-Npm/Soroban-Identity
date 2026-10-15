@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { logger } from './logger.js';
+import { poolMetrics } from './db/poolMetrics.js';
 
 /**
  * Process start time, captured once at module load so uptime is measured from
@@ -122,6 +123,26 @@ export async function checkContracts(soroban) {
 }
 
 /**
+ * Probe the database connection pool. Reports the pool metrics alongside a
+ * lightweight `SELECT 1` so callers can see saturation as well as liveness.
+ * A missing pool reports `disabled` rather than `down`, since running without
+ * a database is a supported deployment.
+ */
+export async function checkDatabase(dbPool) {
+  if (!dbPool) {
+    return { status: STATUS.DISABLED, reason: 'database pool is not configured' };
+  }
+
+  const metrics = typeof dbPool.metrics === 'function' ? dbPool.metrics() : poolMetrics(dbPool);
+
+  if (typeof dbPool.query === 'function') {
+    await dbPool.query('SELECT 1');
+  }
+
+  return { status: STATUS.UP, metrics };
+}
+
+/**
  * Probe Redis when one is configured. An unconfigured cache reports `disabled`
  * rather than `down`, since running without Redis is a supported deployment.
  */
@@ -161,12 +182,16 @@ export function uptimeSeconds(now = Date.now()) {
  * @param {object} deps.config
  * @param {object} deps.soroban
  * @param {object} [deps.redisClient]
+ * @param {object} [deps.dbPool]
  * @param {string} deps.version
  * @param {object} [options]
  * @param {number} [options.timeoutMs]
  * @returns {Promise<object>} Health report with a top-level `status`.
  */
-export async function collectHealth({ config, soroban, redisClient = null, version }, options = {}) {
+export async function collectHealth(
+  { config, soroban, redisClient = null, dbPool = null, version },
+  options = {},
+) {
   const timeoutMs = options.timeoutMs ?? config.healthProbeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
 
   const results = await Promise.all([
@@ -174,6 +199,7 @@ export async function collectHealth({ config, soroban, redisClient = null, versi
     runProbe('rpc', timeoutMs, () => checkRpc(config)),
     runProbe('contracts', timeoutMs, () => checkContracts(soroban)),
     runProbe('redis', timeoutMs, () => checkRedis(config, redisClient)),
+    runProbe('database', timeoutMs, () => checkDatabase(dbPool)),
   ]);
 
   const dependencies = {};

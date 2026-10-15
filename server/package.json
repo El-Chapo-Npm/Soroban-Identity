@@ -6,7 +6,8 @@
   "description": "Operational HTTP service for Soroban Identity contracts",
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --test"
+    "test": "node --test",
+    "test:db": "vitest run"
   },
   "engines": {
     "node": ">=20"
@@ -21,6 +22,11 @@
     "ws": "^8.21.3",
     "prom-client": "^15.1.3",
     "zod": "^4.4.3",
-    "jaeger-client": "^3.19.0"
+    "jaeger-client": "^3.19.0",
+    "pg": "^8.11.0"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.0",
+    "vitest": "^1.6.0"
   }
 }

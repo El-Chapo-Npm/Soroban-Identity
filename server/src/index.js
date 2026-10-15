@@ -11,10 +11,10 @@ import { DidCache } from './did-cache.js';
 import { WebhookDeliveryService } from './webhooks.js';
 import { ApiKeyService } from './api-keys.js';
 import { WebSocketHub } from './websocket.js';
-import { logger } from './logger.js';
 import { RotatingFileSink } from './access-log.js';
 import { VaultLeaseManager } from './vault.js';
 import { initFeatureFlags, getFlag } from './feature-flags.js';
+import { dbPool } from './db/pool.js';
 
 // Load secrets before validation so existing config consumers see the same
 // values as environment-backed deployments. Vault is opt-in and fails closed
@@ -74,6 +74,14 @@ if (!getFlag('new_credential_types')) {
 }
 const metrics = new MetricsService();
 const analytics = new AnalyticsService();
+await dbPool.initialize({
+  max: config.dbPoolMax,
+  min: config.dbPoolMin,
+  idleTimeoutMs: config.dbPoolIdleTimeoutMs,
+  connectionTimeoutMs: config.dbPoolConnectionTimeoutMs,
+  queryTimeoutMs: config.dbPoolQueryTimeoutMs,
+  maxRetries: config.dbPoolMaxRetries,
+});
 const soroban = new SorobanClient(config, metrics);
 const didCache = new DidCache(config, { metrics });
 const queryCache = new QueryResultCache(config, { redisClient: didCache.client, metrics });
@@ -100,10 +108,6 @@ const expiryJob = new ExpiryNotificationJob(config, soroban);
 
 if (process.env.DISABLE_EXPIRY_JOB !== 'true') expiryJob.start();
 
-const server = http.createServer(withRequestLogging(createApp({ config, soroban, metrics, metricsAggregator })));
-server.listen(config.port, () => {
-  logger.info(`Soroban Identity server listening on :${config.port}`);
-const server = http.createServer(createApp({ config, soroban, metrics, metricsAggregator, analytics }));
 const apiKeyService = new ApiKeyService(config);
 
 // Initialize job queues for async processing (#716)
@@ -256,6 +260,10 @@ function shutdown(signal) {
         await accessLogSink.close();
       }
 
+      // Close the database pool
+      logger.info('Shutting down database pool');
+      await dbPool.shutdown();
+
       logger.info('Shutdown complete');
       process.exit(0);
     } catch (error) {
@@ -279,18 +287,6 @@ function shutdown(signal) {
   // Don't wait for lingering connections
   server.closeAllConnections?.();
 }
-
-const connections = new Set();
-server.on('connection', (socket) => {
-  connections.add(socket);
-  socket.on('close', () => {
-    connections.delete(socket);
-  });
-});
-
-server.listen(config.port, () => {
-  logger.info({ port: config.port }, 'Soroban Identity server listening');
-});
 
 // Register signal handlers
 process.on('SIGTERM', () => shutdown('SIGTERM'));
