@@ -1,5 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
-import { ZodError, ZodSchema, z } from 'zod';
+import { ZodSchema } from 'zod';
+import { formatZodError } from './validators';
+import { schemaVersion } from './index';
 
 /**
  * Schema definition patterns
@@ -7,7 +9,7 @@ import { ZodError, ZodSchema, z } from 'zod';
  * - Define one Zod schema per endpoint request/response shape.
  * - Export inferred TypeScript types via `z.infer<typeof Schema>`.
  * - Attach a `version` to each schema so clients can negotiate the contract.
- * - Use the custom validators below for domain-specific fields.
+ * - Use the custom validators from `./validators` for domain-specific fields.
  *
  * Example:
  *   export const SubmitScoreRequestV1 = withVersion(
@@ -17,48 +19,36 @@ import { ZodError, ZodSchema, z } from 'zod';
  *   export type SubmitScoreRequestV1 = z.infer<typeof SubmitScoreRequestV1>;
  */
 
-/** Stellar public key (ed25519, StrKey encoded, starts with G). */
-export const stellarAddress = () =>
-  z.string().regex(/^G[A-Z2-7]{55}$/, 'Invalid Stellar address');
-
-/** Decentralized identifier, e.g. did:stellar:G... or did:key:z... */
-export const did = () =>
-  z.string().regex(/^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$/, 'Invalid DID format');
-
-/** Attach a schema version for versioning support. */
-export const withVersion = <T extends ZodSchema>(schema: T, version: string) =>
-  schema.describe(`v${version}`);
-
-/** Flatten a ZodError into field-path keyed messages. */
-export const formatZodError = (error: ZodError) =>
-  error.issues.map((issue) => ({
-    path: issue.path.join('.'),
-    message: issue.message,
-  }));
+export type RequestSource = 'body' | 'query' | 'params' | 'headers';
 
 const isDev = () => process.env.NODE_ENV !== 'production';
 
 /**
- * Validate an incoming request body against a Zod schema.
- * Rejects invalid payloads with HTTP 400 and field-path error details.
+ * Validate a single incoming request property against a Zod schema.
+ * Rejects invalid payloads with HTTP 400 and field-path error details,
+ * replacing the request property with the parsed value on success.
  */
 export const validateRequest =
-  <T extends ZodSchema>(schema: T) =>
+  <T extends ZodSchema>(schema: T, source: RequestSource = 'body') =>
   (req: Request, res: Response, next: NextFunction) => {
-    const result = schema.safeParse(req.body);
+    const result = schema.safeParse(req[source]);
     if (!result.success) {
       return res.status(400).json({
-        error: 'ValidationError',
-        details: formatZodError(result.error),
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'Request validation failed',
+          fields: formatZodError(result.error),
+        },
+        schemaVersion,
       });
     }
-    req.body = result.data;
+    req[source] = result.data;
     return next();
   };
 
 /**
  * Validate an outgoing response against a Zod schema.
- * Only enforced in development to avoid breaking production traffic.
+ * Only enforced outside production to avoid breaking production traffic.
  */
 export const validateResponse =
   <T extends ZodSchema>(schema: T) =>
@@ -68,10 +58,9 @@ export const validateResponse =
     res.json = (body: unknown) => {
       const result = schema.safeParse(body);
       if (!result.success) {
-        return originalJson({
-          error: 'ResponseValidationError',
-          details: formatZodError(result.error),
-        });
+        // eslint-disable-next-line no-console
+        console.error('Response validation failed', formatZodError(result.error));
+        return originalJson(body);
       }
       return originalJson(result.data);
     };
@@ -79,39 +68,25 @@ export const validateResponse =
   };
 
 /**
- * Minimal OpenAPI 3.0 document generator from Zod schemas.
- * Maps object shapes to JSON Schema properties for documentation.
+ * Convenience middleware that validates multiple request sources in one pass.
  */
-export const generateOpenApiSpec = (
-  schemas: Record<string, ZodSchema>,
-  info: { title: string; version: string } = { title: 'API', version: '1.0.0' },
-) => {
-  const components: Record<string, unknown> = {};
-  for (const [name, schema] of Object.entries(schemas)) {
-    components[name] = zodToJsonSchema(schema);
-  }
-  return {
-    openapi: '3.0.0',
-    info,
-    paths: {},
-    components: { schemas: components },
-  };
-};
+export const validateAll = (schemas: {
+  body?: ZodSchema;
+  query?: ZodSchema;
+  params?: ZodSchema;
+}) => {
+  const middlewares = (Object.entries(schemas) as [RequestSource, ZodSchema][])
+    .filter(([, schema]) => Boolean(schema))
+    .map(([source, schema]) => validateRequest(schema, source));
 
-const zodToJsonSchema = (schema: ZodSchema): Record<string, unknown> => {
-  const def = (schema as unknown as { _def?: { typeName?: string; shape?: () => Record<string, ZodSchema> } })._def;
-  if (def?.typeName === 'ZodObject' && typeof def.shape === 'function') {
-    const shape = def.shape();
-    const properties: Record<string, unknown> = {};
-    const required: string[] = [];
-    for (const [key, value] of Object.entries(shape)) {
-      properties[key] = zodToJsonSchema(value);
-      required.push(key);
-    }
-    return { type: 'object', properties, required };
-  }
-  if (def?.typeName === 'ZodString') return { type: 'string' };
-  if (def?.typeName === 'ZodNumber') return { type: 'number' };
-  if (def?.typeName === 'ZodBoolean') return { type: 'boolean' };
-  return {};
+  return (req: Request, res: Response, next: NextFunction) => {
+    let index = 0;
+    const run = (err?: unknown): void => {
+      if (err) return next(err);
+      const middleware = middlewares[index++];
+      if (!middleware) return next();
+      middleware(req, res, run);
+    };
+    run();
+  };
 };

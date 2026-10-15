@@ -374,6 +374,98 @@ A file-sink failure is logged and swallowed: it never breaks the response, and
 a log file that cannot be opened at startup falls back to stdout-only logging
 rather than preventing the server from booting.
 
+## Schemas
+
+`server/src/schemas/` is the source of truth for every request and response
+shape. `server/openapi.json` is generated from it — never hand-edit the spec.
+
+### Defining a schema
+
+```js
+import { z } from 'zod';
+import { SCHEMA_VERSION, withVersion } from './version.js';
+
+export const IssueCredentialRequest = withVersion(
+  z.object({
+    subject: stellarAddress(),
+    did: did(),
+    expiresAt: z.string().datetime().optional(),
+  }),
+);
+
+export const IssueCredentialResponse = withVersion(
+  z.object({
+    id: z.string(),
+    status: z.enum(['active', 'expired', 'revoked']),
+  }),
+);
+```
+
+Infer the TypeScript types rather than restating them:
+
+```ts
+import type { z } from 'zod';
+import type { IssueCredentialRequest } from './schemas/credentials.js';
+
+type IssueCredentialBody = z.infer<typeof IssueCredentialRequest>;
+```
+
+### Custom validators
+
+`server/src/schemas/validators.js` exports refinements for the domain types:
+
+| Validator | Accepts |
+| --- | --- |
+| `stellarAddress()` | A 56-character `G...` ed25519 public key |
+| `contractId()` | A 56-character `C...` Soroban contract id |
+| `did()` | A `did:stellar:<address>` identifier |
+| `assetCode()` | A 1-12 character alphanumeric asset code |
+
+They are used like any other Zod type, so they compose with `.optional()`,
+`.array()` and the rest.
+
+### Versioning
+
+`SCHEMA_VERSION` is the current wire version. `withVersion(schema)` adds the
+`version` field to a schema and pins it to `SCHEMA_VERSION`, so a response
+always declares the version it was serialized with. Bump `SCHEMA_VERSION` when
+a change is not backward compatible; additive changes keep the version.
+
+### Error responses
+
+A validation failure returns `400` with a stable body:
+
+```json
+{
+  "error": "validation_error",
+  "code": "VALIDATION_ERROR",
+  "message": "Request validation failed",
+  "details": [
+    { "path": "body.subject", "message": "Invalid Stellar address" }
+  ]
+}
+```
+
+`details` is always an array, so a client can render every field error without
+special-casing a single failure.
+
+### Development-mode response validation
+
+Set `VALIDATE_RESPONSES=true` (or run with `NODE_ENV=development`) to validate
+outgoing bodies against their response schema. A mismatch is logged at `error`
+with the offending path; in production the check is skipped so a schema drift
+cannot turn a working response into a 500.
+
+### Regenerating the OpenAPI spec
+
+```bash
+npm run openapi:generate
+```
+
+This rewrites `server/openapi.json` from the schemas. Run it after any schema
+change and commit the result, so the published spec and the runtime validation
+cannot diverge.
+
 ## API Key Scopes
 
 The server supports granular access control through API key scopes. Instead of granting full access, you can issue scoped keys for specific operations.

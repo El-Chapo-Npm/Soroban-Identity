@@ -79,6 +79,8 @@ function wantsJsonLd(req, url) {
   return accept.includes("application/ld+json");
 }
 import { schemas, validateRequest } from "./validation.js";
+import { validateRequest as validateZodRequest, validateResponse } from "./middleware/validate.js";
+import * as zodSchemas from "./schemas/index.ts";
 import { routeLabel } from "./route-label.js";
 import { requestContextStore } from "./request-context.js";
 import { correlationMiddleware, handleTraceRoutes } from "./middleware/tracing.js";
@@ -325,6 +327,14 @@ export function createApp({
     if (!validateRequest(res, schemas.commonHeaders, { headers: req.headers }).ok) {
       return;
     }
+
+    // Zod-based validation middleware (#validation). Applied per-route below
+    // via `zodValidate(...)`; response validation runs only in development.
+    const isDev = config.env === "development" || config.nodeEnv === "development";
+    const zodValidate = (schema, source = "body") =>
+      validateZodRequest(schema, source, { code: "VALIDATION_FAILED" });
+    const zodValidateResponse = (schema) =>
+      isDev ? validateResponse(schema, { code: "VALIDATION_FAILED" }) : (req, res, next) => next();
 
     // Extract tier and API key ID from API key or headers early if present
     const authHeader = req.headers["authorization"] || req.headers["x-api-key"];
@@ -705,6 +715,22 @@ export function createApp({
             }
             const validated = validateRequest(res, schemas.graphql, { body });
             if (!validated.ok) return;
+            {
+              const zodResult = zodSchemas.graphqlRequestSchema.safeParse(validated.data.body);
+              if (!zodResult.success) {
+                return sendJson(res, 400, {
+                  error: "validation_failed",
+                  code: "VALIDATION_FAILED",
+                  message: "Request validation failed.",
+                  errors: zodResult.error.issues.map((issue) => ({
+                    field: issue.path.join("."),
+                    source: "body",
+                    message: issue.message,
+                    code: issue.code,
+                  })),
+                });
+              }
+            }
             const { query, variables = {}, operationName } = validated.data.body;
 
             // Mutations require credentials:write or admin authorization
@@ -732,6 +758,24 @@ export function createApp({
             query: url.searchParams,
           });
           if (!validated.ok) return;
+          {
+            const zodResult = zodSchemas.listCredentialsQuerySchema.safeParse(
+              Object.fromEntries(url.searchParams),
+            );
+            if (!zodResult.success) {
+              return sendJson(res, 400, {
+                error: "validation_failed",
+                code: "VALIDATION_FAILED",
+                message: "Request validation failed.",
+                errors: zodResult.error.issues.map((issue) => ({
+                  field: issue.path.join("."),
+                  source: "query",
+                  message: issue.message,
+                  code: issue.code,
+                })),
+              });
+            }
+          }
           const limitNum = validated.data.query.limit ?? 50;
           const credentials = await readCredentials(config);
           const { items, nextCursor, previousCursor, pagination } = cursorPage(credentials, {
@@ -827,6 +871,22 @@ export function createApp({
             query: url.searchParams,
           });
           if (!validated.ok) return;
+          {
+            const zodResult = zodSchemas.credentialIdParamSchema.safeParse({ credentialId });
+            if (!zodResult.success) {
+              return sendJson(res, 400, {
+                error: "validation_failed",
+                code: "VALIDATION_FAILED",
+                message: "Request validation failed.",
+                errors: zodResult.error.issues.map((issue) => ({
+                  field: issue.path.join("."),
+                  source: "params",
+                  message: issue.message,
+                  code: issue.code,
+                })),
+              });
+            }
+          }
           const credentials = await readCredentials(config);
           const credential = credentials.find((c) => c.id === credentialId);
           if (!credential) return notFound(res, req);
@@ -889,6 +949,22 @@ export function createApp({
           if (!validateRequest(res, schemas.credentialByIdParams, { params: { credentialId } }).ok) {
             return;
           }
+          {
+            const zodResult = zodSchemas.credentialIdParamSchema.safeParse({ credentialId });
+            if (!zodResult.success) {
+              return sendJson(res, 400, {
+                error: "validation_failed",
+                code: "VALIDATION_FAILED",
+                message: "Request validation failed.",
+                errors: zodResult.error.issues.map((issue) => ({
+                  field: issue.path.join("."),
+                  source: "params",
+                  message: issue.message,
+                  code: issue.code,
+                })),
+              });
+            }
+          }
           const credentials = await readCredentials(config);
           const credential = credentials.find((c) => c.id === credentialId);
           if (!credential) return notFound(res);
@@ -911,6 +987,22 @@ export function createApp({
           const credentialId = decodeURIComponent(verifyMatch[1]);
           if (!validateRequest(res, schemas.credentialByIdParams, { params: { credentialId } }).ok) {
             return;
+          }
+          {
+            const zodResult = zodSchemas.credentialIdParamSchema.safeParse({ credentialId });
+            if (!zodResult.success) {
+              return sendJson(res, 400, {
+                error: "validation_failed",
+                code: "VALIDATION_FAILED",
+                message: "Request validation failed.",
+                errors: zodResult.error.issues.map((issue) => ({
+                  field: issue.path.join("."),
+                  source: "params",
+                  message: issue.message,
+                  code: issue.code,
+                })),
+              });
+            }
           }
           const credentials = await readCredentials(config);
           const credential = credentials.find((c) => c.id === credentialId);
@@ -980,6 +1072,22 @@ export function createApp({
           }
           const validated = validateRequest(res, schemas.registerOAuthClient, { body });
           if (!validated.ok) return;
+          {
+            const zodResult = zodSchemas.registerOAuthClientSchema.safeParse(validated.data.body);
+            if (!zodResult.success) {
+              return sendJson(res, 400, {
+                error: "validation_failed",
+                code: "VALIDATION_FAILED",
+                message: "Request validation failed.",
+                errors: zodResult.error.issues.map((issue) => ({
+                  field: issue.path.join("."),
+                  source: "body",
+                  message: issue.message,
+                  code: issue.code,
+                })),
+              });
+            }
+          }
           try {
             const client = await oauthService.registerClient(validated.data.body);
             await appendAuditLog(config, {
@@ -999,6 +1107,24 @@ export function createApp({
         if (req.method === "GET" && pathname === "/oauth/authorize") {
           const validated = validateRequest(res, schemas.oauthAuthorizeQuery, { query: url.searchParams });
           if (!validated.ok) return;
+          {
+            const zodResult = zodSchemas.oauthAuthorizeQuerySchema.safeParse(
+              Object.fromEntries(url.searchParams),
+            );
+            if (!zodResult.success) {
+              return sendJson(res, 400, {
+                error: "validation_failed",
+                code: "VALIDATION_FAILED",
+                message: "Request validation failed.",
+                errors: zodResult.error.issues.map((issue) => ({
+                  field: issue.path.join("."),
+                  source: "query",
+                  message: issue.message,
+                  code: issue.code,
+                })),
+              });
+            }
+          }
           // The "resource owner" is whoever is already authenticated on this
           // request; there is no separate login/consent page (see oauth.js).
           if (!await requireAuth(req, res, config, [])) return;
@@ -1033,6 +1159,22 @@ export function createApp({
           }
           const validated = validateRequest(res, schemas.oauthToken, { body });
           if (!validated.ok) return;
+          {
+            const zodResult = zodSchemas.oauthTokenSchema.safeParse(validated.data.body);
+            if (!zodResult.success) {
+              return sendJson(res, 400, {
+                error: "validation_failed",
+                code: "VALIDATION_FAILED",
+                message: "Request validation failed.",
+                errors: zodResult.error.issues.map((issue) => ({
+                  field: issue.path.join("."),
+                  source: "body",
+                  message: issue.message,
+                  code: issue.code,
+                })),
+              });
+            }
+          }
           const input = validated.data.body;
           try {
             const tokens =
@@ -1066,6 +1208,22 @@ export function createApp({
           }
           const validated = validateRequest(res, schemas.oauthIntrospect, { body });
           if (!validated.ok) return;
+          {
+            const zodResult = zodSchemas.oauthIntrospectSchema.safeParse(validated.data.body);
+            if (!zodResult.success) {
+              return sendJson(res, 400, {
+                error: "validation_failed",
+                code: "VALIDATION_FAILED",
+                message: "Request validation failed.",
+                errors: zodResult.error.issues.map((issue) => ({
+                  field: issue.path.join("."),
+                  source: "body",
+                  message: issue.message,
+                  code: issue.code,
+                })),
+              });
+            }
+          }
           const { token, client_id: clientId, client_secret: clientSecret } = validated.data.body;
           // RFC 7662: the endpoint must itself be protected. A caller either
           // authenticates as the OAuth client the token was issued to, or as
@@ -1090,6 +1248,22 @@ export function createApp({
           }
           const validated = validateRequest(res, schemas.oauthRevoke, { body });
           if (!validated.ok) return;
+          {
+            const zodResult = zodSchemas.oauthRevokeSchema.safeParse(validated.data.body);
+            if (!zodResult.success) {
+              return sendJson(res, 400, {
+                error: "validation_failed",
+                code: "VALIDATION_FAILED",
+                message: "Request validation failed.",
+                errors: zodResult.error.issues.map((issue) => ({
+                  field: issue.path.join("."),
+                  source: "body",
+                  message: issue.message,
+                  code: issue.code,
+                })),
+              });
+            }
+          }
           const { token, client_id: clientId, client_secret: clientSecret } = validated.data.body;
           if (!clientId && !await requireAuth(req, res, config, ['admin:write'])) return;
           try {
@@ -1176,6 +1350,22 @@ export function createApp({
           const validated = validateRequest(res, schemas.issueCredential, { body });
           if (!validated.ok) return;
           const credential = validated.data.body;
+          {
+            const zodResult = zodSchemas.issueCredentialSchema.safeParse(credential);
+            if (!zodResult.success) {
+              return sendJson(res, 400, {
+                error: "validation_failed",
+                code: "VALIDATION_FAILED",
+                message: "Request validation failed.",
+                errors: zodResult.error.issues.map((issue) => ({
+                  field: issue.path.join("."),
+                  source: "body",
+                  message: issue.message,
+                  code: issue.code,
+                })),
+              });
+            }
+          }
           try {
             await createAndPersistCredential(config, credential);
             await appendAuditLog(config, { action: "issue_credential", credentialId: credential.id });
@@ -1209,6 +1399,22 @@ export function createApp({
           const credentialId = decodeURIComponent(revokeMatch[1]);
           if (!validateRequest(res, schemas.credentialByIdParams, { params: { credentialId } }).ok) {
             return;
+          }
+          {
+            const zodResult = zodSchemas.credentialIdParamSchema.safeParse({ credentialId });
+            if (!zodResult.success) {
+              return sendJson(res, 400, {
+                error: "validation_failed",
+                code: "VALIDATION_FAILED",
+                message: "Request validation failed.",
+                errors: zodResult.error.issues.map((issue) => ({
+                  field: issue.path.join("."),
+                  source: "params",
+                  message: issue.message,
+                  code: issue.code,
+                })),
+              });
+            }
           }
 
           // Optimistic concurrency (#745): If-Match lets a caller refuse to
@@ -1280,6 +1486,22 @@ export function createApp({
             return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
           const validated = validateRequest(res, schemas.batchOperations, { body });
           if (!validated.ok) return;
+          {
+            const zodResult = zodSchemas.batchOperationsSchema.safeParse(body);
+            if (!zodResult.success) {
+              return sendJson(res, 400, {
+                error: "validation_failed",
+                code: "VALIDATION_FAILED",
+                message: "Request validation failed.",
+                errors: zodResult.error.issues.map((issue) => ({
+                  field: issue.path.join("."),
+                  source: "body",
+                  message: issue.message,
+                  code: issue.code,
+                })),
+              });
+            }
+          }
           const { operations, atomic } = validated.data.body;
 
           // Auth requirement follows whichever operation types are present:
@@ -1319,6 +1541,22 @@ export function createApp({
             return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
           const validated = validateRequest(res, schemas.createWebhook, { body });
           if (!validated.ok) return;
+          {
+            const zodResult = zodSchemas.createWebhookSchema.safeParse(validated.data.body);
+            if (!zodResult.success) {
+              return sendJson(res, 400, {
+                error: "validation_failed",
+                code: "VALIDATION_FAILED",
+                message: "Request validation failed.",
+                errors: zodResult.error.issues.map((issue) => ({
+                  field: issue.path.join("."),
+                  source: "body",
+                  message: issue.message,
+                  code: issue.code,
+                })),
+              });
+            }
+          }
           const webhook = await createWebhookRecord(config, validated.data.body);
           return sendJson(res, 201, webhook);
         }
@@ -1327,6 +1565,24 @@ export function createApp({
           if (!await requireAuth(req, res, config, ['admin:read'])) return;
           const validated = validateRequest(res, schemas.webhookLogsQuery, { query: url.searchParams });
           if (!validated.ok) return;
+          {
+            const zodResult = zodSchemas.webhookLogsQuerySchema.safeParse(
+              Object.fromEntries(url.searchParams),
+            );
+            if (!zodResult.success) {
+              return sendJson(res, 400, {
+                error: "validation_failed",
+                code: "VALIDATION_FAILED",
+                message: "Request validation failed.",
+                errors: zodResult.error.issues.map((issue) => ({
+                  field: issue.path.join("."),
+                  source: "query",
+                  message: issue.message,
+                  code: issue.code,
+                })),
+              });
+            }
+          }
           const webhookId = validated.data.query.webhookId ?? null;
           const allLogs = await readWebhookLogs(config, { webhookId, limit: null });
           const { items: logs, pagination } = offsetPage(allLogs, {
@@ -1393,6 +1649,22 @@ export function createApp({
             const body = await readJson(req, config);
             const validated = validateRequest(res, schemas.testWebhook, { body });
             if (!validated.ok) return;
+            {
+              const zodResult = zodSchemas.testWebhookSchema.safeParse(validated.data.body);
+              if (!zodResult.success) {
+                return sendJson(res, 400, {
+                  error: "validation_failed",
+                  code: "VALIDATION_FAILED",
+                  message: "Request validation failed.",
+                  errors: zodResult.error.issues.map((issue) => ({
+                    field: issue.path.join("."),
+                    source: "body",
+                    message: issue.message,
+                    code: issue.code,
+                  })),
+                });
+              }
+            }
             webhook = {
               id: "whk_test",
               url: validated.data.body.url,
@@ -1463,6 +1735,22 @@ export function createApp({
             return sendJson(res, 413, { error: "payload_too_large" });
           const validated = validateRequest(res, schemas.addIssuer, { body });
           if (!validated.ok) return;
+          {
+            const zodResult = zodSchemas.addIssuerSchema.safeParse(validated.data.body);
+            if (!zodResult.success) {
+              return sendJson(res, 400, {
+                error: "validation_failed",
+                code: "VALIDATION_FAILED",
+                message: "Request validation failed.",
+                errors: zodResult.error.issues.map((issue) => ({
+                  field: issue.path.join("."),
+                  source: "body",
+                  message: issue.message,
+                  code: issue.code,
+                })),
+              });
+            }
+          }
           const { issuer } = validated.data.body;
           await soroban.addIssuer(issuer);
           realtime?.emitDidEvent("issuer_added", issuer, { subject: issuer });
@@ -1490,6 +1778,25 @@ export function createApp({
             query: url.searchParams,
           });
           if (!validated.ok) return;
+          {
+            const zodResult = zodSchemas.removeIssuerSchema.safeParse({
+              ...body,
+              ...Object.fromEntries(url.searchParams),
+            });
+            if (!zodResult.success) {
+              return sendJson(res, 400, {
+                error: "validation_failed",
+                code: "VALIDATION_FAILED",
+                message: "Request validation failed.",
+                errors: zodResult.error.issues.map((issue) => ({
+                  field: issue.path.join("."),
+                  source: "body",
+                  message: issue.message,
+                  code: issue.code,
+                })),
+              });
+            }
+          }
           const issuer = validated.data.body.issuer ?? validated.data.query.issuer;
           if (!issuer) {
             return sendJson(res, 400, {
@@ -1524,6 +1831,24 @@ export function createApp({
             query: url.searchParams,
           });
           if (!validated.ok) return;
+          {
+            const zodResult = zodSchemas.expiryReportQuerySchema.safeParse(
+              Object.fromEntries(url.searchParams),
+            );
+            if (!zodResult.success) {
+              return sendJson(res, 400, {
+                error: "validation_failed",
+                code: "VALIDATION_FAILED",
+                message: "Request validation failed.",
+                errors: zodResult.error.issues.map((issue) => ({
+                  field: issue.path.join("."),
+                  source: "query",
+                  message: issue.message,
+                  code: issue.code,
+                })),
+              });
+            }
+          }
           const windowDays = validated.data.query.windowDays ?? config.expiryWarningDays;
           const credentials = await readCredentials(config);
           const expiring = findExpiringCredentials(credentials, {
@@ -1557,6 +1882,22 @@ export function createApp({
           }
           const validated = validateRequest(res, schemas.expiryThresholds, { body });
           if (!validated.ok) return;
+          {
+            const zodResult = zodSchemas.expiryThresholdsSchema.safeParse(validated.data.body);
+            if (!zodResult.success) {
+              return sendJson(res, 400, {
+                error: "validation_failed",
+                code: "VALIDATION_FAILED",
+                message: "Request validation failed.",
+                errors: zodResult.error.issues.map((issue) => ({
+                  field: issue.path.join("."),
+                  source: "body",
+                  message: issue.message,
+                  code: issue.code,
+                })),
+              });
+            }
+          }
           const validThresholds = [...validated.data.body.thresholds].sort((a, b) => b - a);
 
           config.expiryReminderThresholds = validThresholds;
@@ -1582,6 +1923,22 @@ export function createApp({
 
           const validated = validateRequest(res, schemas.createApiKey, { body });
           if (!validated.ok) return;
+          {
+            const zodResult = zodSchemas.createApiKeySchema.safeParse(validated.data.body);
+            if (!zodResult.success) {
+              return sendJson(res, 400, {
+                error: "validation_failed",
+                code: "VALIDATION_FAILED",
+                message: "Request validation failed.",
+                errors: zodResult.error.issues.map((issue) => ({
+                  field: issue.path.join("."),
+                  source: "body",
+                  message: issue.message,
+                  code: issue.code,
+                })),
+              });
+            }
+          }
           const keyInput = validated.data.body;
           const issued = await apiKeyService.issueKey({
             name: keyInput.name ?? "default",
@@ -1643,6 +2000,22 @@ export function createApp({
           const body = await readJson(req, config);
           const validated = validateRequest(res, schemas.rotateApiKey, { body });
           if (!validated.ok) return;
+          {
+            const zodResult = zodSchemas.rotateApiKeySchema.safeParse(validated.data.body);
+            if (!zodResult.success) {
+              return sendJson(res, 400, {
+                error: "validation_failed",
+                code: "VALIDATION_FAILED",
+                message: "Request validation failed.",
+                errors: zodResult.error.issues.map((issue) => ({
+                  field: issue.path.join("."),
+                  source: "body",
+                  message: issue.message,
+                  code: issue.code,
+                })),
+              });
+            }
+          }
           const rotated = await apiKeyService.rotateKey(id, {
             expiresInDays: validated.data.body.expiresInDays ?? null,
           });

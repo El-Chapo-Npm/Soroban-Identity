@@ -15,6 +15,11 @@ import {
   stellarAccount,
   stellarContract,
   searchParamsToObject,
+  stellarAddress,
+  formatValidationErrors,
+  validateRequest,
+  validateResponse,
+  generateOpenApiSpec,
 } from '../src/validation.js';
 
 const ACCOUNT = `G${'A'.repeat(55)}`;
@@ -150,6 +155,96 @@ test('validate accumulates errors across body and query in one pass', () => {
 test('searchParamsToObject keeps the last value for repeated keys', () => {
   const obj = searchParamsToObject(new URLSearchParams('a=1&a=2&b=3'));
   assert.deepEqual(obj, { a: '2', b: '3' });
+});
+
+// ── Unit: Zod layer ────────────────────────────────────────────────
+
+test('stellarAddress accepts both G and C addresses', () => {
+  assert.equal(stellarAddress.safeParse(ACCOUNT).success, true);
+  assert.equal(stellarAddress.safeParse(CONTRACT).success, true);
+  assert.equal(stellarAddress.safeParse('not-an-address').success, false);
+  assert.equal(stellarAddress.safeParse(`G${'a'.repeat(55)}`).success, false);
+});
+
+test('formatValidationErrors emits field paths and sources', () => {
+  const parsed = schemas.issueCredential.safeParse({
+    body: { id: 'x', subject: 'nope' },
+  });
+  assert.equal(parsed.success, false);
+  const errors = formatValidationErrors(parsed.error);
+  assert.ok(Array.isArray(errors));
+  const fields = errors.map((e) => e.field).sort();
+  assert.deepEqual(fields, ['id', 'subject']);
+  for (const error of errors) {
+    assert.equal(error.source, 'body');
+    assert.ok(error.code);
+    assert.ok(error.message.length > 0);
+  }
+});
+
+test('formatValidationErrors maps nested paths to dotted field names', () => {
+  const schema = schemas.issueCredential;
+  const parsed = schema.safeParse({
+    body: { id: 'cred-1', subject: ACCOUNT, metadata: { nested: { bad: 1 } } },
+  });
+  if (!parsed.success) {
+    const errors = formatValidationErrors(parsed.error);
+    assert.ok(errors.every((e) => typeof e.field === 'string'));
+  }
+});
+
+test('validateRequest returns parsed data for a valid request', () => {
+  const result = validateRequest(schemas.issueCredential, {
+    body: { id: 'cred-1', subject: ACCOUNT },
+  });
+  assert.equal(result.success, true);
+  assert.equal(result.data.body.id, 'cred-1');
+});
+
+test('validateRequest returns a compatible error shape for invalid input', () => {
+  const result = validateRequest(schemas.issueCredential, {
+    body: { id: 'x', subject: 'nope' },
+  });
+  assert.equal(result.success, false);
+  assert.ok(Array.isArray(result.errors));
+  assert.ok(result.errors.every((e) => e.field && e.source && e.code && e.message));
+});
+
+test('validateRequest throws in dev mode and passes through in production', () => {
+  const previous = process.env.NODE_ENV;
+  try {
+    process.env.NODE_ENV = 'development';
+    assert.throws(() =>
+      validateRequest(schemas.issueCredential, { body: { id: 'x', subject: 'nope' } }),
+    );
+
+    process.env.NODE_ENV = 'production';
+    const result = validateRequest(schemas.issueCredential, {
+      body: { id: 'x', subject: 'nope' },
+    });
+    assert.equal(result.success, false);
+    assert.ok(Array.isArray(result.errors));
+  } finally {
+    if (previous === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previous;
+  }
+});
+
+test('validateResponse reports errors for invalid response payloads', () => {
+  const result = validateResponse(schemas.issueCredential, {
+    body: { id: 'x', subject: 'nope' },
+  });
+  assert.equal(result.success, false);
+  assert.ok(Array.isArray(result.errors));
+});
+
+test('generateOpenApiSpec returns a well-formed OpenAPI document', () => {
+  const spec = generateOpenApiSpec();
+  assert.equal(typeof spec, 'object');
+  assert.ok(spec.openapi);
+  assert.ok(spec.info && spec.info.title);
+  assert.ok(spec.paths && typeof spec.paths === 'object');
+  assert.ok(Object.keys(spec.paths).length > 0);
 });
 
 // ── Integration: 400 responses from the HTTP layer ─────────────────
@@ -319,5 +414,85 @@ test('string inputs are sanitized before reaching storage', async () => {
     assert.equal(res.statusCode, 201);
     assert.equal(res.body.id, 'cred-sanitized');
     assert.equal(res.body.type, 'Diploma');
+  });
+});
+
+// ── Integration: v2 routes ─────────────────────────────────────────
+
+test('POST /v2/credentials rejects a malformed body with field-path details', async () => {
+  await withServer(async ({ request }) => {
+    const res = await request('POST', '/v2/credentials', {
+      headers: { 'x-api-key': 'test-admin-key' },
+      body: { id: 'x', subject: 'nope' },
+    });
+    assert.equal(res.statusCode, 400);
+    assert.equal(res.body.code, 'VALIDATION_FAILED');
+    assert.ok(Array.isArray(res.body.errors));
+    const fields = res.body.errors.map((e) => e.field).sort();
+    assert.deepEqual(fields, ['id', 'subject']);
+    assert.ok(res.body.errors.every((e) => e.source === 'body'));
+  });
+});
+
+test('GET /v2/credentials rejects an out-of-range limit with query details', async () => {
+  await withServer(async ({ request }) => {
+    const res = await request('GET', '/v2/credentials?limit=9999');
+    assert.equal(res.statusCode, 400);
+    assert.equal(res.body.errors[0].source, 'query');
+    assert.equal(res.body.errors[0].field, 'limit');
+  });
+});
+
+test('GET /v2/credentials/:id rejects an invalid credential id with param details', async () => {
+  await withServer(async ({ request }) => {
+    const res = await request('GET', '/v2/credentials/ab');
+    assert.equal(res.statusCode, 400);
+    assert.equal(res.body.errors[0].field, 'credentialId');
+    assert.equal(res.body.errors[0].source, 'params');
+  });
+});
+
+test('POST /v2/webhooks rejects a non-http url with field-path details', async () => {
+  await withServer(async ({ request }) => {
+    const res = await request('POST', '/v2/webhooks', {
+      headers: { 'x-api-key': 'test-admin-key' },
+      body: { url: 'javascript:alert(1)' },
+    });
+    assert.equal(res.statusCode, 400);
+    assert.equal(res.body.errors[0].field, 'url');
+    assert.equal(res.body.errors[0].source, 'body');
+  });
+});
+
+test('POST /v2/admin/issuers rejects a non-Stellar issuer address', async () => {
+  await withServer(async ({ request }) => {
+    const res = await request('POST', '/v2/admin/issuers', {
+      headers: { 'x-api-key': 'test-admin-key' },
+      body: { issuer: 'not-an-address' },
+    });
+    assert.equal(res.statusCode, 400);
+    assert.equal(res.body.errors[0].field, 'issuer');
+  });
+});
+
+test('POST /v2/oauth/token rejects a malformed body with field-path details', async () => {
+  await withServer(async ({ request }) => {
+    const res = await request('POST', '/v2/oauth/token', {
+      body: { grant_type: 'client_credentials' },
+    });
+    assert.equal(res.statusCode, 400);
+    assert.ok(Array.isArray(res.body.errors));
+    assert.ok(res.body.errors.every((e) => e.field && e.source));
+  });
+});
+
+test('a valid v2 request passes validation and reaches the handler', async () => {
+  await withServer(async ({ request }) => {
+    const res = await request('POST', '/v2/credentials', {
+      headers: { 'x-api-key': 'test-admin-key' },
+      body: { id: 'cred-v2-valid-1', subject: ACCOUNT, expiresAt: 0 },
+    });
+    assert.equal(res.statusCode, 201);
+    assert.equal(res.body.id, 'cred-v2-valid-1');
   });
 });

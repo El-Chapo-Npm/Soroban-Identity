@@ -17,13 +17,46 @@ import { V1_ROUTES, withV1Prefix } from "./v1.js";
 
 export const V2_PREFIX = "/v2";
 
-/** All v2 routes share the same path surface as v1 under a /v2 prefix. */
+/**
+ * All v2 routes share the same path surface as v1 under a /v2 prefix.
+ *
+ * v2 shares v1's validation contract: the `requestSchema` / `responseSchema`
+ * descriptors defined on each v1 route are inherited verbatim via the
+ * `{ ...descriptor, path }` spread below. Only the `path` is rewritten to the
+ * /v2 prefix; the schemas themselves are intentionally identical to v1.
+ *
+ * The v2 response *envelope* (apiVersion/data/meta) is not part of the v1
+ * response schema, so it is described separately by `v2Envelope` and applied
+ * by `wrapResponse` rather than by the inherited route descriptors.
+ */
 export const V2_ROUTES = Object.fromEntries(
   Object.entries(V1_ROUTES).map(([name, descriptor]) => [
     name,
     { ...descriptor, path: withV1Prefix(descriptor.path).replace("/v1", "/v2") },
   ]),
 );
+
+/**
+ * Schema descriptor for the v2 response envelope.
+ *
+ * v1 route `responseSchema` values describe the inner `data` payload; this
+ * schema wraps them with the version marker and metadata that v2 adds.
+ */
+export const v2Envelope = {
+  type: "object",
+  required: ["apiVersion", "data", "meta"],
+  properties: {
+    apiVersion: { type: "string", const: "v2" },
+    data: { type: "object" },
+    meta: {
+      type: "object",
+      required: ["timestamp"],
+      properties: {
+        timestamp: { type: "string", format: "date-time" },
+      },
+    },
+  },
+};
 
 /**
  * Given a bare path (no version prefix), return the v2-prefixed equivalent.

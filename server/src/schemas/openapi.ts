@@ -6,6 +6,7 @@ import {
   GetReputationRequestSchema,
   GetReputationResponseSchema,
   ErrorResponseSchema,
+  SCHEMA_VERSION,
 } from './index';
 
 /**
@@ -48,7 +49,7 @@ const jsonResponse = (schema: z.ZodTypeAny, name: string, description: string) =
  *
  * @param version API/schema version to advertise (schema versioning support).
  */
-export function generateOpenApiSpec(version = '1.0.0'): OpenApiDocument {
+export function generateOpenApiSpec(version = SCHEMA_VERSION): OpenApiDocument {
   return {
     openapi: '3.0.3',
     info: {
@@ -57,9 +58,9 @@ export function generateOpenApiSpec(version = '1.0.0'): OpenApiDocument {
       description: 'Runtime-validated API contract generated from Zod schemas.',
     },
     paths: {
-      '/reputation/submit-score': {
+      '/v1/reputation/submit-score': {
         post: {
-          operationId: 'submitScore',
+          operationId: 'submitScoreV1',
           requestBody: jsonBody(SubmitScoreRequestSchema, 'SubmitScoreRequest'),
           responses: {
             '200': jsonResponse(SubmitScoreResponseSchema, 'SubmitScoreResponse', 'Score submitted'),
@@ -67,9 +68,36 @@ export function generateOpenApiSpec(version = '1.0.0'): OpenApiDocument {
           },
         },
       },
-      '/reputation/{address}': {
+      '/v1/reputation/{address}': {
         get: {
-          operationId: 'getReputation',
+          operationId: 'getReputationV1',
+          parameters: [
+            {
+              name: 'address',
+              in: 'path',
+              required: true,
+              schema: { type: 'string' },
+            },
+          ],
+          responses: {
+            '200': jsonResponse(GetReputationResponseSchema, 'GetReputationResponse', 'Reputation record'),
+            '400': jsonResponse(ErrorResponseSchema, 'ErrorResponse', 'Validation error'),
+          },
+        },
+      },
+      '/v2/reputation/submit-score': {
+        post: {
+          operationId: 'submitScoreV2',
+          requestBody: jsonBody(SubmitScoreRequestSchema, 'SubmitScoreRequest'),
+          responses: {
+            '200': jsonResponse(SubmitScoreResponseSchema, 'SubmitScoreResponse', 'Score submitted'),
+            '400': jsonResponse(ErrorResponseSchema, 'ErrorResponse', 'Validation error'),
+          },
+        },
+      },
+      '/v2/reputation/{address}': {
+        get: {
+          operationId: 'getReputationV2',
           parameters: [
             {
               name: 'address',

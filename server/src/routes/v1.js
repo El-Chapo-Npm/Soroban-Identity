@@ -9,6 +9,43 @@
  * `/v1/credentials` by the version middleware.
  */
 
+import {
+  listCredentialsRequestSchema,
+  listCredentialsResponseSchema,
+  getCredentialRequestSchema,
+  getCredentialResponseSchema,
+  credentialStatusRequestSchema,
+  credentialStatusResponseSchema,
+  verifyCredentialRequestSchema,
+  verifyCredentialResponseSchema,
+  issueCredentialRequestSchema,
+  issueCredentialResponseSchema,
+  revokeCredentialRequestSchema,
+  revokeCredentialResponseSchema,
+  batchOperationsRequestSchema,
+  batchOperationsResponseSchema,
+  listWebhooksRequestSchema,
+  listWebhooksResponseSchema,
+  createWebhookRequestSchema,
+  createWebhookResponseSchema,
+  deleteWebhookRequestSchema,
+  deleteWebhookResponseSchema,
+  listIssuersRequestSchema,
+  listIssuersResponseSchema,
+  addIssuerRequestSchema,
+  addIssuerResponseSchema,
+  removeIssuerRequestSchema,
+  removeIssuerResponseSchema,
+  expiryReportRequestSchema,
+  expiryReportResponseSchema,
+  healthRequestSchema,
+  healthResponseSchema,
+  infoRequestSchema,
+  infoResponseSchema,
+  metricsRequestSchema,
+  metricsResponseSchema,
+} from "../schemas/index.ts";
+
 export const V1_PREFIX = "/v1";
 
 /**
@@ -33,6 +70,32 @@ export const V1_ROUTES = {
   health:              { method: "GET",    path: "/health" },
   info:                { method: "GET",    path: "/info" },
   metrics:             { method: "GET",    path: "/metrics" },
+};
+
+/**
+ * Validation contract for v1 routes, keyed by the same logical names as
+ * `V1_ROUTES`. Each entry carries optional Zod request/response schema
+ * descriptors so middleware can be attached declaratively. v2 inherits
+ * these automatically unless it overrides them.
+ */
+export const V1_SCHEMAS = {
+  listCredentials:  { requestSchema: listCredentialsRequestSchema,  responseSchema: listCredentialsResponseSchema },
+  getCredential:    { requestSchema: getCredentialRequestSchema,    responseSchema: getCredentialResponseSchema },
+  credentialStatus: { requestSchema: credentialStatusRequestSchema, responseSchema: credentialStatusResponseSchema },
+  verifyCredential: { requestSchema: verifyCredentialRequestSchema, responseSchema: verifyCredentialResponseSchema },
+  issueCredential:  { requestSchema: issueCredentialRequestSchema,  responseSchema: issueCredentialResponseSchema },
+  revokeCredential: { requestSchema: revokeCredentialRequestSchema, responseSchema: revokeCredentialResponseSchema },
+  batchOperations:  { requestSchema: batchOperationsRequestSchema,  responseSchema: batchOperationsResponseSchema },
+  listWebhooks:     { requestSchema: listWebhooksRequestSchema,     responseSchema: listWebhooksResponseSchema },
+  createWebhook:    { requestSchema: createWebhookRequestSchema,    responseSchema: createWebhookResponseSchema },
+  deleteWebhook:    { requestSchema: deleteWebhookRequestSchema,    responseSchema: deleteWebhookResponseSchema },
+  listIssuers:      { requestSchema: listIssuersRequestSchema,      responseSchema: listIssuersResponseSchema },
+  addIssuer:        { requestSchema: addIssuerRequestSchema,        responseSchema: addIssuerResponseSchema },
+  removeIssuer:     { requestSchema: removeIssuerRequestSchema,     responseSchema: removeIssuerResponseSchema },
+  expiryReport:     { requestSchema: expiryReportRequestSchema,     responseSchema: expiryReportResponseSchema },
+  health:           { requestSchema: healthRequestSchema,           responseSchema: healthResponseSchema },
+  info:             { requestSchema: infoRequestSchema,             responseSchema: infoResponseSchema },
+  metrics:          { requestSchema: metricsRequestSchema,          responseSchema: metricsResponseSchema },
 };
 
 /**
