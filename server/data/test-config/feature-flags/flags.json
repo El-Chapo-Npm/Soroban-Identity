@@ -1,0 +1,22 @@
+[
+  {
+    "id": "a062aa15-550e-4988-a9f3-41bd94d91b8a",
+    "key": "new_credential_types",
+    "description": "Enable newly introduced verifiable credential types",
+    "type": "variant",
+    "enabled": false,
+    "defaultValue": "disabled",
+    "targetingRules": [
+      {
+        "attribute": "tier",
+        "operator": "eq",
+        "value": "enterprise",
+        "variant": "enabled"
+      }
+    ],
+    "createdBy": "admin",
+    "createdAt": 1792155389955,
+    "updatedAt": 1792155389955,
+    "archived": false
+  }
+]

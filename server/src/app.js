@@ -87,6 +87,11 @@ import { openTelemetryHttpMiddleware } from "./tracing/index.js";
 import { EventStore, EventReplayer, createEvent, EventTypes, handleEventSourcingRoutes } from "./events/index.js";
 import { handleMockApiRequest } from "./mock-api.js";
 import { collectHealth, collectReadiness } from "./health.js";
+import {
+  ENCRYPTION_SESSION_HEADER,
+  EncryptionSessionStore,
+  PayloadEncryptionError,
+} from "./payload-encryption.js";
 const SERVER_VERSION = "0.1.0";
 const MIN_SDK_VERSION = "0.1.0";
 const SERVER_FEATURES = [
@@ -129,6 +134,10 @@ export function createApp({
   quotaTracker = null,
   deprecationRegistry = null,
   ddosProtection = null,
+  encryptionSessionStore = new EncryptionSessionStore({
+    ttlSeconds: config.payloadEncryptionSessionTtlSeconds,
+    rotationGraceSeconds: config.payloadEncryptionRotationGraceSeconds,
+  }),
 }) {
   // Expose the key service on config so http-utils.requireAuth can validate
   // issued API keys instead of falling back to the single admin key.
@@ -505,6 +514,102 @@ export function createApp({
       }
     }
 
+    const payloadEncryptionEnabled = config.payloadEncryptionEnabled === true;
+    console.log("DEBUG_BEFORE_ENCRYPTION", req.method, pathname);
+    const encryptionSessionId = req.headers[ENCRYPTION_SESSION_HEADER];
+    const isEncryptionControlRoute =
+      pathname === "/encryption/sessions" ||
+      /^\/encryption\/sessions\/[^/]+(?:\/rotate)?$/.test(pathname);
+    const encryptionOwnerId = req.apiKeyId ?? "admin";
+    if (payloadEncryptionEnabled && encryptionSessionId && !isEncryptionControlRoute) {
+      if (!await requireAuth(req, res, config, [])) return;
+      const ownerId = req.apiKeyId ?? "admin";
+      const currentKey = encryptionSessionStore.getCurrentKey(encryptionSessionId, ownerId);
+      if (!currentKey) {
+        return sendJson(res, 401, {
+          error: "invalid_encryption_session",
+          code: "ENCRYPTION_SESSION_INVALID",
+          message: "The encryption session is missing or has expired.",
+        });
+      }
+      req.payloadEncryption = {
+        sessionStore: encryptionSessionStore,
+        sessionId: encryptionSessionId,
+        ownerId,
+      };
+      res.payloadEncryption = {
+        ...currentKey,
+        sessionId: encryptionSessionId,
+        method: req.method,
+        path: req.url,
+        sensitiveFields: config.payloadEncryptionSensitiveFields ?? ["credentialSubject", "claims", "subject"],
+      };
+    }
+
+    const isCredentialPayloadRoute = /^\/credentials(?:\/issue|\/[^/]+(?:\/revoke|\/verify)?)?$/.test(pathname);
+    if (payloadEncryptionEnabled && isCredentialPayloadRoute && !encryptionSessionId) {
+      return sendJson(res, 428, {
+        error: "encryption_required",
+        code: "ENCRYPTION_REQUIRED",
+        message: "Create an encryption session and provide the X-Encryption-Session header.",
+      });
+    }
+
+    if (payloadEncryptionEnabled && req.method === "POST" && pathname === "/encryption/sessions") {
+      if (!await requireAuth(req, res, config, [])) return;
+      if (validateContentType(req, res)) return;
+      const body = await readJson(req, config);
+      if (body.__payloadTooLarge) {
+        return sendJson(res, 413, {
+          code: "PAYLOAD_TOO_LARGE",
+          message: "Request body exceeds the size limit.",
+        });
+      }
+      return sendJson(
+        res,
+        201,
+        encryptionSessionStore.create(body.clientPublicKey, req.apiKeyId ?? encryptionOwnerId),
+      );
+    }
+
+    const rotateEncryptionSessionMatch = pathname.match(/^\/encryption\/sessions\/([^/]+)\/rotate$/);
+    if (payloadEncryptionEnabled && req.method === "POST" && rotateEncryptionSessionMatch) {
+      if (!await requireAuth(req, res, config, [])) return;
+      if (validateContentType(req, res)) return;
+      const body = await readJson(req, config);
+      if (body.__payloadTooLarge) {
+        return sendJson(res, 413, {
+          code: "PAYLOAD_TOO_LARGE",
+          message: "Request body exceeds the size limit.",
+        });
+      }
+      return sendJson(
+        res,
+        200,
+        encryptionSessionStore.rotate(
+          decodeURIComponent(rotateEncryptionSessionMatch[1]),
+          body.clientPublicKey,
+          req.apiKeyId ?? encryptionOwnerId,
+        ),
+      );
+    }
+
+    const closeEncryptionSessionMatch = pathname.match(/^\/encryption\/sessions\/([^/]+)$/);
+    if (payloadEncryptionEnabled && req.method === "DELETE" && closeEncryptionSessionMatch) {
+      if (!await requireAuth(req, res, config, [])) return;
+      const sessionId = decodeURIComponent(closeEncryptionSessionMatch[1]);
+      const closed = encryptionSessionStore.getSession(sessionId, req.apiKeyId ?? encryptionOwnerId)
+        ? encryptionSessionStore.close(sessionId)
+        : false;
+      return closed
+        ? res.writeHead(204).end()
+        : sendJson(res, 404, {
+            error: "invalid_encryption_session",
+            code: "ENCRYPTION_SESSION_INVALID",
+            message: "The encryption session was not found.",
+          });
+    }
+
         if (req.method === "GET" && pathname === "/info") {
           return sendJson(res, 200, {
             version: SERVER_VERSION,
@@ -587,6 +692,8 @@ export function createApp({
         if (req.method === 'GET' && url.pathname === '/metrics') {
           if (metricsAggregator) await metricsAggregator.refresh().catch((error) => logger.error('metrics refresh failed', error));
           return sendText(res, 200, metrics.renderPrometheus());
+        }
+
         if (req.method === "GET" && pathname === "/ready") {
           const readiness = await collectReadiness({
             config,
@@ -1756,9 +1863,17 @@ export function createApp({
           return;
         }
 
+        console.log("DEBUG_NOT_FOUND", req.method, pathname);
         return notFound(res);
     };
     return requestContextStore.run({ requestId, correlationId, tenantId }, handler).catch((error) => {
+        if (error instanceof PayloadEncryptionError) {
+          return sendJson(res, error.status, {
+            error: "payload_encryption_error",
+            code: error.code,
+            message: error.message,
+          });
+        }
         if (error.name === "SorobanError" || error.name === "SorobanUnavailableError") {
           const isUnavailable = error.name === "SorobanUnavailableError" || error.category === "rpc_unavailable";
           const statusCode = isUnavailable ? 503 : 500;
@@ -1780,4 +1895,3 @@ export function createApp({
         });
     });
   };
-}
