@@ -15,22 +15,37 @@ function getDateFnsLocale() {
   return DATE_FNS_LOCALES[currentLang] || enUS;
 }
 
+const MAX_DATE_SECONDS = 8_640_000_000_000; // Max ECMAScript Date in seconds (8.64e15 ms)
+
+function normalizeUnixSeconds(value: number | bigint | string): number {
+  const num = typeof value === 'bigint' ? Number(value) : Number(value);
+  if (!Number.isFinite(num)) return 0;
+  return num < 0 ? num >>> 0 : num;
+}
+
 export function formatDate(value: string | number): string {
-  const ms = typeof value === 'number' ? value * 1000 : value;
+  const ms = typeof value === 'number' ? normalizeUnixSeconds(value) * 1000 : value;
   const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) {
+    return typeof value === 'number' ? `Unix ${normalizeUnixSeconds(value)}` : String(value);
+  }
   return formatFns(date, 'PPP', { locale: getDateFnsLocale() });
 }
 
 export function formatTimestamp(unix: number): string {
-  if (unix === 0) return 'No expiry';
-  const date = new Date(unix * 1000);
+  const sec = normalizeUnixSeconds(unix);
+  if (sec === 0) return 'No expiry';
+  if (sec > MAX_DATE_SECONDS) return `Unix ${sec}`;
+  const date = new Date(sec * 1000);
+  if (Number.isNaN(date.getTime())) return `Unix ${sec}`;
   return formatFns(date, 'PPpp', { locale: getDateFnsLocale() });
 }
 
 export function getExpiryStyle(unix: number): React.CSSProperties {
-  if (unix === 0) return { color: 'var(--text-muted)' };
-  const diffMs = unix * 1000 - Date.now();
-  if (diffMs < 0) return { color: 'var(--text-muted)' };
-  if (diffMs < 7 * 24 * 60 * 60 * 1000) return { color: 'var(--warning)', fontWeight: 600 };
+  const sec = normalizeUnixSeconds(unix);
+  if (sec === 0) return { color: 'var(--text-muted)' };
+  const diffSec = sec - Date.now() / 1000;
+  if (diffSec < 0) return { color: 'var(--text-muted)' };
+  if (diffSec < 7 * 24 * 60 * 60) return { color: 'var(--warning)', fontWeight: 600 };
   return {};
 }

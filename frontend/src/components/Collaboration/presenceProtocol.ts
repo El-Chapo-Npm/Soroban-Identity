@@ -57,6 +57,12 @@ export const PRESENCE_STALE_MS = 30_000;
 /** Interval between client heartbeats. */
 export const HEARTBEAT_INTERVAL_MS = 10_000;
 
+/** Base reconnect delay (ms) for exponential backoff. */
+export const RECONNECT_BASE_MS = 1_000;
+
+/** Maximum reconnect delay (ms) for exponential backoff. */
+export const RECONNECT_MAX_MS = 30_000;
+
 export interface PresenceClientOptions {
   url: string;
   userId: string;
@@ -85,8 +91,11 @@ export class PresenceClient {
   private connection: ConnectionState = 'disconnected';
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempts = 0;
   private closed = false;
   private currentResourceId: string | null = null;
+  private readonly handleOnlineBound = () => this.handleOnline();
+  private readonly handleOfflineBound = () => this.handleOffline();
 
   constructor(private readonly options: PresenceClientOptions) {
     this.now = options.now ?? (() => Date.now());
@@ -115,11 +124,23 @@ export class PresenceClient {
     if (this.socket || this.closed) {
       return;
     }
+    this.attachNetworkListeners();
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      this.setConnection('disconnected');
+      return;
+    }
     this.setConnection('connecting');
-    const socket = this.socketFactory(this.options.url);
+    let socket: WebSocket;
+    try {
+      socket = this.socketFactory(this.options.url);
+    } catch {
+      this.handleDrop();
+      return;
+    }
     this.socket = socket;
 
     socket.onopen = () => {
+      this.reconnectAttempts = 0;
       this.setConnection('connected');
       this.send({
         type: 'join',
@@ -171,8 +192,51 @@ export class PresenceClient {
 
   disconnect(): void {
     this.closed = true;
+    this.detachNetworkListeners();
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     this.send({ type: 'leave' });
     this.teardownSocket();
+    this.setConnection('disconnected');
+  }
+
+  private attachNetworkListeners(): void {
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('online', this.handleOnlineBound);
+      window.removeEventListener('offline', this.handleOfflineBound);
+      window.addEventListener('online', this.handleOnlineBound);
+      window.addEventListener('offline', this.handleOfflineBound);
+    }
+  }
+
+  private detachNetworkListeners(): void {
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('online', this.handleOnlineBound);
+      window.removeEventListener('offline', this.handleOfflineBound);
+    }
+  }
+
+  private handleOnline(): void {
+    if (this.closed) return;
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.reconnectAttempts = 0;
+    this.teardownSocket();
+    this.connect();
+  }
+
+  private handleOffline(): void {
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.teardownSocket();
+    this.collaborators = new Map();
+    this.locks = new Map();
     this.setConnection('disconnected');
   }
 
@@ -255,10 +319,15 @@ export class PresenceClient {
     if (this.closed || this.reconnectTimer !== null) {
       return;
     }
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      return;
+    }
+    const attempt = this.reconnectAttempts++;
+    const delay = Math.min(RECONNECT_BASE_MS * Math.pow(2, attempt), RECONNECT_MAX_MS);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();
-    }, 3_000);
+    }, delay);
   }
 
   private teardownSocket(): void {
