@@ -94,7 +94,7 @@ const DEFAULT_RULE: FilterRule = {
   id: "rule-initial-1",
   field: "credentialType",
   operator: "equals",
-  value: "Kyc",
+  value: "All",
 };
 
 /**
@@ -318,10 +318,19 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
   };
 
   const handleReset = () => {
+    const resetRules: FilterRule[] = [{ ...DEFAULT_RULE, id: `rule-${Date.now()}` }];
+    const resetState: FilterState = {
+      logic: "AND",
+      rules: resetRules,
+      quickFilter: undefined,
+    };
     setLogic("AND");
-    setRules([{ ...DEFAULT_RULE, id: `rule-${Date.now()}` }]);
+    setRules(resetRules);
     setActiveChip(null);
+    setSelectedPresetId("");
     setValidationErrors([]);
+    onFilterChange(resetState);
+    onApply?.(resetState);
     setStatusMessage("Filters reset to default");
     setTimeout(() => setStatusMessage(null), 2000);
   };
@@ -362,7 +371,7 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
         id: `rule-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
         field: "credentialType",
         operator: "equals",
-        value: "Kyc",
+        value: "All",
       },
     ]);
   };
@@ -697,7 +706,7 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
               onChange={(e) =>
                 updateRule(rule.id, {
                   field: e.target.value as FilterField,
-                  value: e.target.value === "credentialType" ? "Kyc" : "",
+                  value: e.target.value === "credentialType" ? "All" : "",
                   claimKey: "",
                 })
               }

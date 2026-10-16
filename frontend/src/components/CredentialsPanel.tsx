@@ -783,6 +783,13 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
     updatePaginationParams(1, pageSize);
   };
 
+  const handleResetFilters = () => {
+    setActiveFilter("All");
+    setActiveExpiryFilter("All");
+    setPage(1);
+    updatePaginationParams(1, pageSize);
+  };
+
   // ── #738: RPC rate-limit-aware transaction helper ─────────────────────────
   // Wraps an async RPC call in an exponential-backoff retry loop so transient
   // 429 / 503 errors do not permanently fail the transaction. Matches the same
@@ -1121,6 +1128,25 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
               </button>
             );
           })}
+          {(activeFilter !== "All" || activeExpiryFilter !== "All") && (
+            <button
+              type="button"
+              onClick={handleResetFilters}
+              style={{
+                padding: "0.3rem 0.75rem",
+                borderRadius: "999px",
+                border: "1px solid var(--border-input)",
+                background: "transparent",
+                color: "var(--text-muted)",
+                cursor: "pointer",
+                fontSize: "0.85rem",
+                marginLeft: "auto",
+              }}
+              aria-label="Reset Filters"
+            >
+              Reset Filters
+            </button>
+          )}
         </div>
 
         {fetching ? (
