@@ -68,17 +68,24 @@ type FilterType = "All" | CredentialType;
 type ExpiryFilterType = "All" | "Active" | "Expired";
 type CredentialStatus = "active" | "expired" | "revoked";
 
+function normalizeUnixTimestamp(expiresAt: number | bigint | string): number {
+  const num = typeof expiresAt === "bigint" ? Number(expiresAt) : Number(expiresAt);
+  if (!Number.isFinite(num)) return 0;
+  return num < 0 ? num >>> 0 : num;
+}
+
 function formatExpiry(expiresAt: number): string {
-  if (expiresAt === 0) return "No expiry";
+  const sec = normalizeUnixTimestamp(expiresAt);
+  if (sec === 0) return "No expiry";
 
-  const now = Date.now();
-  const expiryMs = expiresAt * 1000;
-  const diffMs = expiryMs - now;
-  const diffDays = Math.floor(Math.abs(diffMs) / (1000 * 60 * 60 * 24));
-  const diffHours = Math.floor(Math.abs(diffMs) / (1000 * 60 * 60));
-  const diffMinutes = Math.floor(Math.abs(diffMs) / (1000 * 60));
+  const nowSec = Math.floor(Date.now() / 1000);
+  const diffSec = sec - nowSec;
+  const absSec = Math.abs(diffSec);
+  const diffDays = Math.floor(absSec / (60 * 60 * 24));
+  const diffHours = Math.floor(absSec / (60 * 60));
+  const diffMinutes = Math.floor(absSec / 60);
 
-  if (diffMs < 0) {
+  if (diffSec < 0) {
     if (diffDays > 0) return `Expired ${diffDays} day${diffDays > 1 ? "s" : ""} ago`;
     if (diffHours > 0) return `Expired ${diffHours} hour${diffHours > 1 ? "s" : ""} ago`;
     return `Expired ${diffMinutes} min${diffMinutes > 1 ? "s" : ""} ago`;
@@ -90,14 +97,14 @@ function formatExpiry(expiresAt: number): string {
 }
 
 function getExpiryStyle(expiresAt: number): React.CSSProperties {
-  if (expiresAt === 0) return { color: "var(--text-muted)" };
+  const sec = normalizeUnixTimestamp(expiresAt);
+  if (sec === 0) return { color: "var(--text-muted)" };
 
-  const now = Date.now();
-  const expiryMs = expiresAt * 1000;
-  const diffMs = expiryMs - now;
-  const diffDays = Math.floor(Math.abs(diffMs) / (1000 * 60 * 60 * 24));
+  const nowSec = Math.floor(Date.now() / 1000);
+  const diffSec = sec - nowSec;
+  const diffDays = Math.floor(Math.abs(diffSec) / (60 * 60 * 24));
 
-  if (diffMs < 0) {
+  if (diffSec < 0) {
     return { color: "var(--error)", fontWeight: 600 };
   }
   if (diffDays <= 7) {
@@ -107,7 +114,8 @@ function getExpiryStyle(expiresAt: number): React.CSSProperties {
 }
 
 function isExpired(expiresAt: number): boolean {
-  return expiresAt > 0 && Date.now() / 1000 > expiresAt;
+  const sec = normalizeUnixTimestamp(expiresAt);
+  return sec > 0 && Date.now() / 1000 > sec;
 }
 
 function getCredentialStatus(credential: Credential): CredentialStatus {
@@ -614,13 +622,18 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
     }
 
     // Validate expiry date
-    const expiryNum = parseInt(expiresAt, 10);
-    if (isNaN(expiryNum) || expiryNum < 0) {
+    const trimmedExpiry = expiresAt.trim();
+    if (!/^\d+$/.test(trimmedExpiry)) {
       errors.expiresAt = "Expiry must be 0 or a positive number";
-    } else if (expiryNum > 0) {
-      const now = Math.floor(Date.now() / 1000);
-      if (expiryNum <= now) {
-        errors.expiresAt = "Expiry date must be in the future";
+    } else {
+      const expiryBig = BigInt(trimmedExpiry);
+      if (expiryBig > 18446744073709551615n) {
+        errors.expiresAt = "Expiry exceeds maximum 64-bit unsigned integer";
+      } else if (expiryBig > 0n) {
+        const now = BigInt(Math.floor(Date.now() / 1000));
+        if (expiryBig <= now) {
+          errors.expiresAt = "Expiry date must be in the future";
+        }
       }
     }
 
@@ -843,7 +856,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
             nativeToScVal(claimsMap, { type: "map" }),
             nativeToScVal(Buffer.from(claimsHashHex, "hex"), { type: "bytes" }),
             nativeToScVal(Buffer.from(sigHex, "hex"), { type: "bytes" }),
-            nativeToScVal(parseInt(expiresAt || "0", 10), { type: "u64" })
+            nativeToScVal(BigInt((expiresAt || "0").trim() || "0"), { type: "u64" })
           )
         )
         .setTimeout(30)

@@ -954,10 +954,28 @@ export class CredentialClient extends BaseClient {
       throw contractErr;
     }
 
-    return scValToNative(
+    const raw = scValToNative(
       (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
         .result!.retval
-    ) as Credential;
+    ) as Record<string, unknown>;
+
+    const toTimestamp = (v: unknown): number => {
+      if (typeof v === "bigint") return Number(v);
+      if (typeof v === "string") {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : 0;
+      }
+      if (typeof v === "number") return v < 0 ? v >>> 0 : v;
+      return 0;
+    };
+
+    return {
+      ...raw,
+      issuedAt: raw.issuedAt !== undefined || raw.issued_at !== undefined ? toTimestamp(raw.issuedAt ?? raw.issued_at) : (raw.issuedAt as number),
+      lastModifiedAt: raw.lastModifiedAt !== undefined || raw.last_modified_at !== undefined ? toTimestamp(raw.lastModifiedAt ?? raw.last_modified_at) : (raw.lastModifiedAt as number),
+      activationTime: raw.activationTime !== undefined || raw.activation_time !== undefined ? toTimestamp(raw.activationTime ?? raw.activation_time) : (raw.activationTime as number),
+      expiresAt: raw.expiresAt !== undefined || raw.expires_at !== undefined ? toTimestamp(raw.expiresAt ?? raw.expires_at) : (raw.expiresAt as number),
+    } as Credential;
   }
 
   /**
