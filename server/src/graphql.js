@@ -292,7 +292,9 @@ export async function executeGraphQL({
         return loaders.credentialLoader.load(id);
       },
       async credentials({ limit = 50, cursor = null, subject = null, issuer = null }) {
-        let all = await readCredentials(config);
+        let all = loaders.prefetchCredentials
+          ? await loaders.prefetchCredentials()
+          : await readCredentials(config);
         if (subject) all = all.filter((c) => c.subject === subject);
         if (issuer) all = all.filter((c) => c.issuer === issuer);
         const { items, nextCursor } = paginateCursor(all, { limit, cursor });
@@ -361,8 +363,7 @@ export async function executeGraphQL({
         if (webhookService) {
           webhookService.trigger('credential.issued', body).catch(() => {});
         }
-        loaders.credentialLoader.clear(body.id);
-        loaders.reputationLoader.clear(body.subject);
+        invalidateCredentialLoaders(loaders, body);
         return body;
       },
       async revokeCredential({ id }) {
@@ -372,7 +373,7 @@ export async function executeGraphQL({
         if (webhookService) {
           webhookService.trigger('credential.revoked', { id, revokedAt: revoked.revokedAt }).catch(() => {});
         }
-        loaders.credentialLoader.clear(id);
+        invalidateCredentialLoaders(loaders, revoked);
         return revoked;
       },
       async registerWebhook({ input }) {
@@ -401,6 +402,26 @@ export async function executeGraphQL({
 }
 
 /**
+ * Root query fields whose resolvers read the credential store. When a query
+ * selects any of them, the store is prefetched once up front (#1078).
+ */
+const CREDENTIAL_BACKED_FIELDS = new Set(['credential', 'credentials', 'verifyCredential', 'reputation']);
+
+/**
+ * Invalidate credential-derived loader caches after a write so later fields
+ * in the same request see it. Falls back to per-key clears for loader sets
+ * that predate the shared snapshot.
+ */
+function invalidateCredentialLoaders(loaders, credential) {
+  if (typeof loaders.invalidateCredentials === 'function') {
+    loaders.invalidateCredentials();
+    return;
+  }
+  loaders.credentialLoader.clear(credential.id);
+  if (credential.subject) loaders.reputationLoader.clear(credential.subject);
+}
+
+/**
  * Lightweight GraphQL AST-like parser and executor.
  */
 async function executeParsedQuery(queryString, variables, rootResolvers, context) {
@@ -423,6 +444,7 @@ async function executeParsedQuery(queryString, variables, rootResolvers, context
   }
 
   const selectionBlock = clean.slice(firstBrace + 1, lastBrace).trim();
+  const selections = [];
   let match;
 
   while ((match = fieldRegex.exec(selectionBlock)) !== null) {
@@ -441,15 +463,41 @@ async function executeParsedQuery(queryString, variables, rootResolvers, context
       continue;
     }
 
-    const args = parseFieldArgs(rawArgs, variables);
-    const resolvedValue = await resolver(args, context);
-
-    if (subFieldsRaw && resolvedValue && typeof resolvedValue === 'object') {
-      result[fieldName] = selectSubFields(resolvedValue, subFieldsRaw);
-    } else {
-      result[fieldName] = resolvedValue;
-    }
+    selections.push({ fieldName, resolver, args: parseFieldArgs(rawArgs, variables), subFieldsRaw });
   }
+
+  const shape = (resolvedValue, subFieldsRaw) =>
+    subFieldsRaw && resolvedValue && typeof resolvedValue === 'object'
+      ? selectSubFields(resolvedValue, subFieldsRaw)
+      : resolvedValue;
+
+  if (isMutation) {
+    // Mutation fields run serially, in document order, per the GraphQL spec.
+    for (const { fieldName, resolver, args, subFieldsRaw } of selections) {
+      result[fieldName] = shape(await resolver(args, context), subFieldsRaw);
+    }
+    return result;
+  }
+
+  // #1078: start the credential read before any resolver runs, then resolve
+  // query fields concurrently so their loader calls land in the same batch
+  // and share that single read instead of each making its own round trip.
+  const loaders = context.loaders;
+  if (
+    loaders &&
+    typeof loaders.prefetchCredentials === 'function' &&
+    selections.some(({ fieldName }) => CREDENTIAL_BACKED_FIELDS.has(fieldName))
+  ) {
+    // Failures surface through the resolvers that await the same promise.
+    loaders.prefetchCredentials().catch(() => {});
+  }
+
+  const values = await Promise.all(
+    selections.map(({ resolver, args }) => resolver(args, context))
+  );
+  selections.forEach(({ fieldName, subFieldsRaw }, i) => {
+    result[fieldName] = shape(values[i], subFieldsRaw);
+  });
 
   return result;
 }

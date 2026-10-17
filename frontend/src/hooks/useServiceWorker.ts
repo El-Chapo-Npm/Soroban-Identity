@@ -35,10 +35,13 @@ export function useServiceWorker() {
           setState((prev) => ({ ...prev, isUpdating: true }));
         });
 
-        // Handle controller change
+        // Reload once when an updated worker takes over. On the very first
+        // install there is no previous controller: clients.claim() fires
+        // controllerchange too, and reloading then would be pointless (#1079).
+        const hadController = Boolean(navigator.serviceWorker.controller);
         let refreshing = false;
         navigator.serviceWorker.addEventListener("controllerchange", () => {
-          if (refreshing) return;
+          if (!hadController || refreshing) return;
           refreshing = true;
           window.location.reload();
         });
@@ -114,6 +117,9 @@ export function useBackgroundSync() {
   return { isSyncing };
 }
 
+/** Must match API_CACHE in public/sw.js. */
+export const API_CACHE_NAME = "soroban-identity-api-v2";
+
 /**
  * Hook to cache API responses
  */
@@ -122,9 +128,15 @@ export function useCacheAPI() {
     if (!("caches" in window)) return;
 
     try {
-      const cache = await caches.open("soroban-identity-v1");
-      const responseClone = response.clone();
-      await cache.put(url, responseClone);
+      const cache = await caches.open(API_CACHE_NAME);
+      // The service worker ignores entries without this timestamp.
+      const headers = new Headers(response.headers);
+      headers.set("sw-cached-at", String(Date.now()));
+      const body = await response.clone().blob();
+      await cache.put(
+        url,
+        new Response(body, { status: response.status, statusText: response.statusText, headers })
+      );
     } catch (error) {
       console.error("Failed to cache response:", error);
     }
@@ -134,7 +146,7 @@ export function useCacheAPI() {
     if (!("caches" in window)) return null;
 
     try {
-      const cache = await caches.open("soroban-identity-v1");
+      const cache = await caches.open(API_CACHE_NAME);
       return await cache.match(url);
     } catch (error) {
       console.error("Failed to get cached response:", error);
