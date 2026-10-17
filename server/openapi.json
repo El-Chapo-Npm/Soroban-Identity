@@ -2569,7 +2569,29 @@
           "claims": { "type": "object", "description": "Sensitive claim dictionary. When a session key is established, this field is redacted from the plaintext body and delivered inside `encrypted`." },
           "source": { "type": "string", "example": "http" },
           "expiry_notified_at": { "type": "string", "format": "date-time" },
-          "encrypted": { "$ref": "#/components/schemas/EncryptedEnvelope" }
+          "encrypted": { "$ref": "#/components/schemas/EncryptedEnvelope" },
+          "_links": { "$ref": "#/components/schemas/CredentialLinks" }
+        }
+      },
+      "CredentialLinks": {
+        "type": "object",
+        "description": "State-aware HATEOAS links. `update` and `revoke` are omitted once a credential is revoked; the whole object is omitted when `fields` is supplied. See docs/hypermedia-links.md.",
+        "properties": {
+          "self": { "$ref": "#/components/schemas/Link" },
+          "status": { "$ref": "#/components/schemas/Link" },
+          "verify": { "$ref": "#/components/schemas/Link" },
+          "collection": { "$ref": "#/components/schemas/Link" },
+          "update": { "$ref": "#/components/schemas/Link" },
+          "revoke": { "$ref": "#/components/schemas/Link" }
+        }
+      },
+      "Link": {
+        "type": "object",
+        "required": ["href", "method"],
+        "properties": {
+          "href": { "type": "string", "description": "Relative path, carrying the request's version prefix.", "example": "/credentials/cred-kyc-2026-001" },
+          "method": { "type": "string", "example": "GET" },
+          "title": { "type": "string" }
         }
       },
       "IssueCredentialRequest": {
@@ -3277,7 +3299,31 @@
           "expiry_notified_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "_links": {
+            "$ref": "#/components/schemas/CredentialLinks"
           }
+        }
+      },
+      "CredentialLinks": {
+        "type": "object",
+        "description": "State-aware HATEOAS links. `update` and `revoke` are omitted once a credential is revoked; the whole object is omitted when `fields` is supplied. See docs/hypermedia-links.md.",
+        "properties": {
+          "self": { "$ref": "#/components/schemas/Link" },
+          "status": { "$ref": "#/components/schemas/Link" },
+          "verify": { "$ref": "#/components/schemas/Link" },
+          "collection": { "$ref": "#/components/schemas/Link" },
+          "update": { "$ref": "#/components/schemas/Link" },
+          "revoke": { "$ref": "#/components/schemas/Link" }
+        }
+      },
+      "Link": {
+        "type": "object",
+        "required": ["href", "method"],
+        "properties": {
+          "href": { "type": "string", "description": "Relative path, carrying the request's version prefix.", "example": "/credentials/cred-kyc-2026-001" },
+          "method": { "type": "string", "example": "GET" },
+          "title": { "type": "string" }
         }
       },
       "IssueCredentialRequest": {

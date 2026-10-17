@@ -34,6 +34,6 @@ curl "http://localhost:3001/credentials/cred-123?fields=id,bogus"
 
 ## Interaction with other features
 
-- Omitting `fields` returns the full object (default field set), unchanged from before.
+- Omitting `fields` returns the full object (default field set) plus its [`_links`](./hypermedia-links.md). A `fields` projection never includes `_links`.
 - `fields` is ignored on the [JSON-LD representation](./verifiable-credentials-jsonld.md) (`?format=jsonld` / `Accept: application/ld+json`), which has its own W3C-defined shape.
 - The [ETag](./etags.md) returned is computed from the canonical (unfiltered) credential, not the `fields`-filtered body — so it stays a stable identifier for the resource's state and remains usable in `If-Match` regardless of which `fields` a request used.

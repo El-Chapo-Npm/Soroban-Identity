@@ -36,12 +36,12 @@ const baseConfig = {
   nodeEnv: 'development',
 };
 
-async function callApp({ path, method = 'GET', body, config = baseConfig }) {
+async function callApp({ path, method = 'GET', body, headers = {}, config = baseConfig }) {
   const app = createApp({ config: { ...baseConfig, ...config }, soroban, metrics });
   const req = {
     method,
     url: path,
-    headers: { host: 'localhost', ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
+    headers: { host: 'localhost', ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers },
     ...(body === undefined ? {} : { async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify(body)); } }),
   };
   const res = new MockResponse();
@@ -88,4 +88,46 @@ test('mock routes are hidden unless explicitly enabled and are always disabled i
 
   const production = await callApp({ path: '/mock/v1/health', config: { nodeEnv: 'production' } });
   assert.equal(production.res.statusCode, 404);
+});
+
+test('mockStatus simulates an error response on any mock route', async () => {
+  const unavailable = await callApp({ path: '/mock/v1/credentials?mockStatus=503' });
+  assert.equal(unavailable.res.statusCode, 503);
+  assert.equal(unavailable.json.error, 'service_unavailable');
+  assert.equal(unavailable.json.simulated, true);
+  assert.equal(unavailable.res.headers['retry-after'], '1');
+
+  const viaHeader = await callApp({ path: '/mock/v1/dids/GMOCK', headers: { 'x-mock-status': '404' } });
+  assert.equal(viaHeader.res.statusCode, 404);
+  assert.equal(viaHeader.json.simulated, true);
+});
+
+test('mock health ignores scenarios so harnesses can always probe it', async () => {
+  const health = await callApp({ path: '/mock/v1/health?mockStatus=500' });
+  assert.equal(health.res.statusCode, 200);
+});
+
+test('mockDelayMs delays the response', async () => {
+  const startedAt = Date.now();
+  const result = await callApp({ path: '/mock/v1/credentials?mockDelayMs=120' });
+  assert.equal(result.res.statusCode, 200);
+  assert.ok(Date.now() - startedAt >= 100, 'expected the response to be delayed');
+});
+
+test('invalid mock scenarios are rejected with 400', async () => {
+  const badStatus = await callApp({ path: '/mock/v1/credentials?mockStatus=418' });
+  assert.equal(badStatus.res.statusCode, 400);
+  assert.equal(badStatus.json.error, 'invalid_mock_scenario');
+
+  const badDelay = await callApp({ path: '/mock/v1/credentials?mockDelayMs=999999' });
+  assert.equal(badDelay.res.statusCode, 400);
+
+  const negativeDelay = await callApp({ path: '/mock/v1/credentials?mockDelayMs=-5' });
+  assert.equal(negativeDelay.res.statusCode, 400);
+});
+
+test('mock info advertises the supported scenarios', async () => {
+  const info = await callApp({ path: '/mock/v1/info' });
+  assert.ok(info.json.scenarios.mockStatus.includes(503));
+  assert.equal(info.json.scenarios.mockDelayMs.max, 5000);
 });

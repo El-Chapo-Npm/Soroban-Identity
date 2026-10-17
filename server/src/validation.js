@@ -13,6 +13,73 @@ export const API_SCOPES = [
   '*',
 ];
 
+/** Stellar public key: G + 55 base32 characters. */
+export const STELLAR_ACCOUNT_RE = /^G[A-Z2-7]{55}$/;
+/** DID for this network: `did:stellar:<Stellar account>`. */
+export const DID_RE = /^did:stellar:(G[A-Z2-7]{55})$/;
+
+/**
+ * Replace lone UTF-16 surrogates with U+FFFD and normalize to NFC so special
+ * Unicode (emoji, accented text, CJK, RTL marks, unpaired surrogates) never
+ * crashes serialization downstream (#1067, #1082).
+ */
+export function normalizeUnicodeString(value) {
+  if (typeof value !== 'string') return value;
+  const wellFormed =
+    typeof value.toWellFormed === 'function'
+      ? value.toWellFormed()
+      : value.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '\uFFFD');
+  try {
+    return wellFormed.normalize('NFC');
+  } catch {
+    return wellFormed;
+  }
+}
+
+/** Normalize Unicode, strip C0/C1 control characters, and trim. */
+export function sanitizeString(value) {
+  if (typeof value !== 'string') return value;
+  // eslint-disable-next-line no-control-regex
+  return normalizeUnicodeString(value).replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim();
+}
+
+/**
+ * Sanitize DID metadata, preserving valid special Unicode (emoji, non-Latin
+ * scripts, symbols, zero-width joiners) while replacing lone surrogates and
+ * dropping control characters other than tab and newline (#1067, #1082).
+ *
+ * @param {unknown} metadata
+ * @returns {Record<string, unknown>}
+ */
+export function sanitizeDidMetadata(metadata, depth = 0) {
+  if (metadata === null || metadata === undefined) return {};
+  if (typeof metadata !== 'object' || Array.isArray(metadata)) {
+    throw new TypeError('DID metadata must be a plain JSON object');
+  }
+  if (depth > 20) return {};
+
+  const out = {};
+  for (const [rawKey, rawValue] of Object.entries(metadata)) {
+    const key = sanitizeString(String(rawKey));
+    if (!key) continue;
+    out[key] = sanitizeDidMetadataValue(rawValue, depth + 1);
+  }
+  return out;
+}
+
+function sanitizeDidMetadataValue(value, depth) {
+  if (depth > 20 || value === null || value === undefined) return null;
+  if (typeof value === 'string') {
+    // eslint-disable-next-line no-control-regex
+    return normalizeUnicodeString(value).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, '');
+  }
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'boolean') return value;
+  if (Array.isArray(value)) return value.map((item) => sanitizeDidMetadataValue(item, depth + 1));
+  if (typeof value === 'object') return sanitizeDidMetadata(value, depth + 1);
+  return String(value);
+}
+
 const looseObject = (shape = {}) => z.object(shape).passthrough();
 const optionalText = z.string().trim().optional();
 const queryFields = {
@@ -34,7 +101,22 @@ export const schemas = {
   }),
   credentialByIdParams: looseObject({
     params: looseObject({ credentialId: z.string().min(1) }),
-    query: looseObject(queryFields),
+    query: looseObject(queryFields).optional(),
+  }),
+  upsertDid: looseObject({
+    body: z
+      .object({
+        did: z.string().transform(sanitizeString).refine((v) => DID_RE.test(v), {
+          message: 'Must be a valid DID of the form did:stellar:<STELLAR_ACCOUNT>',
+        }).optional(),
+        address: z.string().transform(sanitizeString).refine((v) => STELLAR_ACCOUNT_RE.test(v), {
+          message: 'Must be a valid Stellar account address (G followed by 55 base32 characters)',
+        }).optional(),
+        controller: z.string().transform(sanitizeString).optional(),
+        metadata: z.record(z.string(), z.unknown()).optional().default({}),
+        active: z.boolean().optional(),
+      })
+      .strict(),
   }),
   issueCredential: looseObject({
     body: looseObject({ id: z.string().min(1) }),

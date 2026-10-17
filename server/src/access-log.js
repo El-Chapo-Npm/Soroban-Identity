@@ -102,6 +102,17 @@ export function resolveClientIp(req, { trustProxy = false } = {}) {
 }
 
 /**
+ * Truncate a UTF-8 string to at most `maxBytes` bytes without splitting a
+ * multi-byte sequence (e.g. an astral-plane emoji's surrogate pair). Slicing
+ * by `String.prototype.slice` counts UTF-16 code units, not bytes, and can
+ * leave a lone surrogate at the cut point; `Buffer#toString('utf8')` instead
+ * replaces any truncated trailing sequence with U+FFFD.
+ */
+function truncateUtf8(value, maxBytes) {
+  return Buffer.from(value, 'utf8').subarray(0, maxBytes).toString('utf8');
+}
+
+/**
  * Truncate a payload for logging so one large body cannot flood the log.
  */
 export function preparePayload(body, maxBytes = MAX_PAYLOAD_BYTES) {
@@ -115,7 +126,7 @@ export function preparePayload(body, maxBytes = MAX_PAYLOAD_BYTES) {
     return {
       truncated: true,
       bytes: Buffer.byteLength(serialized),
-      preview: serialized.slice(0, maxBytes),
+      preview: truncateUtf8(serialized, maxBytes),
     };
   }
 

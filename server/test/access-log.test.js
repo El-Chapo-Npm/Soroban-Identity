@@ -141,6 +141,20 @@ test('preparePayload truncates a large body and reports its real size', () => {
   assert.equal(output.preview.length, 100);
 });
 
+test('preparePayload truncates multi-byte Unicode without splitting a surrogate pair', () => {
+  // Each emoji is a 4-byte UTF-8 sequence / UTF-16 surrogate pair. Cutting at
+  // an odd byte boundary used to leave a lone surrogate in `preview`.
+  const emoji = '\u{1F600}'; // 😀
+  const body = { blob: emoji.repeat(50) };
+  const noLoneSurrogate = /^(?:[^\uD800-\uDFFF]|[\uD800-\uDBFF][\uDC00-\uDFFF])*$/;
+
+  const output = preparePayload(body, 101);
+
+  assert.equal(output.truncated, true);
+  assert.ok(Buffer.byteLength(output.preview, 'utf8') <= 101);
+  assert.match(output.preview, noLoneSurrogate);
+});
+
 test('preparePayload returns undefined for an absent body', () => {
   assert.equal(preparePayload(null), undefined);
   assert.equal(preparePayload(undefined), undefined);

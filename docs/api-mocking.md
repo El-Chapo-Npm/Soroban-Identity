@@ -27,6 +27,22 @@ The feature is **disabled by default** and is forcibly disabled when `NODE_ENV=p
 
 The mock routes have a dedicated `/mock/v1` prefix and are not aliases for real API routes. Invalid methods and unknown paths return JSON errors. `POST /mock/v1/credentials` requires `Content-Type: application/json` and obeys the server request-body size limit.
 
+## Simulating failures and latency
+
+Clients can force an error or a slow response on any mock route except `/mock/v1/health`, which stays unconditional so a test harness can always confirm the mock server is up. That way error handling and loading states can be tested without a broken backend.
+
+| Query parameter | Header | Effect |
+|---|---|---|
+| `mockStatus` | `X-Mock-Status` | Respond with this status and a JSON error body marked `"simulated": true`. Allowed: `400`, `401`, `403`, `404`, `409`, `429`, `500`, `503`. `429` and `503` also send `Retry-After: 1`. |
+| `mockDelayMs` | `X-Mock-Delay-Ms` | Wait this many milliseconds (integer, `0`–`5000`) before responding. Combines with `mockStatus`. |
+
+When both are supplied, the query parameter wins, since a browser can't easily set request headers. Out-of-range values return `400 invalid_mock_scenario`. `GET /mock/v1/info` lists the supported scenarios under `scenarios`.
+
+```bash
+curl -i 'http://localhost:3001/mock/v1/credentials?mockStatus=503'
+curl 'http://localhost:3001/mock/v1/dids/GMOCK?mockDelayMs=1500'
+```
+
 ## Example
 
 ```bash

@@ -86,7 +86,12 @@ import { logger } from "./logger.js";
 import { AnalyticsService, detectCountry } from "./analytics.js";
 import { createRateLimiter } from "./middleware/ratelimit.js";
 import { ApiKeyService } from "./api-keys.js";
-import { OAuthService } from "./oauth.js";
+import { OAuthService, OAuthError } from "./oauth.js";
+import { computeEtag, matchesIfNoneMatch, matchesIfMatch } from "./etag.js";
+import { applyFieldFiltering } from "./field-filter.js";
+import { createCompressionMiddleware } from "./compression.js";
+import { executeBatch } from "./batch.js";
+import { readNotificationLog, summarizeNotificationLog } from "./notification-log.js";
 import { UsageTracker } from "./analytics/usage.js";
 import { EmailTransport } from "./email.js";
 import { pickQuotaBinding, QuotaTracker, notifyQuotaThresholdOwner } from "./quota.js";
@@ -111,6 +116,22 @@ const SERVER_FEATURES = [
   "job_queue",
   "graceful_shutdown",
   "hateoas",
+];
+
+/** Top-level fields selectable via `?fields=` on a credential resource. */
+const CREDENTIAL_FIELDS = [
+  "id",
+  "subject",
+  "issuer",
+  "type",
+  "claims",
+  "expiresAt",
+  "expires_at",
+  "issuedAt",
+  "issued_at",
+  "revoked",
+  "revokedAt",
+  "metadata",
 ];
 
 const usageTracker = new UsageTracker();
@@ -712,22 +733,31 @@ export function createApp({
       }
     }
 
-        if (req.method === "GET" && pathname === "/info") {
-          return sendJson(res, 200, {
-            version: SERVER_VERSION,
-            apiVersion: version,
-            supportedVersions: SUPPORTED_VERSIONS,
-            features: SERVER_FEATURES,
-            minSdkVersion: MIN_SDK_VERSION,
-            encryption: {
-              enabled: isEncryptionEnabled(config),
-              algorithm: "aes-256-gcm",
-              keyExchange: "/encryption/session",
-              rotation: "/encryption/rotate",
-              keyIdHeader: ENCRYPTION_KEY_ID_HEADER,
-              encryptedFields: ["claims", "subject", "credentialSubject"],
+        const linkPrefix = resolveLinkPrefix({ version, isExplicitUrlVersion });
+
+        if (req.method === "GET" && (pathname === "/" || pathname === "/info")) {
+          const rootLinks = buildApiRootLinks(linkPrefix);
+          return sendJson(
+            res,
+            200,
+            {
+              version: SERVER_VERSION,
+              apiVersion: version,
+              supportedVersions: SUPPORTED_VERSIONS,
+              features: SERVER_FEATURES,
+              minSdkVersion: MIN_SDK_VERSION,
+              encryption: {
+                enabled: isEncryptionEnabled(config),
+                algorithm: "aes-256-gcm",
+                keyExchange: "/encryption/session",
+                rotation: "/encryption/rotate",
+                keyIdHeader: ENCRYPTION_KEY_ID_HEADER,
+                encryptedFields: ["claims", "subject", "credentialSubject"],
+              },
+              _links: rootLinks,
             },
-          });
+            { Link: formatLinkHeader(rootLinks) },
+          );
         }
 
         // CSP violation reports (#754). Unauthenticated by necessity — the
@@ -799,9 +829,6 @@ export function createApp({
           });
         }
 
-        if (req.method === 'GET' && url.pathname === '/metrics') {
-          if (metricsAggregator) await metricsAggregator.refresh().catch((error) => logger.error('metrics refresh failed', error));
-          return sendText(res, 200, metrics.renderPrometheus());
         if (req.method === "GET" && pathname === "/ready") {
           const readiness = await collectReadiness({
             config,
@@ -1169,30 +1196,20 @@ export function createApp({
           const recordVerification = (result) =>
             metrics?.observeCredentialVerification?.(result);
           if (!credential) {
+            recordVerification("not_found");
             return sendFormatted(req, res, 200, { verified: false, reason: "not_found" });
           }
           if (credential.revoked) {
+            recordVerification("revoked");
             return sendFormatted(req, res, 200, { verified: false, reason: "revoked" });
           }
           const now = Math.floor(Date.now() / 1000);
           if (credential.expiresAt > 0 && credential.expiresAt < now) {
+            recordVerification("expired");
             return sendFormatted(req, res, 200, { verified: false, reason: "expired" });
           }
-          return sendFormatted(req, res, 200, { verified: true, credential });
-            recordVerification("not_found");
-            return sendJson(res, 200, { verified: false, reason: "not_found" });
-          }
-          if (credential.revoked) {
-            recordVerification("revoked");
-            return sendJson(res, 200, { verified: false, reason: "revoked" });
-          }
-          const now = Math.floor(Date.now() / 1000);
-          if (credential.expiresAt > 0 && credential.expiresAt < now) {
-            recordVerification("expired");
-            return sendJson(res, 200, { verified: false, reason: "expired" });
-          }
           recordVerification("verified");
-          return sendJson(res, 200, { verified: true, credential });
+          return sendFormatted(req, res, 200, { verified: true, credential });
         }
 
         // Interactive Swagger UI (#830)
@@ -1586,6 +1603,7 @@ export function createApp({
           if (!await requireAuth(req, res, config, ['admin:read'])) return;
           const validated = validateRequest(res, schemas.webhookLogsQuery, { query: url.searchParams });
           if (!validated.ok) return;
+          const limit = validated.data.query.limit ?? 50;
           const webhookId = validated.data.query.webhookId ?? null;
           const allLogs = await readWebhookLogs(config, { webhookId, limit: null });
           const { items: logs, pagination } = offsetPage(allLogs, {
@@ -1635,6 +1653,10 @@ export function createApp({
 
         // ── DID Resolution & Metadata Endpoints (#1067) ────────────────
         if (req.method === "POST" && (pathname === "/dids" || pathname === "/identity/did")) {
+          // These writes land in the DID cache, which resolveDid() reads
+          // before the chain, so an unauthenticated write could poison any
+          // DID's resolved document.
+          if (!await requireAuth(req, res, config, ["admin:write"])) return;
           if (validateContentType(req, res)) return;
           const body = await readJson(req, config);
           if (body.__payloadTooLarge) {
@@ -1702,6 +1724,8 @@ export function createApp({
           }
 
           if (req.method === "PUT" || req.method === "PATCH") {
+            // Same cache-poisoning risk as POST /dids above.
+            if (!await requireAuth(req, res, config, ["admin:write"])) return;
             if (validateContentType(req, res)) return;
             const body = await readJson(req, config);
             if (body.__payloadTooLarge) {
@@ -1898,7 +1922,6 @@ export function createApp({
           return sendFormatted(req, res, 200, { ...report, pagination });
         }
 
-        return notFound(res, req);
         if (req.method === "GET" && (url.pathname === "/admin/expiry-thresholds" || url.pathname === "/expiry/thresholds")) {
           if (!await requireAuth(req, res, config, ['admin:read'])) return;
           return sendJson(res, 200, {
