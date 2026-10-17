@@ -121,6 +121,7 @@ export function useCredentialExpiryCheck(
         return {
           count: nextCount,
           credentials: updatedCredentials,
+          readIds: Array.from(readIdsRef.current),
           dismissed: false,
         };
       });

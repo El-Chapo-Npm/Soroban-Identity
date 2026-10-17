@@ -59,6 +59,12 @@ export type MicrophonePermissionState =
   | 'denied'
   | 'unavailable';
 
+export interface VoiceCommand {
+  phrases: string[];
+  description?: string;
+  handler: (transcript: string) => void;
+}
+
 export interface UseVoiceCommandsOptions extends VoiceCommandHandlers {
   /** BCP-47 language tag used for recognition and synthesis. Defaults to i18n language. */
   lang?: string;
@@ -70,8 +76,8 @@ export interface UseVoiceCommandsOptions extends VoiceCommandHandlers {
   speakFeedback?: boolean;
   /** Whether to automatically request microphone permission on mount. Defaults to false. */
   autoRequestPermission?: boolean;
-  /** Custom localized command phrases, overriding the i18n defaults. */
-  commands?: Partial<Record<VoiceCommandAction, string[]>>;
+  /** Custom localized command phrases or VoiceCommand array, overriding the i18n defaults. */
+  commands?: Partial<Record<VoiceCommandAction, string[]>> | VoiceCommand[];
 }
 
 export interface UseVoiceCommandsResult {
@@ -323,6 +329,8 @@ export function useVoiceCommands(
       }) as unknown as string[],
     };
 
+    const dictCommands = Array.isArray(customCommands) ? undefined : customCommands;
+
     const ensureArray = (value: unknown, fallback: string[]): string[] => {
       if (Array.isArray(value)) return value.filter((v): v is string => typeof v === 'string');
       if (typeof value === 'string') return [value];
@@ -330,14 +338,19 @@ export function useVoiceCommands(
     };
 
     return {
-      search: ensureArray(customCommands?.search ?? localized.search, DEFAULT_COMMANDS.search),
+      search: ensureArray(dictCommands?.search ?? localized.search, DEFAULT_COMMANDS.search),
       navigate: ensureArray(
-        customCommands?.navigate ?? localized.navigate,
+        dictCommands?.navigate ?? localized.navigate,
         DEFAULT_COMMANDS.navigate,
       ),
-      verify: ensureArray(customCommands?.verify ?? localized.verify, DEFAULT_COMMANDS.verify),
+      verify: ensureArray(dictCommands?.verify ?? localized.verify, DEFAULT_COMMANDS.verify),
     };
   }, [i18n, resolvedLang, customCommands]);
+
+  const customCommandsListRef = useRef<VoiceCommand[]>([]);
+  useEffect(() => {
+    customCommandsListRef.current = Array.isArray(customCommands) ? customCommands : [];
+  }, [customCommands]);
 
   const commandRegistryRef = useRef(commandRegistry);
   useEffect(() => {
@@ -445,6 +458,20 @@ export function useVoiceCommands(
       const transcript = final.trim();
       setFinalTranscript(transcript);
       setInterimTranscript('');
+
+      if (customCommandsListRef.current.length > 0) {
+        const norm = normalize(transcript);
+        const customMatch = customCommandsListRef.current.find((cmd) =>
+          cmd.phrases.some((p) => norm.includes(normalize(p)))
+        );
+        if (customMatch) {
+          customMatch.handler(transcript);
+          if (speakFeedbackRef.current && customMatch.description) {
+            speakRef.current(customMatch.description);
+          }
+          return;
+        }
+      }
 
       const match = matchCommand(transcript, commandRegistryRef.current);
       if (match) {

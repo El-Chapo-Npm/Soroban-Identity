@@ -103,8 +103,12 @@ const DEFAULT_RULE: FilterRule = {
 export function validateRule(rule: FilterRule): string | null {
   if (rule.field === "issuer" && rule.value.trim()) {
     const trimmed = rule.value.trim();
-    if (trimmed.length > 0 && !validateStellarAddress(trimmed)) {
-      return `Invalid Stellar address for issuer: "${trimmed}"`;
+    if (trimmed.length > 0) {
+      try {
+        validateStellarAddress(trimmed);
+      } catch {
+        return `Invalid Stellar address for issuer: "${trimmed}"`;
+      }
     }
   }
 

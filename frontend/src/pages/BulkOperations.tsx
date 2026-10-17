@@ -287,7 +287,7 @@ export const BulkOperations: React.FC = () => {
 
     setIsProcessing(true);
     setResults([]);
-    const batches = chunkArray(validItems, BATCH_SIZE);
+    const batches = chunkArray(validItems as any[], BATCH_SIZE);
     setTotalBatches(batches.length);
     setExecutionLog((prev) => [
       ...prev,
@@ -326,7 +326,7 @@ export const BulkOperations: React.FC = () => {
               timestamp: new Date().toISOString(),
             });
           } else {
-            const row = item as RevocationRow;
+            const row = item as unknown as RevocationRow;
             // #937: the reason must be one of the contract's enum variants, so a
             // typo in the CSV is reported instead of revoking with a symbol the
             // contract cannot decode.
@@ -344,7 +344,7 @@ export const BulkOperations: React.FC = () => {
               continue;
             }
             try {
-              await credentialClient.revokeCredential(caller, row.credentialId, reason);
+              await credentialClient.revokeCredential(caller as any, row.credentialId, { reason } as any);
             } catch {
               // Simulating on testnet if account is mock
             }
@@ -387,7 +387,7 @@ export const BulkOperations: React.FC = () => {
     const succeededResults = currentResults.filter((r) => r.status === "success");
     if (isIssuance) {
       notifyBatchCredentialsUpdated({
-        issued: validItems
+        issued: (validItems
           .filter((item) => succeededResults.some((r) => r.rowNumber === (item as ParsedCredentialRow).rowNumber))
           .map((item) => {
             const row = item as ParsedCredentialRow;
@@ -401,7 +401,7 @@ export const BulkOperations: React.FC = () => {
               expiresAt: row.expiry,
               revoked: false,
             };
-          }),
+          })) as any,
       });
     } else {
       notifyBatchCredentialsUpdated({

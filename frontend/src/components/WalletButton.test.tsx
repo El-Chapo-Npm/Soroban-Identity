@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import "@testing-library/jest-dom";
 import WalletButton from "./WalletButton";
 import { WalletContext } from "../context/WalletContext";
 
@@ -24,7 +25,9 @@ Object.defineProperty(window, "isSecureContext", {
 const mockWalletContext = {
   connected: true,
   publicKey: "GBTST2LSVJ7RQHAJWUIBVX5XCVX5XCVX5XCVX5XCVX5XCVX5XCVX5XCVX",
+  networkPassphrase: "Test SDF Network ; September 2015",
   connecting: false,
+  reconnecting: false,
   txLoading: false,
   error: null,
   walletType: "freighter" as const,
@@ -37,7 +40,7 @@ const mockWalletContext = {
   retryCount: 0,
 };
 
-const renderWithContext = (contextValue = mockWalletContext) => {
+const renderWithContext = (contextValue: any = mockWalletContext) => {
   return render(
     <WalletContext.Provider value={contextValue}>
       <WalletButton />
@@ -134,7 +137,7 @@ describe("WalletButton Copy Functionality", () => {
       };
 
       vi.spyOn(document, "createElement").mockReturnValue(
-        mockTextArea as unknown as Element,
+        mockTextArea as unknown as HTMLElement,
       );
       vi.spyOn(document, "execCommand").mockImplementation(
         mockExecCommand as any,
@@ -218,7 +221,7 @@ describe("WalletButton Copy Functionality", () => {
     });
 
     it("should show 'via WalletConnect' for walletconnect wallet", () => {
-      renderWithContext({ ...mockWalletContext, walletType: "walletconnect" });
+      renderWithContext({ ...mockWalletContext, walletType: "walletconnect" as any });
       expect(screen.getByText("via WalletConnect")).toBeInTheDocument();
     });
   });

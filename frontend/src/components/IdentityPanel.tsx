@@ -82,8 +82,9 @@ function validateMetadataFields(
   };
 }
 
-export default function IdentityPanel() {
-  const wallet = useWalletContext();
+export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } = {}) {
+  const contextWallet = useWalletContext();
+  const wallet = propWallet ?? contextWallet;
   const toast = useToast();
   const [identityState, dispatch] = useReducer(identityReducer, { status: 'idle' });
   const resolving = identityState.status === 'loading';

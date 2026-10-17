@@ -7,6 +7,8 @@ export const disconnectedWallet = {
   networkPassphrase: null,
   connected: false,
   connecting: false,
+  reconnecting: false,
+  txLoading: false,
   walletType: null,
   error: null,
   connect: noop,

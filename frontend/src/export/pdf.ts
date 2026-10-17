@@ -160,6 +160,15 @@ const COMPARISON_ACCENT = "#4f46e5";
 const COMPARISON_DIFF_BG = "#fef3c7";
 const COMPARISON_ALT_BG = "#f8fafc";
 
+const DEFAULT_COMPARISON_TEMPLATE: ExportTemplate = {
+  id: "comparison",
+  name: "Comparison Template",
+  title: "Credential comparison",
+  accentColor: COMPARISON_ACCENT,
+  fields: [],
+  includeQr: false,
+};
+
 function normalizeValue(value: string): string {
   return value.trim().toLowerCase();
 }
@@ -229,8 +238,8 @@ export function buildComparisonRows(input: ComparisonInput): ComparisonRow[] {
   for (const key of Array.from(claimKeys).sort()) {
     push(
       key,
-      DEFAULT_FIELD_LABELS[key] ?? key,
-      credentials.map((c) => fieldValue(c, key) || "—")
+      (DEFAULT_FIELD_LABELS as Record<string, string>)[key] ?? key,
+      credentials.map((c) => c.claims?.[key] || "—")
     );
   }
 
@@ -272,7 +281,7 @@ function drawComparison(
     doc.text("ATTRIBUTE", PAGE_MARGIN + 6, y + 3);
     credentials.forEach((cred, i) => {
       const x = PAGE_MARGIN + labelWidth + columnWidth * i + 6;
-      const title = fieldValue(cred, "name") || fieldValue(cred, "id") || `Credential ${i + 1}`;
+      const title = cred.claims?.["name"] || fieldValue(cred, "id") || `Credential ${i + 1}`;
       doc.text(doc.splitTextToSize(title, columnWidth - 12)[0], x, y + 3);
     });
     y += 22;
@@ -328,7 +337,7 @@ function drawComparison(
 /** Build a side-by-side comparison PDF for 2-4 credentials. */
 export function comparisonToPdf(
   input: ComparisonInput,
-  template: ExportTemplate = { title: "Credential comparison", accentColor: COMPARISON_ACCENT, fields: [] }
+  template: ExportTemplate = DEFAULT_COMPARISON_TEMPLATE
 ): Blob {
   const doc = new jsPDF({ unit: "pt", format: "a4" });
   doc.setProperties({
@@ -343,7 +352,7 @@ export function comparisonToPdf(
 /** Build a PNG image of the side-by-side comparison table. */
 export function comparisonToImage(
   input: ComparisonInput,
-  template: ExportTemplate = { title: "Credential comparison", accentColor: COMPARISON_ACCENT, fields: [] }
+  template: ExportTemplate = DEFAULT_COMPARISON_TEMPLATE
 ): Blob {
   const doc = new jsPDF({ unit: "pt", format: "a4" });
   drawComparison(doc, input, template);
@@ -361,7 +370,11 @@ export function downloadComparisonPdf(
   filename = "credential-comparison.pdf",
   template?: ExportTemplate
 ): void {
-  downloadFile(comparisonToPdf(input, template), filename);
+  downloadFile({
+    data: comparisonToPdf(input, template),
+    filename,
+    mimeType: "application/pdf",
+  });
 }
 
 /** Export the comparison as a PNG image and trigger a download. */
@@ -370,5 +383,13 @@ export function downloadComparisonImage(
   filename = "credential-comparison.png",
   template?: ExportTemplate
 ): void {
-  downloadFile(comparisonToImage(input, template), filename);
+  downloadFile({
+    data: comparisonToImage(input, template),
+    filename,
+    mimeType: "image/png",
+  });
 }
+
+export const exportToPdf = downloadComparisonPdf;
+export const exportToPng = downloadComparisonImage;
+

@@ -9,6 +9,7 @@ export interface CredentialComparisonProps {
   credentials: Credential[];
   onRemoveCredential?: (id: string) => void;
   onAddCredential?: (credential: Credential) => void;
+  onClose?: () => void;
 }
 
 export interface ClaimDiff {
@@ -216,6 +217,8 @@ export const CredentialComparison: React.FC<CredentialComparisonProps> = ({
       subtitle: `Generated on ${new Date().toLocaleString()} • Comparing ${visibleCredentials.length} credentials`,
       columns: visibleCredentials.map((c, i) => `Credential #${i + 1} (${c.id.slice(0, 8)}...)`),
       rows,
+      credentials: visibleCredentials,
+      issuerReputations: visibleCredentials.map((c) => reputationScores[c.issuer]),
     };
   }, [
     visibleCredentials,

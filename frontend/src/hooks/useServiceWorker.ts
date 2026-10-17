@@ -96,8 +96,9 @@ export function useBackgroundSync() {
     const registerSync = async () => {
       try {
         const registration = await navigator.serviceWorker.ready;
-        if (registration.sync) {
-          await registration.sync.register("sync-credentials");
+        const syncReg = registration as unknown as { sync?: { register: (tag: string) => Promise<void> } };
+        if (syncReg.sync) {
+          await syncReg.sync.register("sync-credentials");
         }
       } catch (error) {
         console.error("Background sync registration failed:", error);

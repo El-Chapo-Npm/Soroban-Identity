@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Soroban Identity Extension Options</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      margin: 0;
+      padding: 24px;
+      max-width: 680px;
+      background: #0f1117;
+      color: #e2e8f0;
+      line-height: 1.5;
+    }
+    h1 {
+      font-size: 20px;
+      border-bottom: 1px solid #1e293b;
+      padding-bottom: 12px;
+      margin-bottom: 24px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    section {
+      background: #181c27;
+      border: 1px solid #283046;
+      border-radius: 8px;
+      padding: 18px;
+      margin-bottom: 20px;
+    }
+    h2 {
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #94a3b8;
+      margin-top: 0;
+      margin-bottom: 12px;
+    }
+    .form-group {
+      margin-bottom: 14px;
+    }
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 500;
+      margin-bottom: 6px;
+      color: #cbd5e1;
+    }
+    input[type="text"],
+    input[type="password"],
+    input[type="number"] {
+      width: 100%;
+      background: #0f1117;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      padding: 8px 12px;
+      color: #f1f5f9;
+      font-size: 13px;
+      box-sizing: border-box;
+    }
+    input[type="text"]:focus,
+    input[type="password"]:focus,
+    input[type="number"]:focus {
+      outline: none;
+      border-color: #3b82f6;
+    }
+    .checkbox-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+      cursor: pointer;
+    }
+    .checkbox-group label {
+      margin-bottom: 0;
+      cursor: pointer;
+    }
+    button {
+      background: #2563eb;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      padding: 8px 16px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    button:hover {
+      background: #1d4ed8;
+    }
+    button.secondary {
+      background: #1e293b;
+      color: #cbd5e1;
+      border: 1px solid #334155;
+    }
+    button.secondary:hover {
+      background: #334155;
+    }
+    button.danger {
+      background: #dc2626;
+    }
+    button.danger:hover {
+      background: #b91c1c;
+    }
+    .status {
+      font-size: 12px;
+      margin-top: 6px;
+      padding: 4px 8px;
+      border-radius: 4px;
+    }
+    .status-success { background: rgba(34, 197, 94, 0.2); color: #86efac; }
+    .status-error { background: rgba(239, 68, 68, 0.2); color: #fca5a5; }
+    ul {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+    li {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 12px;
+      background: #0f1117;
+      border: 1px solid #1e293b;
+      border-radius: 6px;
+      margin-bottom: 6px;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <h1>🛡️ Soroban Identity Extension Settings</h1>
+
+  <section>
+    <h2>API Server Connection</h2>
+    <div class="form-group">
+      <label for="apiUrl">Soroban Identity Server URL</label>
+      <input type="text" id="apiUrl" placeholder="https://app.example.com">
+      <div id="apiUrlStatus" class="status" hidden></div>
+    </div>
+    <button id="saveApiUrlBtn">Save Server URL</button>
+  </section>
+
+  <section>
+    <h2>Authentication & Sync</h2>
+    <div class="form-group">
+      <label for="authToken">Web App Auth Token</label>
+      <input type="password" id="authToken" placeholder="Enter auth token">
+      <div id="authTokenStatus" class="status" hidden></div>
+    </div>
+    <div style="display: flex; gap: 8px; align-items: center;">
+      <button id="saveAuthTokenBtn">Save Token</button>
+      <button id="syncNowBtn" class="secondary">Sync Now</button>
+      <span style="font-size: 12px; color: #94a3b8;">Last synced: <span id="lastSyncTime">Never</span></span>
+    </div>
+    <div id="syncStatus" class="status" hidden></div>
+  </section>
+
+  <section>
+    <h2>Preferences</h2>
+    <div class="checkbox-group">
+      <input type="checkbox" id="autoFillEnabled" checked>
+      <label for="autoFillEnabled">Enable credential form auto-fill on web pages</label>
+    </div>
+    <div class="checkbox-group">
+      <input type="checkbox" id="notifyExpiring" checked>
+      <label for="notifyExpiring">Show badge notifications for expiring credentials</label>
+    </div>
+    <div class="form-group" style="max-width: 220px; margin-top: 10px;">
+      <label for="expiringThresholdDays">Expiry warning window (days)</label>
+      <input type="number" id="expiringThresholdDays" value="30" min="1" max="365">
+    </div>
+    <button id="savePreferencesBtn">Save Preferences</button>
+    <div id="preferencesStatus" class="status" hidden></div>
+  </section>
+
+  <section>
+    <h2>Stored Credentials</h2>
+    <ul id="credentialList"></ul>
+    <div id="emptyCredentials" style="color: #64748b; font-size: 13px; padding: 12px 0;">No credentials stored in extension.</div>
+    <div style="margin-top: 12px;">
+      <button id="clearAllCredentialsBtn" class="danger">Clear All Stored Credentials</button>
+    </div>
+  </section>
+
+  <script src="options.js"></script>
+</body>
+</html>

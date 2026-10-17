@@ -2,13 +2,14 @@ import {
   StellarWalletsKit,
   WalletNetwork,
   FREIGHTER_ID,
-  xBullWalletId,
+  FreighterModule,
+  xBullModule,
 } from '@creit.tech/stellar-wallets-kit';
 
 const kit = new StellarWalletsKit({
   network: WalletNetwork.TESTNET,
   selectedWalletId: FREIGHTER_ID,
-  wallets: [FREIGHTER_ID, xBullWalletId],
+  modules: [new FreighterModule(), new xBullModule()],
 });
 
 /** Session-storage key used to persist connection state across HMR reloads. */
@@ -78,7 +79,7 @@ export const walletStore = {
       const connectionPromise = kit.openModal({
         onWalletSelected: async (option) => {
           kit.setWallet(option.id);
-          const { address } = await kit.getAddress();
+          const address = await kit.getPublicKey();
           set({ address });
         },
       });
@@ -108,11 +109,10 @@ export const walletStore = {
   },
 
   sign: async (xdr: string): Promise<string> => {
-    const { signedTxXdr } = await kit.sign({
+    const { signedXDR } = await kit.sign({
       xdr,
-      networkPassphrase: 'Test SDF Network ; September 2015',
-    });
-    return signedTxXdr;
+    } as any);
+    return signedXDR;
   },
 
   getKit: (): StellarWalletsKit => kit,

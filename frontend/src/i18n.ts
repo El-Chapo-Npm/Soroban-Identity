@@ -39,7 +39,7 @@ const missingKeyHandler = (lngs: readonly string[], ns: string, key: string) => 
 };
 
 i18n.use(initReactI18next).init({
-  resources: SUPPORTED_LOCALES,
+  resources: SUPPORTED_LOCALES as any,
   lng: localStorage.getItem(STORAGE_KEY) ?? "en",
   fallbackLng: "en",
   interpolation: { escapeValue: false },

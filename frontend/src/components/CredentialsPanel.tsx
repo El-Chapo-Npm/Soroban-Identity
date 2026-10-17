@@ -1,15 +1,3 @@
-import { useState } from "react";
-import type { CredentialType, RevocationReason } from "../../../sdk/src/types";
-import { REVOCATION_REASONS } from "../../../sdk/src/types";
-import { exportCredentials, type ExportFormat } from "../export";
-import type { WalletState } from "../hooks/useWallet";
-
-interface Props {
-  wallet: WalletState & {
-    connect: () => void;
-    signTransaction: (xdr: string) => Promise<string>;
-  };
-}
 import { useState, useEffect, useReducer, useRef, lazy, Suspense } from "react";
 import { StrKey, SorobanRpc, TransactionBuilder, BASE_FEE, nativeToScVal, Contract, scValToNative } from '@stellar/stellar-sdk';
 import type { CredentialType, Credential, RevocationReason, VerifyResult } from "../../../sdk/src/types";
@@ -286,8 +274,9 @@ function credentialReducer(_state: CredentialState, action: CredentialAction): C
   }
 }
 
-export default function CredentialsPanel({ verifyId }: { verifyId?: string | null }) {
-  const wallet = useWalletContext();
+export default function CredentialsPanel({ verifyId, wallet: propWallet }: { verifyId?: string | null; wallet?: any } = {}) {
+  const contextWallet = useWalletContext();
+  const wallet = propWallet ?? contextWallet;
   const toast = useToast();
   const [credentialState, dispatchCredential] = useReducer(credentialReducer, { status: 'idle' });
 
@@ -545,7 +534,6 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
       const credentialClient = getCredentialClient();
       const caller = wallet.publicKey || "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
       const result = await credentialClient.verifyCredential(caller, id);
-      setVerifyState(result.valid ? "valid" : result.reason || "invalid");
       setVerifyCheckedAt(Date.now());
       const reason = result.reason;
       const knownReason: VerifyState =

@@ -5,10 +5,20 @@ import {
   type ShortcutDefinition,
 } from '../hooks/useKeyboardShortcuts';
 
+export interface ShortcutItem {
+  id?: string;
+  key: string;
+  meta?: boolean;
+  shift?: boolean;
+  alt?: boolean;
+  description?: string;
+  modifier?: boolean;
+}
+
 interface ShortcutHelpModalProps {
   open: boolean;
   onClose: () => void;
-  shortcuts?: ShortcutDefinition[];
+  shortcuts?: ShortcutItem[] | Record<string, ShortcutDefinition>;
 }
 
 /**
@@ -32,6 +42,15 @@ export function ShortcutHelpModal({
   if (!open) return null;
 
   const modifier = getModifierLabel();
+  const items: ShortcutItem[] = Array.isArray(shortcuts)
+    ? shortcuts
+    : Object.entries(shortcuts).map(([id, def]) => ({
+        id,
+        key: def.key,
+        description: def.description,
+        shift: def.shift,
+        modifier: def.meta,
+      }));
 
   return (
     <div
@@ -57,11 +76,11 @@ export function ShortcutHelpModal({
           </button>
         </div>
         <ul className="space-y-2">
-          {shortcuts.map((shortcut) => (
-            <li key={shortcut.id} className="flex items-center justify-between">
+          {items.map((shortcut, index) => (
+            <li key={shortcut.id ?? `${shortcut.key}-${index}`} className="flex items-center justify-between">
               <span className="text-sm text-gray-700">{shortcut.description}</span>
               <kbd className="rounded border border-gray-300 bg-gray-100 px-2 py-1 text-xs font-mono">
-                {shortcut.modifier ? `${modifier}+` : ''}
+                {shortcut.modifier || shortcut.meta ? `${modifier}+` : ''}
                 {shortcut.shift ? 'Shift+' : ''}
                 {shortcut.key.toUpperCase()}
               </kbd>

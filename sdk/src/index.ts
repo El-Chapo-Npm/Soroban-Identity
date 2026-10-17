@@ -110,7 +110,6 @@ export type {
   ServiceEndpoint,
   Credential,
   RevokedCredential,
-  RevocationRecord,
   RevokeOptions,
   CredentialType,
   CredentialListOptions,
@@ -119,7 +118,6 @@ export type {
   SorobanIdentityConfig,
 } from "./types";
 export { REVOCATION_REASONS } from "./types";
-export type { ReputationRecord, ScoreHistoryEntry } from "./reputation";
 export type {
   SorobanIdentityLogger,
   CallOptions,

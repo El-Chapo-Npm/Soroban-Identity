@@ -8,15 +8,6 @@ import {
   scValToNative,
 } from "@stellar/stellar-sdk";
 import type {
-  Credential,
-  CredentialType,
-  RevocationReason,
-  SorobanIdentityConfig,
-  VerifyResult,
-} from "./types";
-import { REVOCATION_REASONS } from "./types";
-import { createHash } from "node:crypto";
-import type {
   CallOptions,
   Credential,
   CredentialListOptions,
@@ -24,7 +15,6 @@ import type {
   CredentialType,
   Page,
   PaginationOptions,
-  RevocationReason,
   RevokedCredential,
   RevocationRecord,
   RevokeOptions,
@@ -33,7 +23,8 @@ import type {
   VerifyResult,
   WriteResult,
 } from "./types";
-import { validateConfig, RevocationReason } from "./types";
+import { validateConfig, RevocationReason, REVOCATION_REASONS } from "./types";
+import { createHash } from "node:crypto";
 import { retryWithBackoff, validateStellarAddress, pollTransactionStatus, runConcurrent } from "./utils";
 import { ContractError, SorobanIdentityError, wrapError, ClaimsValidationError } from "./errors";
 import { CREDENTIAL_MANAGER_ERRORS } from "./error-codes";
@@ -559,7 +550,11 @@ export class CredentialClient extends BaseClient {
         options?.reason === undefined
           ? this.contract.call(
               'revoke_credential',
-              ...buildRevokeCredentialArgs({ issuer: issuerKeypair.publicKey(), credentialId: idBytes })
+              ...buildRevokeCredentialArgs({
+                issuer: issuerKeypair.publicKey(),
+                credentialId: idBytes,
+                reason: RevocationReason.AdminRevoked,
+              })
             )
           : this.contract.call(
               'revoke_credential_with_reason',
@@ -1372,11 +1367,15 @@ export class CredentialClient extends BaseClient {
       'get_revocation_record',
       buildGetRevocationRecordArgs({ credentialId: Buffer.from(credentialId, 'hex') }),
       options
-    ) as { credential_id: Uint8Array; reason: number; revoked_by: string; revoked_at: bigint } | null;
+    ) as { credential_id: Uint8Array; reason: number; revoked_by?: string; revoked_at: bigint; issuer?: string; subject?: string } | null;
     if (!raw) return null;
+    const reasonIdx = Number(raw.reason);
+    const reason = REVOCATION_REASONS[reasonIdx] ?? RevocationReason.AdminRevoked;
     return {
       credentialId: Buffer.from(raw.credential_id).toString('hex'),
-      reason: Number(raw.reason) as RevocationReason,
+      issuer: raw.issuer ?? '',
+      subject: raw.subject ?? '',
+      reason,
       revokedBy: raw.revoked_by,
       revokedAt: Number(raw.revoked_at),
     };

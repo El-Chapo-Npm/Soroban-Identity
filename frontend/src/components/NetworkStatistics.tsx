@@ -328,7 +328,11 @@ const NetworkStatistics: React.FC<NetworkStatisticsProps> = ({
       const dataUrl = await nodeToPngDataUrl(chartContainerRef.current);
       const blob = dataUrlToBlob(dataUrl);
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      await downloadFile(blob, `network-statistics-${timestamp}.png`);
+      downloadFile({
+        data: blob,
+        filename: `network-statistics-${timestamp}.png`,
+        mimeType: 'image/png',
+      });
     } catch (err) {
       setExportError(
         err instanceof Error ? err.message : 'Failed to export chart image',
@@ -355,9 +359,9 @@ const NetworkStatistics: React.FC<NetworkStatisticsProps> = ({
         fontSize: 12,
       }}
       labelStyle={{ color: '#f9fafb', fontWeight: 600 }}
-      formatter={(value: number | string) =>
+      formatter={((value: any) =>
         formatter ? formatter(value) : String(value)
-      }
+      ) as any}
     />
   );
 

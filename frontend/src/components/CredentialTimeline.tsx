@@ -272,6 +272,7 @@ export default function CredentialTimeline({ credential, verifiedAt = [] }: Prop
           verified: "#28a745",
           expired: "#ffc107",
           revoked: "#dc3545",
+          amended: "#17a2b8",
         };
         ctx.fillStyle = colorMap[ev.type];
         ctx.beginPath();

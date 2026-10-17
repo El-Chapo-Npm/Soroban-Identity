@@ -1,0 +1,117 @@
+/* View and page transitions with CSS transforms and hardware acceleration */
+
+.view-transition-container {
+  width: 100%;
+  will-change: opacity, transform;
+}
+
+@keyframes viewFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.view-transition-enter {
+  animation: viewFadeIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.view-transition-exit {
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+/* List item entry/exit animations */
+@keyframes listItemEnter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.list-item-animated {
+  animation: listItemEnter 0.25s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Skeleton shimmer transitions */
+@keyframes skeletonPulse {
+  0% {
+    opacity: 0.6;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.6;
+  }
+}
+
+@keyframes skeletonShimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.skeleton-shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.04) 25%,
+    rgba(255, 255, 255, 0.12) 50%,
+    rgba(255, 255, 255, 0.04) 75%
+  );
+  background-size: 200% 100%;
+  animation: skeletonShimmer 1.6s infinite ease-in-out;
+}
+
+/* Micro-interactions for buttons and interactive controls */
+button:not(:disabled),
+.button:not(:disabled),
+.btn:not(:disabled),
+[role="button"]:not([aria-disabled="true"]) {
+  transition: transform 0.14s cubic-bezier(0.4, 0, 0.2, 1),
+              box-shadow 0.14s cubic-bezier(0.4, 0, 0.2, 1),
+              background-color 0.14s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+button:not(:disabled):hover,
+.button:not(:disabled):hover,
+.btn:not(:disabled):hover,
+[role="button"]:not([aria-disabled="true"]):hover {
+  transform: translateY(-1px);
+}
+
+button:not(:disabled):active,
+.button:not(:disabled):active,
+.btn:not(:disabled):active,
+[role="button"]:not([aria-disabled="true"]):active {
+  transform: scale(0.98) translateY(0);
+}
+
+/* Reduced motion preference support */
+@media (prefers-reduced-motion: reduce) {
+  .view-transition-container,
+  .view-transition-enter,
+  .view-transition-exit,
+  .list-item-animated,
+  .skeleton-shimmer,
+  button,
+  .button,
+  .btn,
+  [role="button"] {
+    animation: none !important;
+    transition: none !important;
+    transform: none !important;
+  }
+}

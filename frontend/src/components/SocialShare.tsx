@@ -34,7 +34,7 @@ export default function SocialShare({
   const share = async (platform: SharePlatform) => {
     if (platform === "native" && navigator.share) {
       await navigator.share({ title: "Credential verification", text: shareText, url });
-    } else {
+    } else if (platform !== "native") {
       const encodedUrl = encodeURIComponent(url);
       const encodedText = encodeURIComponent(shareText);
       const targets: Record<Exclude<SharePlatform, "native">, string> = {

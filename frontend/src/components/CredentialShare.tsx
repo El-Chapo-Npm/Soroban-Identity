@@ -304,8 +304,6 @@ export const CredentialShare: React.FC<CredentialShareProps> = ({ credential, on
             </div>
           </div>
         )}
-
-        <SocialShare credential={credential} />
       </div>
     </div>
   );

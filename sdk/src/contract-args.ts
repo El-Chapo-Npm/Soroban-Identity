@@ -197,12 +197,16 @@ export function buildRevokeCredentialArgs(params: {
 export function buildRevokeCredentialWithReasonArgs(params: {
   issuer: string;
   credentialId: Buffer;
-  reason: number;
+  reason: number | RevocationReason | string;
 }): xdr.ScVal[] {
+  const reasonVal =
+    typeof params.reason === 'number'
+      ? nativeToScVal(params.reason, { type: 'u32' })
+      : encodeRevocationReason(params.reason as RevocationReason);
   return [
     nativeToScVal(params.issuer, { type: 'address' }),
     nativeToScVal(params.credentialId, { type: 'bytes' }),
-    nativeToScVal(params.reason, { type: 'u32' }),
+    reasonVal,
   ];
 }
 
@@ -212,8 +216,12 @@ export function buildGetRevocationRecordArgs(params: { credentialId: Buffer }): 
 }
 
 /** Build args for `get_revoked_by_reason(reason)`. #951 */
-export function buildGetRevokedByReasonArgs(params: { reason: number }): xdr.ScVal[] {
-  return [nativeToScVal(params.reason, { type: 'u32' })];
+export function buildGetRevokedByReasonArgs(params: { reason: number | RevocationReason | string }): xdr.ScVal[] {
+  const reasonVal =
+    typeof params.reason === 'number'
+      ? nativeToScVal(params.reason, { type: 'u32' })
+      : encodeRevocationReason(params.reason as RevocationReason);
+  return [reasonVal];
 }
 
 /**
@@ -584,3 +592,31 @@ export function buildListHistoryArgs(params: {
     nativeToScVal(params.limit, { type: 'u32' }),
   ];
 }
+
+export function buildGetMerkleRootArgs(params: { batchId: string }): xdr.ScVal[] {
+  const hex = params.batchId.startsWith("0x") ? params.batchId.slice(2) : params.batchId;
+  return [nativeToScVal(Buffer.from(hex, "hex"), { type: "bytes" })];
+}
+
+export function buildUpdateMerkleRootArgs(params: {
+  issuer: string;
+  batchId: string;
+  newRoot: Buffer;
+  proof?: unknown;
+}): xdr.ScVal[] {
+  const hex = params.batchId.startsWith("0x") ? params.batchId.slice(2) : params.batchId;
+  return [
+    nativeToScVal(params.issuer, { type: "address" }),
+    nativeToScVal(Buffer.from(hex, "hex"), { type: "bytes" }),
+    nativeToScVal(params.newRoot, { type: "bytes" }),
+  ];
+}
+
+export function buildVerifyMerkleProofArgs(params: {
+  batchId: string;
+  proof: unknown;
+}): xdr.ScVal[] {
+  const hex = params.batchId.startsWith("0x") ? params.batchId.slice(2) : params.batchId;
+  return [nativeToScVal(Buffer.from(hex, "hex"), { type: "bytes" })];
+}
+

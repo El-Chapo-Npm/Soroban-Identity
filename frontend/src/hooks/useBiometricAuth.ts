@@ -117,7 +117,7 @@ async function getDeviceKey(): Promise<CryptoKey | null> {
   if (typeof window === "undefined" || !window.crypto?.subtle) return null;
   let salt = localStorage.getItem(DEVICE_SALT_KEY);
   if (!salt) {
-    salt = bufferToBase64(getRandomBytes(16).buffer);
+    salt = bufferToBase64(getRandomBytes(16).buffer as ArrayBuffer);
     localStorage.setItem(DEVICE_SALT_KEY, salt);
   }
 
@@ -153,12 +153,12 @@ async function encryptData(data: object): Promise<string | null> {
     const enc = new TextEncoder();
     const encodedData = enc.encode(JSON.stringify(data));
     const encrypted = await window.crypto.subtle.encrypt(
-      { name: "AES-GCM", iv },
+      { name: "AES-GCM", iv: iv as BufferSource },
       key,
       encodedData
     );
     return JSON.stringify({
-      iv: bufferToBase64(iv.buffer),
+      iv: bufferToBase64(iv.buffer as ArrayBuffer),
       data: bufferToBase64(encrypted),
     });
   } catch {
@@ -338,13 +338,13 @@ export function useBiometricAuth() {
           : "Biometric Device");
 
       const publicKeyCredentialCreationOptions: PublicKeyCredentialCreationOptions = {
-        challenge: challenge.buffer,
+        challenge: challenge.buffer as ArrayBuffer,
         rp: {
           name: "Soroban Identity",
           id: typeof window !== "undefined" ? window.location.hostname : "localhost",
         },
         user: {
-          id: userId.buffer,
+          id: userId.buffer as ArrayBuffer,
           name: "Soroban User",
           displayName: "Soroban Identity User",
         },
@@ -497,7 +497,7 @@ export function useBiometricAuth() {
 
       const assertion = (await navigator.credentials.get({
         publicKey: {
-          challenge: challenge.buffer,
+          challenge: challenge.buffer as ArrayBuffer,
           allowCredentials,
           timeout: 60000,
           userVerification: "required",

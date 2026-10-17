@@ -106,10 +106,10 @@ export async function decryptServerField<T = unknown>(
   const decrypted = await window.crypto.subtle.decrypt(
     {
       name: 'AES-GCM',
-      iv,
+      iv: iv as unknown as BufferSource,
     },
     key,
-    ciphertext
+    ciphertext as unknown as BufferSource
   );
 
   const decryptedString = new TextDecoder().decode(decrypted);
@@ -210,7 +210,7 @@ export async function importEncryptionKey(keyString: string): Promise<CryptoKey>
   const raw = base64UrlToBuffer(keyString);
   return window.crypto.subtle.importKey(
     'raw',
-    raw,
+    raw as unknown as BufferSource,
     { name: 'AES-GCM' },
     false,
     ['decrypt']
@@ -275,10 +275,10 @@ export async function decryptCredentialData<T = unknown>(
   const decrypted = await window.crypto.subtle.decrypt(
     {
       name: 'AES-GCM',
-      iv,
+      iv: iv as unknown as BufferSource,
     },
     key,
-    ciphertext
+    ciphertext as unknown as BufferSource
   );
 
   const decryptedString = new TextDecoder().decode(decrypted);
