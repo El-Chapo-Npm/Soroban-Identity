@@ -12,6 +12,20 @@ const SUPPORTED_LOCALES: Record<string, object> = {
   zh: { translation: zh },
 };
 
+/**
+ * BCP-47 language tags used by the Web Speech API for each supported locale.
+ * These may differ from the i18n locale keys (e.g. region-specific variants).
+ */
+const SPEECH_LANGUAGE_MAP: Record<string, string> = {
+  en: "en-US",
+  es: "es-ES",
+  fr: "fr-FR",
+  zh: "zh-CN",
+};
+
+/** Fallback speech recognition language when the active locale is unknown. */
+const DEFAULT_SPEECH_LANGUAGE = "en-US";
+
 /** Locales that use right-to-left text direction. */
 const RTL_LOCALES = new Set(["ar", "he", "fa", "ur"]);
 
@@ -55,6 +69,25 @@ export function setLocale(locale: string): void {
   localStorage.setItem(STORAGE_KEY, resolved);
   i18n.changeLanguage(resolved);
   applyDocumentDirection(resolved);
+}
+
+/**
+ * Resolve the BCP-47 language tag the Web Speech API should use for the
+ * currently active i18n locale. Falls back to the base language code and
+ * finally to {@link DEFAULT_SPEECH_LANGUAGE} when nothing matches.
+ */
+export function getSpeechRecognitionLanguage(locale?: string): string {
+  const active = locale ?? i18n.language ?? "en";
+  if (SPEECH_LANGUAGE_MAP[active]) {
+    return SPEECH_LANGUAGE_MAP[active];
+  }
+  const base = active.split("-")[0];
+  return SPEECH_LANGUAGE_MAP[base] ?? DEFAULT_SPEECH_LANGUAGE;
+}
+
+/** List of BCP-47 language tags supported for voice commands. */
+export function getSupportedSpeechLanguages(): string[] {
+  return Object.values(SPEECH_LANGUAGE_MAP);
 }
 
 export default i18n;

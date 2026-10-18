@@ -111,7 +111,24 @@ export async function readJson(req, config) {
   if (buffer.length === 0) return {};
   const raw = buffer.toString("utf8");
   if (!raw.trim()) return {};
-  const parsed = JSON.parse(raw);
+  const wellFormed =
+    typeof raw.toWellFormed === "function"
+      ? raw.toWellFormed()
+      : raw.replace(
+          /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
+          "\uFFFD",
+        );
+  let parsed;
+  try {
+    parsed = JSON.parse(wellFormed);
+  } catch {
+    // Replace unescaped C0 control characters (excluding \t, \n, \r) that crash JSON.parse (#1067)
+    // eslint-disable-next-line no-control-regex
+    const escaped = wellFormed.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, (ch) =>
+      `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`,
+    );
+    parsed = JSON.parse(escaped);
+  }
   // Stashed for the access log, which runs on response finish and would
   // otherwise have no way to see a body that was already consumed here.
   req.loggedBody = parsed;

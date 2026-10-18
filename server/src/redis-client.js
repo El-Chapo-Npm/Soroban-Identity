@@ -380,6 +380,27 @@ export class RedisClient {
     return this.command(args);
   }
 
+  /**
+   * Atomically set a key only if it does not already exist, with a TTL in
+   * milliseconds (`SET key value NX PX ttl`).
+   *
+   * Returns `true` when the key was claimed by this call, `false` when it was
+   * already present (or when the cache is unavailable). The non-fatal failure
+   * path is deliberate: an unreachable Redis must degrade to a cache miss
+   * rather than surfacing an error to the caller.
+   */
+  async setNx(key, value, ttlMs = null) {
+    const args = ['SET', key, value, 'NX'];
+    if (ttlMs && ttlMs > 0) args.push('PX', String(Math.floor(ttlMs)));
+    try {
+      const reply = await this.command(args);
+      return reply === 'OK';
+    } catch (error) {
+      logger.warn({ key, error: error.message }, 'Redis SET NX failed; treating as cache miss');
+      return false;
+    }
+  }
+
   async del(...keys) {
     if (keys.length === 0) return 0;
     return this.command(['DEL', ...keys]);

@@ -2,8 +2,8 @@
 
 use credential_manager::{
     BatchVerifyResult, Credential, CredentialIdsPage, CredentialManager, CredentialStorageStats,
-    CredentialTypeDescriptor, CredentialType, ContractError, IssuersPage,
-    RevocationReason, RevocationRecord,
+    CredentialTypeDescriptor, CredentialType, ContractError, Escrow, EscrowConditions,
+    EscrowDeposit, EscrowStatus, IssuersPage, RevocationReason, RevocationRecord,
 };
 use soroban_sdk::{Address, Bytes, BytesN, Env, Map, String, Vec};
 
@@ -173,6 +173,62 @@ pub trait CredentialManagerInterface {
         ids: Vec<BytesN<32>>,
         fail_fast: bool,
     ) -> Result<Vec<BatchVerifyResult>, ContractError>;
+
+    // ── Credential escrow (#1057) ───────────────────────────────────────────
+
+    /// Deposit a credential into escrow under the given release conditions.
+    fn escrow_deposit(
+        env: Env,
+        depositor: Address,
+        subject: Address,
+        credential_id: BytesN<32>,
+        conditions: EscrowConditions,
+    ) -> Result<BytesN<32>, ContractError>;
+
+    /// Verify whether the escrow's release conditions are currently met.
+    fn escrow_verify_conditions(env: Env, escrow_id: BytesN<32>) -> Result<bool, ContractError>;
+
+    /// Release an escrowed credential once its conditions are satisfied.
+    fn escrow_release(
+        env: Env,
+        caller: Address,
+        escrow_id: BytesN<32>,
+    ) -> Result<(), ContractError>;
+
+    /// Refund an escrow whose conditions failed or expired.
+    fn escrow_refund(
+        env: Env,
+        caller: Address,
+        escrow_id: BytesN<32>,
+    ) -> Result<(), ContractError>;
+
+    /// Raise a dispute on an active escrow.
+    fn escrow_dispute(
+        env: Env,
+        caller: Address,
+        escrow_id: BytesN<32>,
+        reason: String,
+    ) -> Result<(), ContractError>;
+
+    /// Resolve a disputed escrow, releasing or refunding it.
+    fn escrow_resolve_dispute(
+        env: Env,
+        admin: Address,
+        escrow_id: BytesN<32>,
+        release_to_subject: bool,
+    ) -> Result<(), ContractError>;
+
+    /// Query the full escrow record.
+    fn get_escrow(env: Env, escrow_id: BytesN<32>) -> Result<Escrow, ContractError>;
+
+    /// Query the lifecycle status of an escrow.
+    fn get_escrow_status(env: Env, escrow_id: BytesN<32>) -> Result<EscrowStatus, ContractError>;
+
+    /// List escrows created by a depositor.
+    fn list_depositor_escrows(env: Env, depositor: Address) -> Vec<BytesN<32>>;
+
+    /// List escrows targeting a subject.
+    fn list_subject_escrows(env: Env, subject: Address) -> Vec<BytesN<32>>;
 }
 
 /// Blanket implementation delegating to `CredentialManager`'s existing
@@ -406,5 +462,69 @@ impl CredentialManagerInterface for CredentialManager {
         fail_fast: bool,
     ) -> Result<Vec<BatchVerifyResult>, ContractError> {
         Self::verify_credentials_batch(env, ids, fail_fast)
+    }
+
+    fn escrow_deposit(
+        env: Env,
+        depositor: Address,
+        subject: Address,
+        credential_id: BytesN<32>,
+        conditions: EscrowConditions,
+    ) -> Result<BytesN<32>, ContractError> {
+        Self::escrow_deposit(env, depositor, subject, credential_id, conditions)
+    }
+
+    fn escrow_verify_conditions(env: Env, escrow_id: BytesN<32>) -> Result<bool, ContractError> {
+        Self::escrow_verify_conditions(env, escrow_id)
+    }
+
+    fn escrow_release(
+        env: Env,
+        caller: Address,
+        escrow_id: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        Self::escrow_release(env, caller, escrow_id)
+    }
+
+    fn escrow_refund(
+        env: Env,
+        caller: Address,
+        escrow_id: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        Self::escrow_refund(env, caller, escrow_id)
+    }
+
+    fn escrow_dispute(
+        env: Env,
+        caller: Address,
+        escrow_id: BytesN<32>,
+        reason: String,
+    ) -> Result<(), ContractError> {
+        Self::escrow_dispute(env, caller, escrow_id, reason)
+    }
+
+    fn escrow_resolve_dispute(
+        env: Env,
+        admin: Address,
+        escrow_id: BytesN<32>,
+        release_to_subject: bool,
+    ) -> Result<(), ContractError> {
+        Self::escrow_resolve_dispute(env, admin, escrow_id, release_to_subject)
+    }
+
+    fn get_escrow(env: Env, escrow_id: BytesN<32>) -> Result<Escrow, ContractError> {
+        Self::get_escrow(env, escrow_id)
+    }
+
+    fn get_escrow_status(env: Env, escrow_id: BytesN<32>) -> Result<EscrowStatus, ContractError> {
+        Self::get_escrow_status(env, escrow_id)
+    }
+
+    fn list_depositor_escrows(env: Env, depositor: Address) -> Vec<BytesN<32>> {
+        Self::list_depositor_escrows(env, depositor)
+    }
+
+    fn list_subject_escrows(env: Env, subject: Address) -> Vec<BytesN<32>> {
+        Self::list_subject_escrows(env, subject)
     }
 }

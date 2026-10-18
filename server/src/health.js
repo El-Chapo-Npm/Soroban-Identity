@@ -135,6 +135,58 @@ export async function checkRedis(config, redisClient) {
 }
 
 /**
+ * Probe the append-only event store backing credential lifecycle event
+ * sourcing. An unconfigured store reports `disabled` rather than `down`, since
+ * event sourcing is an optional deployment mode.
+ */
+export async function checkEventStore(config, eventStore) {
+  if (!config.eventStoreUrl || !eventStore) {
+    return { status: STATUS.DISABLED, reason: 'EVENT_STORE_URL is not configured' };
+  }
+
+  const result = await eventStore.health();
+  const storeStatus = result?.status;
+  return {
+    status: storeStatus && storeStatus !== 'up' ? STATUS.DEGRADED : STATUS.UP,
+    url: config.eventStoreUrl,
+    storeStatus: storeStatus ?? 'unknown',
+    latestSequence: result?.latestSequence,
+    streamCount: result?.streamCount,
+  };
+}
+
+/**
+ * Probe the geo-distributed read replicas. Each replica reports its own lag;
+ * a replica that is unreachable or lagging beyond the configured threshold
+ * degrades the overall replica status without taking the service down, since
+ * reads can still be served by the primary.
+ */
+export async function checkReadReplicas(config, replicaRegistry) {
+  if (!config.readReplicas?.length || !replicaRegistry) {
+    return { status: STATUS.DISABLED, reason: 'No read replicas are configured' };
+  }
+
+  const maxLagMs = config.replicaMaxLagMs ?? 5000;
+  const replicas = await replicaRegistry.health();
+  const values = Object.values(replicas);
+  const reachable = values.filter((replica) => replica?.reachable).length;
+  const lagging = values.filter((replica) => replica?.reachable && (replica.lagMs ?? 0) > maxLagMs);
+
+  let status = STATUS.UP;
+  if (reachable === 0 && values.length > 0) status = STATUS.DOWN;
+  else if (reachable < values.length || lagging.length > 0) status = STATUS.DEGRADED;
+
+  return {
+    status,
+    replicas,
+    reachable,
+    total: values.length,
+    maxLagMs,
+    lagging: lagging.map((replica) => replica.region),
+  };
+}
+
+/**
  * Roll dependency results up into one overall status.
  *
  * `disabled` dependencies are ignored. Any `down` dependency makes the service
@@ -167,7 +219,10 @@ export function uptimeSeconds(now = Date.now()) {
  * @param {number} [options.timeoutMs]
  * @returns {Promise<object>} Health report with a top-level `status`.
  */
-export async function collectHealth({ config, soroban, redisClient = null, version }, options = {}) {
+export async function collectHealth(
+  { config, soroban, redisClient = null, eventStore = null, replicaRegistry = null, version },
+  options = {},
+) {
   const timeoutMs = options.timeoutMs ?? config.healthProbeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
 
   const results = await Promise.all([
@@ -175,6 +230,8 @@ export async function collectHealth({ config, soroban, redisClient = null, versi
     runProbe('rpc', timeoutMs, () => checkRpc(config)),
     runProbe('contracts', timeoutMs, () => checkContracts(soroban)),
     runProbe('redis', timeoutMs, () => checkRedis(config, redisClient)),
+    runProbe('eventStore', timeoutMs, () => checkEventStore(config, eventStore)),
+    runProbe('readReplicas', timeoutMs, () => checkReadReplicas(config, replicaRegistry)),
   ]);
 
   const dependencies = {};
@@ -201,8 +258,16 @@ export async function collectHealth({ config, soroban, redisClient = null, versi
  * request count. Storage and RPC are required; contracts and Redis are
  * reported but do not gate readiness, since a single unreachable contract or a
  * cold cache still leaves most endpoints serviceable.
+ *
+ * The event store gates readiness only when event sourcing is enabled, and the
+ * read replicas gate readiness only when replicas are configured and every
+ * replica is unreachable — a lagging or partially available replica set still
+ * serves reads from the primary.
  */
-export async function collectReadiness({ config, soroban, redisClient = null, version }, options = {}) {
+export async function collectReadiness(
+  { config, soroban, redisClient = null, eventStore = null, replicaRegistry = null, version },
+  options = {},
+) {
   const timeoutMs = options.timeoutMs ?? config.healthProbeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
 
   const required = await Promise.all([
@@ -210,19 +275,29 @@ export async function collectReadiness({ config, soroban, redisClient = null, ve
     runProbe('rpc', timeoutMs, () => checkRpc(config)),
   ]);
 
+  const optional = await Promise.all([
+    runProbe('eventStore', timeoutMs, () => checkEventStore(config, eventStore)),
+    runProbe('readReplicas', timeoutMs, () => checkReadReplicas(config, replicaRegistry)),
+  ]);
+
   const failed = required.filter((dependency) => dependency.status === STATUS.DOWN);
+  const gating = optional.filter(
+    (dependency) => dependency.status === STATUS.DOWN && dependency.name !== 'readReplicas',
+  );
+  const allFailed = [...failed, ...gating];
+
   const checks = {};
-  for (const { name, ...rest } of required) {
+  for (const { name, ...rest } of [...required, ...optional]) {
     checks[name] = rest;
   }
 
   return {
-    ready: failed.length === 0,
+    ready: allFailed.length === 0,
     version,
     uptimeSeconds: uptimeSeconds(),
     timestamp: new Date().toISOString(),
     checks,
-    ...(failed.length > 0 ? { failing: failed.map((dependency) => dependency.name) } : {}),
+    ...(allFailed.length > 0 ? { failing: allFailed.map((dependency) => dependency.name) } : {}),
   };
 }
 

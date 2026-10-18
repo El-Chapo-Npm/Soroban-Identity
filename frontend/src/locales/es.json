@@ -87,6 +87,54 @@
     "switchLanguage": "Cambiar idioma",
     "dismissNotification": "Descartar notificación"
   },
+  "biometric": {
+    "title": "Autenticación Biométrica",
+    "description": "Usa tu huella digital, Face ID o Touch ID para iniciar sesión de forma segura.",
+    "registerDevice": "Registrar Dispositivo",
+    "registering": "Registrando…",
+    "removeDevice": "Eliminar Dispositivo",
+    "removing": "Eliminando…",
+    "deviceName": "Nombre del Dispositivo",
+    "deviceNamePlaceholder": "p. ej., iPhone de María",
+    "registeredDevices": "Dispositivos Registrados",
+    "noDevices": "Aún no hay dispositivos registrados.",
+    "registeredOn": "Registrado el {{date}}",
+    "lastUsed": "Último uso {{date}}",
+    "prompt": "Confirma tu identidad para continuar",
+    "authenticating": "Autenticando…",
+    "authenticated": "Autenticación exitosa",
+    "authenticationFailed": "La autenticación falló. Inténtalo de nuevo.",
+    "usePassword": "Usar contraseña en su lugar",
+    "fallbackToPassword": "¿Problemas con la biometría? Inicia sesión con tu contraseña.",
+    "unsupportedBrowser": "Tu navegador no admite autenticación biométrica. Usa la autenticación con contraseña.",
+    "notAvailable": "La autenticación biométrica no está disponible en este dispositivo.",
+    "deviceRemoved": "Dispositivo eliminado correctamente",
+    "deviceRegistered": "Dispositivo registrado correctamente",
+    "removeConfirm": "¿Seguro que deseas eliminar este dispositivo?"
+  },
+  "voice": {
+    "title": "Comandos de Voz",
+    "startListening": "Iniciar escucha",
+    "stopListening": "Detener escucha",
+    "listening": "Escuchando…",
+    "processing": "Procesando…",
+    "commandNotRecognized": "Comando no reconocido. Inténtalo de nuevo.",
+    "feedbackConfirmed": "Entendido",
+    "commands": {
+      "search": "Buscar",
+      "navigate": "Navegar",
+      "verify": "Verificar",
+      "help": "Ayuda"
+    },
+    "permission": {
+      "title": "Permiso de Micrófono",
+      "request": "Permitir Micrófono",
+      "granted": "Acceso al micrófono concedido",
+      "denied": "Acceso al micrófono denegado. Habilítalo en la configuración de tu navegador.",
+      "prompt": "Se requiere acceso al micrófono para usar comandos de voz.",
+      "unsupported": "Tu navegador no admite el reconocimiento de voz."
+    }
+  },
   "shortcuts": {
     "title": "Atajos de Teclado",
     "description": "Usa atajos de teclado para navegar e interactuar con la aplicación de manera más eficiente.",

@@ -29,6 +29,8 @@ export interface UsePresenceOptions {
   staleAfterMs?: number;
   /** Milliseconds between reconnect attempts. */
   reconnectDelayMs?: number;
+  /** Maximum reconnect attempts before stopping automatic retries (#1068). */
+  maxReconnectAttempts?: number;
 }
 
 export interface UsePresenceResult {
@@ -46,11 +48,14 @@ export interface UsePresenceResult {
 
 const DEFAULT_STALE_MS = 30_000;
 const DEFAULT_RECONNECT_MS = 3_000;
+const MAX_RECONNECT_DELAY_MS = 30_000;
+const DEFAULT_MAX_RECONNECT_ATTEMPTS = 10;
 
 /**
  * Tracks active collaborators on a DID/credential over a WebSocket presence
  * protocol. Handles joins, updates, leaves, periodic syncs, stale peers and
- * graceful reconnection when the connection drops.
+ * graceful reconnection when the connection drops or the device switches
+ * networks (#1068).
  */
 export function usePresence({
   url,
@@ -58,6 +63,7 @@ export function usePresence({
   currentUser,
   staleAfterMs = DEFAULT_STALE_MS,
   reconnectDelayMs = DEFAULT_RECONNECT_MS,
+  maxReconnectAttempts = DEFAULT_MAX_RECONNECT_ATTEMPTS,
 }: UsePresenceOptions): UsePresenceResult {
   const [users, setUsers] = useState<PresenceUser[]>([]);
   const [status, setStatusState] = useState<PresenceStatus>('viewing');
@@ -65,8 +71,12 @@ export function usePresence({
 
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttemptsRef = useRef(0);
+  const offlineRef = useRef(false);
   const closedRef = useRef(false);
   const statusRef = useRef<PresenceStatus>('viewing');
+  const currentUserRef = useRef(currentUser);
+  currentUserRef.current = currentUser;
 
   const send = useCallback((message: PresenceMessage) => {
     const socket = socketRef.current;
@@ -94,30 +104,76 @@ export function usePresence({
       send({
         type: 'presence:update',
         user: {
-          ...currentUser,
+          ...currentUserRef.current,
           status: next,
           resourceId,
           lastSeen: Date.now(),
         },
       });
     },
-    [currentUser, resourceId, send],
+    [resourceId, send],
   );
 
   useEffect(() => {
     closedRef.current = false;
+    reconnectAttemptsRef.current = 0;
+
+    const clearReconnectTimer = () => {
+      if (reconnectRef.current !== null) {
+        clearTimeout(reconnectRef.current);
+        reconnectRef.current = null;
+      }
+    };
+
+    const teardownSocket = () => {
+      const existing = socketRef.current;
+      socketRef.current = null;
+      if (existing) {
+        existing.onopen = null;
+        existing.onmessage = null;
+        existing.onclose = null;
+        existing.onerror = null;
+        try {
+          existing.close();
+        } catch {
+          // Ignore close errors on an already-closed socket.
+        }
+      }
+    };
+
+    const scheduleReconnect = () => {
+      if (
+        closedRef.current ||
+        offlineRef.current ||
+        reconnectRef.current !== null ||
+        reconnectAttemptsRef.current >= maxReconnectAttempts
+      ) {
+        return;
+      }
+      reconnectAttemptsRef.current += 1;
+      const delay = Math.min(
+        MAX_RECONNECT_DELAY_MS,
+        reconnectDelayMs * 2 ** (reconnectAttemptsRef.current - 1),
+      );
+      reconnectRef.current = setTimeout(() => {
+        reconnectRef.current = null;
+        connect();
+      }, delay);
+    };
 
     const connect = () => {
-      if (closedRef.current) return;
+      if (closedRef.current || offlineRef.current || socketRef.current) return;
+      clearReconnectTimer();
       const socket = new WebSocket(url);
       socketRef.current = socket;
 
       socket.onopen = () => {
+        reconnectAttemptsRef.current = 0;
         setConnected(true);
         send({
           type: 'presence:join',
           user: {
-            ...currentUser,
+            ...currentUserRef.current,
             status: statusRef.current,
             resourceId,
             lastSeen: Date.now(),
@@ -133,15 +189,16 @@ export function usePresence({
           return;
         }
 
+        const localUserId = currentUserRef.current.id;
         switch (message.type) {
           case 'presence:sync':
             if (message.users) {
-              setUsers(message.users.filter((u) => u.id !== currentUser.id));
+              setUsers(message.users.filter((u) => u.id !== localUserId));
             }
             break;
           case 'presence:join':
           case 'presence:update':
-            if (message.user && message.user.id !== currentUser.id) {
+            if (message.user && message.user.id !== localUserId) {
               upsertUser(message.user);
             }
             break;
@@ -154,32 +211,59 @@ export function usePresence({
       };
 
       socket.onclose = () => {
+        socketRef.current = null;
         setConnected(false);
-        if (!closedRef.current) {
-          reconnectRef.current = setTimeout(connect, reconnectDelayMs);
-        }
+        scheduleReconnect();
       };
 
       socket.onerror = () => {
-        socket.close();
+        teardownSocket();
+        setConnected(false);
+        scheduleReconnect();
       };
     };
+
+    const handleOnline = () => {
+      if (closedRef.current) return;
+      offlineRef.current = false;
+      reconnectAttemptsRef.current = 0;
+      clearReconnectTimer();
+      teardownSocket();
+      setConnected(false);
+      connect();
+    };
+
+    const handleOffline = () => {
+      if (closedRef.current) return;
+      offlineRef.current = true;
+      clearReconnectTimer();
+      teardownSocket();
+      setConnected(false);
+    };
+
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+      window.addEventListener('online', handleOnline);
+      window.addEventListener('offline', handleOffline);
+    }
 
     connect();
 
     return () => {
       closedRef.current = true;
-      if (reconnectRef.current) clearTimeout(reconnectRef.current);
+      clearReconnectTimer();
+      if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
+        window.removeEventListener('online', handleOnline);
+        window.removeEventListener('offline', handleOffline);
+      }
       const socket = socketRef.current;
       if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(
-          JSON.stringify({ type: 'presence:leave', userId: currentUser.id }),
+          JSON.stringify({ type: 'presence:leave', userId: currentUserRef.current.id }),
         );
       }
-      socket?.close();
-      socketRef.current = null;
+      teardownSocket();
     };
-  }, [url, resourceId, currentUser, reconnectDelayMs, send, upsertUser, removeUser]);
+  }, [url, resourceId, reconnectDelayMs, maxReconnectAttempts, send, upsertUser, removeUser]);
 
   // Drop peers that stopped sending heartbeats.
   useEffect(() => {

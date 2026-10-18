@@ -57,11 +57,26 @@ export const PRESENCE_STALE_MS = 30_000;
 /** Interval between client heartbeats. */
 export const HEARTBEAT_INTERVAL_MS = 10_000;
 
+/** Default maximum reconnect attempts before stopping automatic retries (#1068). */
+export const DEFAULT_MAX_RECONNECT_ATTEMPTS = 10;
+
+/** Default base delay (ms) between reconnect attempts. */
+export const DEFAULT_RECONNECT_DELAY_MS = 3_000;
+
+/** Maximum backoff delay (ms) between reconnect attempts. */
+export const MAX_RECONNECT_DELAY_MS = 30_000;
+
 export interface PresenceClientOptions {
   url: string;
   userId: string;
   displayName: string;
   avatarUrl?: string;
+  /** Maximum automatic reconnect attempts before giving up (default: 10). */
+  maxReconnectAttempts?: number;
+  /** Base reconnect delay in ms (default: 3000). */
+  reconnectDelayMs?: number;
+  /** Maximum reconnect backoff delay in ms (default: 30000). */
+  maxReconnectDelayMs?: number;
   /** Injectable for tests; defaults to the global WebSocket. */
   socketFactory?: (url: string) => WebSocket;
   /** Injectable clock for deterministic staleness handling. */
@@ -80,18 +95,50 @@ export class PresenceClient {
   private readonly listeners = new Set<Listener>();
   private readonly now: () => number;
   private readonly socketFactory: (url: string) => WebSocket;
+  private readonly maxReconnectAttempts: number;
+  private readonly reconnectDelayMs: number;
+  private readonly maxReconnectDelayMs: number;
   private collaborators = new Map<string, Collaborator>();
   private locks = new Map<string, EditLock>();
   private connection: ConnectionState = 'disconnected';
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempts = 0;
+  private isOffline = false;
   private closed = false;
   private currentResourceId: string | null = null;
+
+  private readonly handleOnline = (): void => {
+    if (this.closed) return;
+    this.isOffline = false;
+    this.handleNetworkChange();
+  };
+
+  private readonly handleOffline = (): void => {
+    if (this.closed) return;
+    this.isOffline = true;
+    this.clearReconnectTimer();
+    this.teardownSocket();
+    this.collaborators = new Map();
+    this.locks = new Map();
+    this.setConnection('disconnected');
+  };
 
   constructor(private readonly options: PresenceClientOptions) {
     this.now = options.now ?? (() => Date.now());
     this.socketFactory =
       options.socketFactory ?? ((url: string) => new WebSocket(url));
+    this.maxReconnectAttempts =
+      options.maxReconnectAttempts ?? DEFAULT_MAX_RECONNECT_ATTEMPTS;
+    this.reconnectDelayMs =
+      options.reconnectDelayMs ?? DEFAULT_RECONNECT_DELAY_MS;
+    this.maxReconnectDelayMs =
+      options.maxReconnectDelayMs ?? MAX_RECONNECT_DELAY_MS;
+
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+      window.addEventListener('online', this.handleOnline);
+      window.addEventListener('offline', this.handleOffline);
+    }
   }
 
   /** Subscribe to presence snapshots. Returns an unsubscribe function. */
@@ -112,14 +159,16 @@ export class PresenceClient {
   }
 
   connect(): void {
-    if (this.socket || this.closed) {
+    if (this.socket || this.closed || this.isOffline) {
       return;
     }
+    this.clearReconnectTimer();
     this.setConnection('connecting');
     const socket = this.socketFactory(this.options.url);
     this.socket = socket;
 
     socket.onopen = () => {
+      this.reconnectAttempts = 0;
       this.setConnection('connected');
       this.send({
         type: 'join',
@@ -171,9 +220,31 @@ export class PresenceClient {
 
   disconnect(): void {
     this.closed = true;
+    this.clearReconnectTimer();
+    if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
+      window.removeEventListener('online', this.handleOnline);
+      window.removeEventListener('offline', this.handleOffline);
+    }
     this.send({ type: 'leave' });
     this.teardownSocket();
     this.setConnection('disconnected');
+  }
+
+  /**
+   * Handle a device network switch (e.g. Wi-Fi to cellular) by tearing down
+   * any stale socket and pending timer, resetting the backoff counter, and
+   * establishing a single clean connection (#1068).
+   */
+  handleNetworkChange(): void {
+    if (this.closed) return;
+    this.isOffline = false;
+    this.reconnectAttempts = 0;
+    this.clearReconnectTimer();
+    this.teardownSocket();
+    this.collaborators = new Map();
+    this.locks = new Map();
+    this.setConnection('disconnected');
+    this.connect();
   }
 
   private handleMessage(raw: unknown): void {
@@ -242,6 +313,13 @@ export class PresenceClient {
     }
   }
 
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
+
   private handleDrop(): void {
     this.teardownSocket();
     // Clear remote state so stale avatars/locks are not shown after a drop.
@@ -252,13 +330,23 @@ export class PresenceClient {
   }
 
   private scheduleReconnect(): void {
-    if (this.closed || this.reconnectTimer !== null) {
+    if (
+      this.closed ||
+      this.isOffline ||
+      this.reconnectTimer !== null ||
+      this.reconnectAttempts >= this.maxReconnectAttempts
+    ) {
       return;
     }
+    this.reconnectAttempts += 1;
+    const delay = Math.min(
+      this.maxReconnectDelayMs,
+      this.reconnectDelayMs * 2 ** (this.reconnectAttempts - 1),
+    );
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();
-    }, 3_000);
+    }, delay);
   }
 
   private teardownSocket(): void {

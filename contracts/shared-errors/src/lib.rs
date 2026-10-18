@@ -30,6 +30,22 @@ pub enum IdentityRegistryError {
     AlreadyInitialized = 7,
     /// The supplied input failed validation.
     InvalidInput = 8,
+    /// The requested escrow was not found.
+    EscrowNotFound = 9,
+    /// The escrow has already been funded.
+    EscrowAlreadyFunded = 10,
+    /// The escrow is not in a state that permits the operation.
+    InvalidEscrowStatus = 11,
+    /// The escrow release conditions have not been satisfied.
+    ConditionsNotMet = 12,
+    /// The escrow release conditions have expired.
+    ConditionsExpired = 13,
+    /// The escrow is currently under dispute.
+    EscrowDisputed = 14,
+    /// The escrow dispute has already been resolved.
+    DisputeAlreadyResolved = 15,
+    /// The escrow amount is invalid (e.g. zero or negative).
+    InvalidEscrowAmount = 16,
 }
 
 /// Errors returned by the credential-manager contract.

@@ -108,6 +108,16 @@ pub enum EventType {
     DidDeactivated,
     /// Reputation score was submitted
     ReputationScoreSubmitted,
+    /// Escrow was deposited by a depositor
+    EscrowDeposited,
+    /// Escrow funds were released to the beneficiary
+    EscrowReleased,
+    /// Escrow was disputed by a party
+    EscrowDisputed,
+    /// Escrow dispute was resolved
+    EscrowResolved,
+    /// Escrow funds were refunded to the depositor
+    EscrowRefunded,
     /// Custom event for extensibility
     Custom(String),
 }
@@ -174,6 +184,54 @@ pub enum ReputationEvent {
     },
 }
 
+/// Escrow-related events emitted by the credential escrow contract.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub enum EscrowEvent {
+    /// Funds were deposited into escrow.
+    Deposited {
+        escrow_id: BytesN<32>,
+        depositor: Address,
+        beneficiary: Address,
+        amount: i128,
+        /// Release condition: time, payment, or approval
+        condition: u32,
+        /// Deadline for time-based conditions (0 if not applicable)
+        release_at: u64,
+        deposited_at: u64,
+    },
+    /// Escrowed funds were released to the beneficiary.
+    Released {
+        escrow_id: BytesN<32>,
+        beneficiary: Address,
+        amount: i128,
+        released_at: u64,
+    },
+    /// An escrow was disputed by a party.
+    Disputed {
+        escrow_id: BytesN<32>,
+        disputer: Address,
+        reason: String,
+        disputed_at: u64,
+    },
+    /// A dispute was resolved by the arbiter.
+    Resolved {
+        escrow_id: BytesN<32>,
+        arbiter: Address,
+        /// Whether funds were released to the beneficiary (true) or refunded (false)
+        release_to_beneficiary: bool,
+        resolved_at: u64,
+    },
+    /// Escrowed funds were refunded to the depositor after failed conditions.
+    Refunded {
+        escrow_id: BytesN<32>,
+        depositor: Address,
+        amount: i128,
+        reason: u32,
+        refunded_at: u64,
+    },
+}
+
 /// Top-level event payload that wraps all event types.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -181,6 +239,7 @@ pub enum EventPayload {
     Credential(CredentialEvent),
     Did(DidEvent),
     Reputation(ReputationEvent),
+    Escrow(EscrowEvent),
     Custom(String),
 }
 
@@ -404,6 +463,16 @@ impl EventEmitter {
                 };
                 env.events().publish((topic, emitter, timestamp), payload);
             }
+            EventPayload::Escrow(escrow_event) => {
+                let topic = match escrow_event {
+                    EscrowEvent::Deposited { .. } => symbol_short!("esc_dep"),
+                    EscrowEvent::Released { .. } => symbol_short!("esc_rel"),
+                    EscrowEvent::Disputed { .. } => symbol_short!("esc_disp"),
+                    EscrowEvent::Resolved { .. } => symbol_short!("esc_res"),
+                    EscrowEvent::Refunded { .. } => symbol_short!("esc_ref"),
+                };
+                env.events().publish((topic, emitter, timestamp), payload);
+            }
             EventPayload::Custom(msg) => {
                 env.events()
                     .publish((symbol_short!("custom"), emitter, timestamp), msg.clone());
@@ -426,6 +495,13 @@ impl EventEmitter {
             },
             EventPayload::Reputation(rep) => match rep {
                 ReputationEvent::ScoreSubmitted { .. } => EventType::ReputationScoreSubmitted,
+            },
+            EventPayload::Escrow(escrow) => match escrow {
+                EscrowEvent::Deposited { .. } => EventType::EscrowDeposited,
+                EscrowEvent::Released { .. } => EventType::EscrowReleased,
+                EscrowEvent::Disputed { .. } => EventType::EscrowDisputed,
+                EscrowEvent::Resolved { .. } => EventType::EscrowResolved,
+                EscrowEvent::Refunded { .. } => EventType::EscrowRefunded,
             },
             EventPayload::Custom(msg) => EventType::Custom(msg.clone()),
         }
@@ -562,5 +638,72 @@ mod test {
 
         let event_type = EventEmitter::event_type_from_payload(&issued_event);
         assert_eq!(event_type, EventType::CredentialIssued);
+    }
+
+    #[test]
+    fn test_escrow_event_type_from_payload() {
+        let env = Env::default();
+        let depositor = Address::generate(&env);
+        let beneficiary = Address::generate(&env);
+        let escrow_id = BytesN::from_array(&env, &[1u8; 32]);
+
+        let deposited_event = EventPayload::Escrow(EscrowEvent::Deposited {
+            escrow_id: escrow_id.clone(),
+            depositor: depositor.clone(),
+            beneficiary: beneficiary.clone(),
+            amount: 1000,
+            condition: 1,
+            release_at: 99999,
+            deposited_at: 12345,
+        });
+        assert_eq!(
+            EventEmitter::event_type_from_payload(&deposited_event),
+            EventType::EscrowDeposited
+        );
+
+        let released_event = EventPayload::Escrow(EscrowEvent::Released {
+            escrow_id: escrow_id.clone(),
+            beneficiary: beneficiary.clone(),
+            amount: 1000,
+            released_at: 12346,
+        });
+        assert_eq!(
+            EventEmitter::event_type_from_payload(&released_event),
+            EventType::EscrowReleased
+        );
+
+        let disputed_event = EventPayload::Escrow(EscrowEvent::Disputed {
+            escrow_id: escrow_id.clone(),
+            disputer: depositor.clone(),
+            reason: String::from_str(&env, "not delivered"),
+            disputed_at: 12347,
+        });
+        assert_eq!(
+            EventEmitter::event_type_from_payload(&disputed_event),
+            EventType::EscrowDisputed
+        );
+
+        let resolved_event = EventPayload::Escrow(EscrowEvent::Resolved {
+            escrow_id: escrow_id.clone(),
+            arbiter: beneficiary.clone(),
+            release_to_beneficiary: true,
+            resolved_at: 12348,
+        });
+        assert_eq!(
+            EventEmitter::event_type_from_payload(&resolved_event),
+            EventType::EscrowResolved
+        );
+
+        let refunded_event = EventPayload::Escrow(EscrowEvent::Refunded {
+            escrow_id: escrow_id.clone(),
+            depositor: depositor.clone(),
+            amount: 1000,
+            reason: 2,
+            refunded_at: 12349,
+        });
+        assert_eq!(
+            EventEmitter::event_type_from_payload(&refunded_event),
+            EventType::EscrowRefunded
+        );
     }
 }

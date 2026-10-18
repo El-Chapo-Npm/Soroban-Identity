@@ -168,6 +168,111 @@ pub fn handle_credential_revoked(
     Ok(())
 }
 
+/// Emit an event when a user stakes tokens to boost their reputation.
+///
+/// # Parameters
+/// - `env`: The Soroban environment
+/// - `staker`: The address that deposited the stake
+/// - `amount`: The amount of tokens staked
+/// - `reputation_boost`: The reputation boost derived from the stake amount
+/// - `staked_at`: Timestamp when the stake was deposited
+pub fn emit_staked(
+    env: &Env,
+    staker: Address,
+    amount: i128,
+    reputation_boost: i32,
+    staked_at: u64,
+) {
+    env.events().publish(
+        (soroban_sdk::symbol_short!("staked"), staker),
+        (amount, reputation_boost, staked_at),
+    );
+}
+
+/// Emit an event when a user unstakes tokens after the cooldown period.
+///
+/// # Parameters
+/// - `env`: The Soroban environment
+/// - `staker`: The address that withdrew the stake
+/// - `amount`: The amount of tokens unstaked
+/// - `reputation_boost_removed`: The reputation boost removed by unstaking
+/// - `unstaked_at`: Timestamp when the stake was withdrawn
+pub fn emit_unstaked(
+    env: &Env,
+    staker: Address,
+    amount: i128,
+    reputation_boost_removed: i32,
+    unstaked_at: u64,
+) {
+    env.events().publish(
+        (soroban_sdk::symbol_short!("unstaked"), staker),
+        (amount, reputation_boost_removed, unstaked_at),
+    );
+}
+
+/// Emit an event when a portion of a stake is slashed for malicious behavior.
+///
+/// # Parameters
+/// - `env`: The Soroban environment
+/// - `staker`: The address whose stake was slashed
+/// - `amount`: The amount of tokens slashed
+/// - `reason_code`: The reason code for the slashing
+/// - `slashed_at`: Timestamp when the slash occurred
+pub fn emit_slashed(
+    env: &Env,
+    staker: Address,
+    amount: i128,
+    reason_code: u32,
+    slashed_at: u64,
+) {
+    env.events().publish(
+        (soroban_sdk::symbol_short!("slashed"), staker),
+        (amount, reason_code, slashed_at),
+    );
+}
+
+/// Emit an event when a staking reward or penalty is applied.
+///
+/// # Parameters
+/// - `env`: The Soroban environment
+/// - `staker`: The address receiving the reward or penalty
+/// - `amount`: The reward (positive) or penalty (negative) amount
+/// - `reputation_delta`: The reputation change applied
+/// - `applied_at`: Timestamp when the reward/penalty was applied
+pub fn emit_reward_applied(
+    env: &Env,
+    staker: Address,
+    amount: i128,
+    reputation_delta: i32,
+    applied_at: u64,
+) {
+    env.events().publish(
+        (soroban_sdk::symbol_short!("stk_rwd"), staker),
+        (amount, reputation_delta, applied_at),
+    );
+}
+
+/// Emit an event when a staking penalty is applied.
+///
+/// # Parameters
+/// - `env`: The Soroban environment
+/// - `staker`: The address receiving the penalty
+/// - `amount`: The penalty amount
+/// - `reputation_delta`: The reputation change applied (negative)
+/// - `applied_at`: Timestamp when the penalty was applied
+pub fn emit_penalty_applied(
+    env: &Env,
+    staker: Address,
+    amount: i128,
+    reputation_delta: i32,
+    applied_at: u64,
+) {
+    env.events().publish(
+        (soroban_sdk::symbol_short!("stk_pen"), staker),
+        (amount, reputation_delta, applied_at),
+    );
+}
+
 /// Subscribe the reputation contract to receive credential events.
 ///
 /// This should be called during reputation contract initialization or
@@ -270,4 +375,19 @@ mod tests {
     // Note: Full integration tests for handle_credential_issued and
     // handle_credential_revoked require a running reputation contract
     // instance and are better placed in integration tests.
+
+    #[test]
+    fn test_emit_staking_events() {
+        let env = Env::default();
+        let staker = Address::generate(&env);
+
+        emit_staked(&env, staker.clone(), 1_000, 10, 100);
+        emit_unstaked(&env, staker.clone(), 1_000, 10, 200);
+        emit_slashed(&env, staker.clone(), 500, 1, 300);
+        emit_reward_applied(&env, staker.clone(), 50, 5, 400);
+        emit_penalty_applied(&env, staker.clone(), 25, -3, 500);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 5);
+    }
 }

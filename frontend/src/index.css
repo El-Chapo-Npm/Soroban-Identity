@@ -222,6 +222,21 @@ html.light {
   --danger-border:            #f87171;
 }
 
+/* ── Animation tokens ────────────────────────────────────────────────────────
+   Shared durations and easings for view transitions, list entry/exit,
+   skeleton cross-fades and button micro-interactions. Keeping them as custom
+   properties lets components stay consistent and lets the reduced-motion
+   block below neutralise everything in one place. */
+:root {
+  --anim-duration-fast:   120ms;
+  --anim-duration-base:   200ms;
+  --anim-duration-slow:   320ms;
+  --anim-ease-standard:   cubic-bezier(0.2, 0, 0, 1);
+  --anim-ease-decelerate: cubic-bezier(0, 0, 0, 1);
+  --anim-ease-accelerate: cubic-bezier(0.3, 0, 1, 1);
+  --anim-ease-spring:     cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
 /* ── Base styles ─────────────────────────────────────────────────────────────── */
 
 body {
@@ -230,6 +245,113 @@ body {
   color: var(--text);
   min-height: 100vh;
   transition: background 0.2s, color 0.2s;
+}
+
+/* ── Base transitions for interactive elements ───────────────────────────────
+   Only transform/opacity/colour are animated so the compositor can do the
+   work without triggering layout. */
+button,
+a,
+[role="button"],
+.card,
+.theme-toggle,
+.export-secondary,
+.export-select {
+  transition:
+    background-color var(--anim-duration-base) var(--anim-ease-standard),
+    border-color     var(--anim-duration-base) var(--anim-ease-standard),
+    color            var(--anim-duration-base) var(--anim-ease-standard),
+    transform        var(--anim-duration-fast) var(--anim-ease-standard),
+    opacity          var(--anim-duration-base) var(--anim-ease-standard);
+}
+
+button:not(:disabled):active,
+[role="button"]:active {
+  transform: scale(0.97);
+}
+
+/* ── Page transition animations ──────────────────────────────────────────────
+   Applied to the routed view container on mount. Uses transform + opacity
+   only, so it stays on the compositor thread. */
+@keyframes view-enter {
+  from { opacity: 0; transform: translate3d(0, 8px, 0); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+
+@keyframes view-exit {
+  from { opacity: 1; transform: translate3d(0, 0, 0); }
+  to   { opacity: 0; transform: translate3d(0, -8px, 0); }
+}
+
+.view-enter {
+  animation: view-enter var(--anim-duration-slow) var(--anim-ease-decelerate) both;
+}
+
+.view-exit {
+  animation: view-exit var(--anim-duration-base) var(--anim-ease-accelerate) both;
+}
+
+/* ── List item entry / exit ──────────────────────────────────────────────────
+   Staggered via --list-index set by the component. */
+@keyframes list-item-enter {
+  from { opacity: 0; transform: translate3d(0, 6px, 0); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+
+@keyframes list-item-exit {
+  from { opacity: 1; transform: scale(1); }
+  to   { opacity: 0; transform: scale(0.96); }
+}
+
+.list-item-enter {
+  animation: list-item-enter var(--anim-duration-base) var(--anim-ease-decelerate) both;
+  animation-delay: calc(var(--list-index, 0) * 30ms);
+}
+
+.list-item-exit {
+  animation: list-item-exit var(--anim-duration-fast) var(--anim-ease-accelerate) both;
+}
+
+/* ── Skeleton screen transitions ─────────────────────────────────────────────
+   Cross-fade between the skeleton placeholder and the loaded content. */
+@keyframes skeleton-fade-out {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+
+@keyframes content-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.skeleton-fade-out {
+  animation: skeleton-fade-out var(--anim-duration-base) var(--anim-ease-standard) both;
+}
+
+.content-fade-in {
+  animation: content-fade-in var(--anim-duration-base) var(--anim-ease-standard) both;
+}
+
+/* ── Button micro-interactions ───────────────────────────────────────────────
+   Subtle lift on hover, press-down on active. Transform-only so it is cheap. */
+@keyframes button-press {
+  0%   { transform: scale(1); }
+  50%  { transform: scale(0.96); }
+  100% { transform: scale(1); }
+}
+
+button:not(:disabled):hover,
+[role="button"]:hover {
+  transform: translate3d(0, -1px, 0);
+}
+
+button:not(:disabled):active,
+[role="button"]:active {
+  transform: translate3d(0, 0, 0) scale(0.97);
+}
+
+.btn-press {
+  animation: button-press var(--anim-duration-fast) var(--anim-ease-spring);
 }
 
 /* Page layout, header, navigation and touch targets: see ./styles/ (#882). */
@@ -472,6 +594,28 @@ main:focus {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+
+  /* Neutralise the new animation classes explicitly so no motion survives
+     even if a component overrides the global reset above. */
+  .view-enter,
+  .view-exit,
+  .list-item-enter,
+  .list-item-exit,
+  .skeleton-fade-out,
+  .content-fade-in,
+  .btn-press {
+    animation: none !important;
+    transition: none !important;
+    transform: none !important;
+    opacity: 1 !important;
+  }
+
+  button:not(:disabled):hover,
+  button:not(:disabled):active,
+  [role="button"]:hover,
+  [role="button"]:active {
+    transform: none !important;
+  }
 }
 
 /* ── Visually hidden ─────────────────────────────────────────────────────────
@@ -522,6 +666,86 @@ html.dark .credential-badge img:hover {
   filter: none;
 }
 
+/* ── Voice command support (issue #1046) ─────────────────────────────────────
+   Styles for the microphone button and the listening indicator. The button
+   reflects four states: idle, listening, denied and unsupported. */
+
+.voice-mic-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-input);
+  color: var(--text-muted);
+  border-radius: 999px;
+  padding: 0.4rem 0.9rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition:
+    background-color var(--anim-duration-base) var(--anim-ease-standard),
+    border-color     var(--anim-duration-base) var(--anim-ease-standard),
+    color            var(--anim-duration-base) var(--anim-ease-standard),
+    transform        var(--anim-duration-fast) var(--anim-ease-standard);
+}
+
+.voice-mic-button:hover:not(:disabled) {
+  background: var(--card-bg);
+  color: var(--text);
+}
+
+.voice-mic-button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.voice-mic-button[data-state="listening"] {
+  background: var(--badge-red-bg);
+  border-color: var(--sybil-fail-border);
+  color: var(--badge-red-text);
+}
+
+.voice-mic-button[data-state="denied"] {
+  background: var(--warning-bg);
+  border-color: var(--warning-border);
+  color: var(--warning-text);
+}
+
+.voice-mic-button[data-state="unsupported"] {
+  background: var(--btn-disabled-bg);
+  border-color: var(--border-input);
+  color: var(--btn-disabled-color);
+  cursor: not-allowed;
+}
+
+/* ── Listening indicator ─────────────────────────────────────────────────────
+   Pulsing dot shown while the Web Speech API is capturing audio. */
+@keyframes voice-pulse {
+  0%   { transform: scale(1);   opacity: 1; }
+  50%  { transform: scale(1.6); opacity: 0.4; }
+  100% { transform: scale(1);   opacity: 1; }
+}
+
+.voice-listening-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.voice-listening-indicator__dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  background: var(--sybil-fail-border);
+  animation: voice-pulse 1.2s var(--anim-ease-standard) infinite;
+}
+
+.voice-listening-indicator__label {
+  white-space: nowrap;
+}
+
 /* ── Credential export (src/export) ────────────────────────────────────────── */
 
 .export-select,
@@ -567,4 +791,15 @@ html.dark .credential-badge img:hover {
 
 @media (min-width: 600px) {
   .export-field-row { grid-template-columns: 10rem 1fr; }
+}
+
+/* ── Voice command reduced-motion override ───────────────────────────────────
+   The pulsing indicator is decorative; stop it when the user asks for less
+   motion but keep the dot visible as a static status cue. */
+@media (prefers-reduced-motion: reduce) {
+  .voice-listening-indicator__dot {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
 }

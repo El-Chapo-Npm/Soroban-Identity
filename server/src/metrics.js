@@ -168,6 +168,13 @@ export class MetricsService {
       labelNames: ['type'],
       registers: [this.registry],
     });
+
+    this.nonceCollisions = new client.Counter({
+      name: 'nonce_collisions_total',
+      help: 'Total rejected requests carrying a duplicate (already-used) nonce, by route and key id',
+      labelNames: ['route', 'key_id'],
+      registers: [this.registry],
+    });
     this.queryCacheLatency = new client.Histogram({
       name: 'query_cache_lookup_latency_seconds',
       help: 'Query-result cache lookup latency in seconds',
@@ -352,6 +359,20 @@ export class MetricsService {
   }
 
   observeDdosEvent(type) { this.ddosEvents.inc({ type: type || 'unknown' }); }
+
+  /**
+   * Record a rejected request whose nonce had already been used (#1052).
+   *
+   * A sustained non-zero rate indicates either a replay attack or a client
+   * that is reusing nonces; alert on the rate rather than the raw counter.
+   *
+   * @param {object} [sample]
+   * @param {string} [sample.route]  - Normalized route pattern, not the raw path
+   * @param {string} [sample.keyId]  - API key / client identifier, when known
+   */
+  observeNonceCollision({ route, keyId } = {}) {
+    this.nonceCollisions.inc({ route: route || 'unknown', key_id: keyId || 'unknown' });
+  }
 
   observeCircuitBreakerState(toState, fromState) {
     const map = { CLOSED: 0, OPEN: 1, HALF_OPEN: 2 };

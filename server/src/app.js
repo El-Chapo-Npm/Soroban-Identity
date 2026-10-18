@@ -47,6 +47,7 @@ import {
   validateContentType,
 } from "./http-utils.js";
 import { KEY_ID_HEADER, NonceStore, verifySignedRequest } from "./request-signing.js";
+import { createNonceStore, nonceMiddleware } from "./middleware/nonce.js";
 import { normalizeCspReports, setSecurityHeaders } from "./security-headers.js";
 import {
   CREDENTIAL_STATUS_TYPE,
@@ -65,7 +66,16 @@ function wantsJsonLd(req, url) {
   const accept = String(req.headers.accept ?? "");
   return accept.includes("application/ld+json");
 }
-import { schemas, validateRequest } from "./validation.js";
+import { sanitizeDidMetadata, schemas, validateRequest } from "./validation.js";
+import {
+  buildApiRootLinks,
+  buildCredentialCollectionLinks,
+  buildCredentialLinks,
+  buildDidLinks,
+  buildWebhookLinks,
+  formatLinkHeader,
+  resolveLinkPrefix,
+} from "./hateoas.js";
 import { routeLabel } from "./route-label.js";
 import { requestContextStore } from "./request-context.js";
 import { correlationMiddleware, handleTraceRoutes } from "./middleware/tracing.js";
@@ -105,6 +115,7 @@ const SERVER_FEATURES = [
   "response_compression",
   "job_queue",
   "graceful_shutdown",
+  "hateoas",
 ];
 
 const usageTracker = new UsageTracker();
@@ -129,6 +140,7 @@ export function createApp({
   accessLogSink = null,
   realtime = null,
   nonceStore = new NonceStore({ ttlSeconds: config.requestSigningMaxAgeSeconds }),
+  replayNonceStore = null,
   vcSerializer = createVcSerializer(config, { logger }),
   emailTransport = new EmailTransport(config),
   quotaTracker = null,
@@ -190,8 +202,35 @@ export function createApp({
       },
     });
 
+  // Per-session AES-GCM key registry (#1049). Keys are generated per session,
+  // rotated on demand, and never persisted: a restart simply invalidates the
+  // sessions that were using them.
+  const encryptionKeys =
+    sessionKeyRegistry ??
+    new SessionKeyRegistry({
+      ttlSeconds: config.encryptionSessionKeyTtlSeconds,
+      rotationSeconds: config.encryptionKeyRotationSeconds,
+      maxKeys: config.encryptionMaxSessionKeys,
+    });
+
   const tenantRegistry = new TenantRegistry(config);
   void tenantRegistry.init();
+
+  // #1052: nonce-based replay prevention for sensitive (state-changing)
+  // operations. Backed by Redis when available so nonces are shared across
+  // instances; falls back to an in-process store otherwise.
+  const replayStore =
+    replayNonceStore ??
+    createNonceStore({
+      redisClient,
+      ttlSeconds: config.nonceTtlSeconds ?? 300,
+      metrics,
+    });
+  const checkNonce = nonceMiddleware({
+    store: replayStore,
+    ttlSeconds: config.nonceTtlSeconds ?? 300,
+    metrics,
+  });
 
   const eventStore = new EventStore({ dataDir: `${config.dataDir}/events` });
   void eventStore.init();
@@ -288,6 +327,16 @@ export function createApp({
       return res.writeHead(204).end();
     }
 
+    // End-to-end encryption for sensitive credential data (#1049). The
+    // middleware wraps sendJson/sendFormatted so any response body produced
+    // downstream is encrypted with the session key the client negotiated.
+    // It is a no-op unless the feature is enabled and the client presented a
+    // key id, so existing clients are unaffected.
+    if (isEncryptionEnabled(config)) {
+      res.setHeader("X-Encryption-Supported", "aes-256-gcm");
+      wrapResponseEncryption(req, res, { config, registry: encryptionKeys });
+    }
+
     // Record analytics when response completes
     res.on("finish", () => {
       const durationMs = Math.max(0, Date.now() - startTime);
@@ -314,9 +363,100 @@ export function createApp({
     });
 
         if (await handleMockApiRequest(req, res, config)) return;
+
+    // Session key exchange (#1049). Unauthenticated by design: the key it
+    // returns is only useful to the client that generated the ephemeral
+    // keypair, and it carries no authority of its own. The response is
+    // deliberately not encrypted — it is what establishes the key.
+    if (req.method === "POST" && pathname === "/encryption/session") {
+      if (validateContentType(req, res)) return;
+      const body = await readJson(req, config);
+      if (body.__payloadTooLarge) {
+        return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+      }
+      const validated = validateRequest(res, schemas.encryptionSession, { body });
+      if (!validated.ok) return;
+      try {
+        const negotiated = negotiateSessionKey({
+          config,
+          registry: encryptionKeys,
+          clientPublicKey: validated.data.body.clientPublicKey,
+          clientKeyId: validated.data.body.keyId ?? null,
+        });
+        return sendJson(res, 201, negotiated);
+      } catch (err) {
+        logger.warn({ error: err.message }, "Session key negotiation failed");
+        return sendJson(res, 400, {
+          error: "key_exchange_failed",
+          code: "KEY_EXCHANGE_FAILED",
+          message: err.message,
+        });
+      }
+    }
+
+    // Key rotation (#1049). A client that holds a key id may ask for a fresh
+    // key; the old one stays valid until its TTL elapses so in-flight
+    // responses encrypted with it can still be decrypted.
+    if (req.method === "POST" && pathname === "/encryption/rotate") {
+      const keyId = req.headers[ENCRYPTION_KEY_ID_HEADER] ?? null;
+      if (!keyId) {
+        return sendJson(res, 400, {
+          error: "missing_key_id",
+          code: "MISSING_KEY_ID",
+          message: `Provide the current session key id in the ${ENCRYPTION_KEY_ID_HEADER} header.`,
+        });
+      }
+      const rotated = encryptionKeys.rotate(keyId);
+      if (!rotated) {
+        return sendJson(res, 404, {
+          error: "unknown_key_id",
+          code: "UNKNOWN_KEY_ID",
+          message: "The supplied session key id is unknown or has expired.",
+        });
+      }
+      res.setHeader(ENCRYPTION_KEY_ID_HEADER, rotated.keyId);
+      return sendJson(res, 200, {
+        keyId: rotated.keyId,
+        algorithm: rotated.algorithm,
+        expiresAt: rotated.expiresAt,
+        previousKeyId: keyId,
+      });
+    }
+
     // Validate well-known request headers before any routing or auth work.
     if (!validateRequest(res, schemas.commonHeaders, { headers: req.headers }).ok) {
       return;
+    }
+
+    // Decrypt sensitive request fields (#1049) before any handler reads the
+    // body. The body is buffered and memoised, so readJson downstream sees
+    // the plaintext. A request that claims encryption but cannot be
+    // decrypted is rejected rather than silently processed as plaintext.
+    if (isEncryptionEnabled(config) && req.headers[ENCRYPTION_ENABLED_HEADER]) {
+      const { tooLarge, buffer } = await readRawBody(req, config);
+      if (tooLarge) {
+        return sendJson(res, 413, {
+          code: "PAYLOAD_TOO_LARGE",
+          message: "Request body exceeds the size limit.",
+        });
+      }
+      const decrypted = decryptSensitiveRequestFields({
+        headers: req.headers,
+        body: buffer,
+        registry: encryptionKeys,
+      });
+      if (!decrypted.ok) {
+        logger.warn({ code: decrypted.code, route: routeLabel(pathname) }, "Rejected encrypted request");
+        return sendJson(res, decrypted.status, {
+          error: "decryption_failed",
+          code: decrypted.code,
+          message: decrypted.message,
+        });
+      }
+      if (decrypted.body !== null) {
+        req.rawBody = decrypted.body;
+        req.encryptionKeyId = decrypted.keyId ?? null;
+      }
     }
 
     // Extract tier and API key ID from API key or headers early if present
@@ -352,6 +492,32 @@ export function createApp({
 
     // Rate limiting check (exempt /info, /health, /metrics)
     const isExempt = ["/info", "/health", "/ready", "/live", "/metrics"].includes(url.pathname);
+
+    // #1052: replay prevention. Only state-changing methods are checked, and
+    // operational endpoints (plus the browser-posted CSP report) are exempt
+    // because they cannot carry client credentials.
+    const isNonceExempt = isExempt || pathname === "/csp-report";
+    const isStateChanging = !["GET", "HEAD", "OPTIONS"].includes(req.method);
+    if (!isNonceExempt && isStateChanging) {
+      const nonceResult = await checkNonce(req, res);
+      if (!nonceResult.ok) {
+        metrics?.observeNonceCollision?.(nonceResult.reason ?? "replayed");
+        logger.warn(
+          { code: nonceResult.code, route: routeLabel(pathname), tenantId },
+          "Rejected replayed request nonce",
+        );
+        return sendJson(res, nonceResult.status ?? 409, {
+          error: "nonce_replayed",
+          code: nonceResult.code ?? "SIGNATURE_REPLAYED",
+          message: nonceResult.message ?? "Request nonce has already been used.",
+        });
+      }
+      // A fresh server nonce is attached to every accepted response so a
+      // client can chain requests without reusing a nonce.
+      if (nonceResult.serverNonce) {
+        res.setHeader("X-Nonce", nonceResult.serverNonce);
+      }
+    }
 
     // HMAC request signing (#752). Verified before routing so no handler can
     // act on a request whose body was tampered with or replayed. Operational
@@ -487,12 +653,52 @@ export function createApp({
       }
     }
 
+    // #1053: resolve the tenant before quota/limit checks so per-tenant
+    // budgets apply. The tenant registry is the source of truth for limits.
+    const tenant = tenantRegistry.get(tenantId) ?? null;
+    req.tenant = tenant;
+    if (tenant) {
+      const tenantLimits = tenant.limits ?? {};
+      if (
+        tenantLimits.maxCredentials != null &&
+        req.method === "POST" &&
+        (pathname === "/credentials" || pathname === "/credentials/issue")
+      ) {
+        const existing = await readCredentials(config, { tenantId });
+        if (existing.length >= tenantLimits.maxCredentials) {
+          return sendJson(res, 429, {
+            error: "tenant_limit_exceeded",
+            code: "TENANT_LIMIT_EXCEEDED",
+            scope: "credentials",
+            tenantId,
+            message: `Tenant '${tenantId}' has reached its credential limit (${tenantLimits.maxCredentials}).`,
+          });
+        }
+      }
+      if (
+        tenantLimits.maxDids != null &&
+        req.method === "POST" &&
+        pathname === "/admin/issuers"
+      ) {
+        const issuers = await soroban.getIssuers();
+        if (issuers.length >= tenantLimits.maxDids) {
+          return sendJson(res, 429, {
+            error: "tenant_limit_exceeded",
+            code: "TENANT_LIMIT_EXCEEDED",
+            scope: "dids",
+            tenantId,
+            message: `Tenant '${tenantId}' has reached its DID limit (${tenantLimits.maxDids}).`,
+          });
+        }
+      }
+    }
+
     // Quota check (#748): a separate budget from the rate limit above,
     // measured against calendar day/month boundaries rather than a rolling
     // window. GET /quota itself is exempt so checking your own usage never
     // consumes it.
     if (!isExempt && pathname !== "/quota") {
-      const quotaResult = quota.consume(req);
+      const quotaResult = quota.consume(req, tenant ? { tenantId, limits: tenant.limits } : undefined);
       const binding = pickQuotaBinding(quotaResult);
       res.setHeader("X-Quota-Tier", quotaResult.tier);
       res.setHeader("X-Quota-Period", binding.period);
@@ -617,6 +823,14 @@ export function createApp({
             supportedVersions: SUPPORTED_VERSIONS,
             features: SERVER_FEATURES,
             minSdkVersion: MIN_SDK_VERSION,
+            encryption: {
+              enabled: isEncryptionEnabled(config),
+              algorithm: "aes-256-gcm",
+              keyExchange: "/encryption/session",
+              rotation: "/encryption/rotate",
+              keyIdHeader: ENCRYPTION_KEY_ID_HEADER,
+              encryptedFields: ["claims", "subject", "credentialSubject"],
+            },
           });
         }
 
@@ -812,7 +1026,7 @@ export function createApp({
           if (!validated.ok) return;
           const limitNum = validated.data.query.limit ?? 50;
           const direction = validated.data.query.direction ?? "next";
-          const credentials = await readCredentials(config);
+          const credentials = await readCredentials(config, { tenantId });
           const { items, nextCursor, previousCursor, pagination } = cursorPage(credentials, {
             limit: limitNum,
             cursor: validated.data.query.cursor ?? null,
@@ -854,6 +1068,20 @@ export function createApp({
             return res.writeHead(304).end();
           }
 
+          const collectionLinks = buildCredentialCollectionLinks({
+            prefix: linkPrefix,
+            limit: limitNum,
+            nextCursor,
+            previousCursor,
+          });
+          const hasFieldsFilter = Boolean(validated.data.query?.fields);
+          const itemsWithLinks = hasFieldsFilter
+            ? projectedItems
+            : projectedItems.map((item) => ({
+                ...item,
+                _links: buildCredentialLinks(item, linkPrefix),
+              }));
+
           if (version === "v2") {
             return sendJson(
               res,
@@ -861,7 +1089,7 @@ export function createApp({
               {
                 apiVersion: "v2",
                 data: {
-                  items: projectedItems,
+                  items: itemsWithLinks,
                   pageInfo: {
                     nextCursor,
                     previousCursor,
@@ -874,6 +1102,7 @@ export function createApp({
                 meta: {
                   timestamp: new Date().toISOString(),
                 },
+                _links: collectionLinks,
               },
               { ETag: collectionEtag },
             );
@@ -881,13 +1110,13 @@ export function createApp({
           return sendJson(
             res,
             200,
-            { items: projectedItems, nextCursor, previousCursor, pagination },
+            { items: itemsWithLinks, nextCursor, previousCursor, pagination, _links: collectionLinks },
             { ETag: collectionEtag },
           );
         }
 
         // Single-item GET /credentials/:id. #745: strong ETag + conditional
-        // GET. #747: optional `?fields=` projection.
+        // GET. #747: optional `?fields=` projection. #1069: HATEOAS _links.
         const credentialIdMatch = pathname.match(/^\/credentials\/([^/]+)$/);
         if (req.method === "GET" && credentialIdMatch) {
           const credentialId = decodeURIComponent(credentialIdMatch[1]);
@@ -896,7 +1125,7 @@ export function createApp({
             query: url.searchParams,
           });
           if (!validated.ok) return;
-          const credentials = await readCredentials(config);
+          const credentials = await readCredentials(config, { tenantId });
           const credential = credentials.find((c) => c.id === credentialId);
           if (!credential) return notFound(res, req);
 
@@ -936,15 +1165,20 @@ export function createApp({
             return res.writeHead(304).end();
           }
 
+          const itemLinks = buildCredentialLinks(credential, linkPrefix);
+          const payloadWithLinks = validated.data.query?.fields
+            ? projectedCredential
+            : { ...projectedCredential, _links: itemLinks };
+
           if (version === "v2") {
             return sendJson(
               res,
               200,
-              { apiVersion: "v2", data: projectedCredential },
-              { ETag: etag },
+              { apiVersion: "v2", data: payloadWithLinks, _links: itemLinks },
+              { ETag: etag, Link: formatLinkHeader(itemLinks) },
             );
           }
-          return sendJson(res, 200, projectedCredential, { ETag: etag });
+          return sendJson(res, 200, payloadWithLinks, { ETag: etag, Link: formatLinkHeader(itemLinks) });
         }
 
         // Credential status (#753). Referenced by every credential's
@@ -956,17 +1190,74 @@ export function createApp({
           if (!validateRequest(res, schemas.credentialByIdParams, { params: { credentialId } }).ok) {
             return;
           }
-          const credentials = await readCredentials(config);
+          const credentials = await readCredentials(config, { tenantId });
           const credential = credentials.find((c) => c.id === credentialId);
           if (!credential) return notFound(res);
 
           const status = credentialStatus(credential);
+          const statusLinks = buildCredentialLinks(credential, linkPrefix);
           return sendJson(res, 200, {
             id: `${pathname}`,
             type: CREDENTIAL_STATUS_TYPE,
             credentialId,
             ...status,
             checkedAt: new Date().toISOString(),
+            _links: {
+              ...statusLinks,
+              self: { href: `${linkPrefix}${pathname}`, method: "GET" },
+              credential: { href: `${linkPrefix}/credentials/${encodeURIComponent(credentialId)}`, method: "GET" },
+            },
+          });
+        }
+
+        // Encrypted credential payload (#1049). Returns only the sensitive
+        // fields, encrypted with the caller's session key, so a client can
+        // fetch credential material without it ever appearing in plaintext
+        // on the wire.
+        const encryptedCredentialMatch = pathname.match(/^\/credentials\/([^/]+)\/encrypted$/);
+        if (req.method === "GET" && encryptedCredentialMatch) {
+          if (!await requireAuth(req, res, config, ['credentials:read'])) return;
+          const credentialId = decodeURIComponent(encryptedCredentialMatch[1]);
+          if (!validateRequest(res, schemas.credentialByIdParams, { params: { credentialId } }).ok) {
+            return;
+          }
+          const keyId = req.headers[ENCRYPTION_KEY_ID_HEADER] ?? null;
+          if (!keyId || !encryptionKeys.has(keyId)) {
+            return sendJson(res, 400, {
+              error: "missing_session_key",
+              code: "MISSING_SESSION_KEY",
+              message: `Negotiate a session key at POST /encryption/session and send it in the ${ENCRYPTION_KEY_ID_HEADER} header.`,
+            });
+          }
+          const credentials = await readCredentials(config);
+          const credential = credentials.find((c) => c.id === credentialId);
+          if (!credential) return notFound(res, req);
+
+          const sensitive = {
+            claims: credential.claims ?? null,
+            subject: credential.subject ?? null,
+            credentialSubject: credential.credentialSubject ?? null,
+          };
+          const encrypted = encryptSensitiveResponseFields(sensitive, {
+            registry: encryptionKeys,
+            keyId,
+          });
+          if (!encrypted) {
+            return sendJson(res, 500, {
+              error: "encryption_failed",
+              code: "ENCRYPTION_FAILED",
+              message: "Unable to encrypt the credential payload.",
+            });
+          }
+          res.setHeader(ENCRYPTION_KEY_ID_HEADER, encrypted.keyId);
+          return sendJson(res, 200, {
+            credentialId,
+            algorithm: encrypted.algorithm,
+            keyId: encrypted.keyId,
+            iv: encrypted.iv,
+            tag: encrypted.tag,
+            ciphertext: encrypted.ciphertext,
+            encryptedAt: new Date().toISOString(),
           });
         }
 
@@ -979,7 +1270,7 @@ export function createApp({
           if (!validateRequest(res, schemas.credentialByIdParams, { params: { credentialId } }).ok) {
             return;
           }
-          const credentials = await readCredentials(config);
+          const credentials = await readCredentials(config, { tenantId });
           const credential = credentials.find((c) => c.id === credentialId);
           const recordVerification = (result) =>
             metrics?.observeCredentialVerification?.(result);
@@ -1232,7 +1523,7 @@ export function createApp({
           if (!validated.ok) return;
           const credential = validated.data.body;
           try {
-            await createAndPersistCredential(config, credential);
+            await createAndPersistCredential(config, credential, { tenantId });
             await appendAuditLog(config, { action: "issue_credential", credentialId: credential.id });
             webhookService.trigger("credential.issued", credential).catch(() => {});
             realtime?.emitCredentialEvent("issued", credential);
@@ -1244,7 +1535,16 @@ export function createApp({
                 { "content-type": "application/ld+json; charset=utf-8" },
               );
             }
-            return sendJson(res, 201, credential);
+            const createdLinks = buildCredentialLinks(credential, linkPrefix);
+            return sendJson(
+              res,
+              201,
+              { ...credential, _links: createdLinks },
+              {
+                Location: createdLinks.self?.href ?? `/credentials/${encodeURIComponent(credential.id)}`,
+                Link: formatLinkHeader(createdLinks),
+              },
+            );
           } catch (err) {
             if (err instanceof DuplicateCredentialError) {
               return sendFormatted(req, res, 409, {
@@ -1272,7 +1572,7 @@ export function createApp({
           // it, and this request was built from the stale copy.
           const ifMatch = req.headers["if-match"];
           if (ifMatch) {
-            const existing = (await readCredentials(config)).find((c) => c.id === credentialId);
+            const existing = (await readCredentials(config, { tenantId })).find((c) => c.id === credentialId);
             if (!existing) return notFound(res);
             if (!matchesIfMatch(ifMatch, computeEtag(existing))) {
               return sendJson(res, 412, {
@@ -1282,12 +1582,22 @@ export function createApp({
             }
           }
 
-          const revoked = await revokeAndPersistCredential(config, credentialId);
+          const revoked = await revokeAndPersistCredential(config, credentialId, { tenantId });
           if (!revoked) return notFound(res);
           await appendAuditLog(config, { action: "revoke_credential", credentialId });
           webhookService.trigger("credential.revoked", { id: credentialId, revokedAt: revoked.revokedAt }).catch(() => {});
           realtime?.emitCredentialEvent("revoked", revoked);
-          return sendJson(res, 200, { revoked: true, credential: revoked });
+          const revokedLinks = buildCredentialLinks(revoked, linkPrefix);
+          return sendJson(
+            res,
+            200,
+            {
+              revoked: true,
+              credential: { ...revoked, _links: revokedLinks },
+              _links: revokedLinks,
+            },
+            { Link: formatLinkHeader(revokedLinks) },
+          );
         }
 
         // Credential update: PUT /credentials/:id or PATCH /credentials/:id with optimistic concurrency
@@ -1307,7 +1617,7 @@ export function createApp({
             : (body.version ?? body.expectedVersion);
 
           try {
-            const updated = await updateAndPersistCredential(config, credentialId, body, expectedVersion);
+            const updated = await updateAndPersistCredential(config, credentialId, body, expectedVersion, { tenantId });
             if (!updated) return notFound(res);
             await appendAuditLog(config, { action: "update_credential", credentialId });
             webhookService.trigger("credential.updated", updated).catch(() => {});
@@ -1427,6 +1737,114 @@ export function createApp({
           const did = decodeURIComponent(cacheDidMatch[1]);
           const invalidated = didCache ? await didCache.invalidate(did) : false;
           return sendJson(res, 200, { did, invalidated });
+        }
+
+        // ── DID Resolution & Metadata Endpoints (#1067) ────────────────
+        if (req.method === "POST" && (pathname === "/dids" || pathname === "/identity/did")) {
+          if (validateContentType(req, res)) return;
+          const body = await readJson(req, config);
+          if (body.__payloadTooLarge) {
+            return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+          }
+          const validated = validateRequest(res, schemas.upsertDid, { body });
+          if (!validated.ok) return;
+          const rawIdentifier = validated.data.body.did ?? validated.data.body.address ?? "";
+          if (!rawIdentifier) {
+            return sendJson(res, 400, {
+              error: "validation_failed",
+              code: "VALIDATION_FAILED",
+              message: "Either did or address is required.",
+            });
+          }
+          const address = rawIdentifier.startsWith("did:stellar:")
+            ? rawIdentifier.slice("did:stellar:".length)
+            : rawIdentifier;
+          const safeMetadata = sanitizeDidMetadata(body.metadata ?? validated.data.body.metadata ?? {});
+          const nowSec = Math.floor(Date.now() / 1000);
+          const didDoc = {
+            id: `did:stellar:${address}`,
+            controller: validated.data.body.controller ?? `did:stellar:${address}`,
+            createdAt: nowSec,
+            updatedAt: nowSec,
+            metadata: safeMetadata,
+            active: validated.data.body.active !== false,
+          };
+          if (didCache) {
+            await didCache.set(address, didDoc);
+          }
+          const didLinks = buildDidLinks(didDoc, linkPrefix);
+          return sendJson(
+            res,
+            pathname === "/identity/did" ? 200 : 201,
+            { ...didDoc, _links: didLinks },
+            { Link: formatLinkHeader(didLinks) },
+          );
+        }
+
+        const didRouteMatch = pathname.match(/^\/dids\/([^/]+)(\/metadata)?$/);
+        if (didRouteMatch) {
+          let rawDid;
+          try {
+            rawDid = decodeURIComponent(didRouteMatch[1]);
+          } catch {
+            return sendJson(res, 400, { code: "INVALID_DID", message: "Malformed URL-encoded DID parameter." });
+          }
+          const address = rawDid.startsWith("did:stellar:") ? rawDid.slice("did:stellar:".length) : rawDid;
+
+          if (req.method === "GET") {
+            const doc = soroban?.resolveDid ? await soroban.resolveDid(address) : null;
+            if (!doc) return notFound(res, req);
+            const didLinks = buildDidLinks(doc, linkPrefix);
+            return sendJson(
+              res,
+              200,
+              {
+                ...doc,
+                metadata: sanitizeDidMetadata(doc.metadata ?? {}),
+                _links: didLinks,
+              },
+              { Link: formatLinkHeader(didLinks) },
+            );
+          }
+
+          if (req.method === "PUT" || req.method === "PATCH") {
+            if (validateContentType(req, res)) return;
+            const body = await readJson(req, config);
+            if (body.__payloadTooLarge) {
+              return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+            }
+            const rawMetadata = body.metadata !== undefined ? body.metadata : body;
+            if (!rawMetadata || typeof rawMetadata !== "object" || Array.isArray(rawMetadata)) {
+              return sendJson(res, 400, {
+                error: "validation_failed",
+                code: "VALIDATION_FAILED",
+                message: "DID metadata must be a JSON object.",
+              });
+            }
+            const safeMetadata = sanitizeDidMetadata(rawMetadata);
+            const existing = (soroban?.resolveDid ? await soroban.resolveDid(address) : null) ?? {
+              id: `did:stellar:${address}`,
+              controller: `did:stellar:${address}`,
+              createdAt: Math.floor(Date.now() / 1000),
+              active: true,
+              metadata: {},
+            };
+            const updatedDoc = {
+              ...existing,
+              updatedAt: Math.floor(Date.now() / 1000),
+              metadata: req.method === "PATCH" ? { ...(existing.metadata ?? {}), ...safeMetadata } : safeMetadata,
+            };
+            if (didCache) {
+              await didCache.set(address, updatedDoc);
+            }
+            const didLinks = buildDidLinks(updatedDoc, linkPrefix);
+            return sendJson(
+              res,
+              200,
+              { ...updatedDoc, _links: didLinks },
+              { Link: formatLinkHeader(didLinks) },
+            );
+          }
         }
 
         if (req.method === "GET" && pathname === "/notifications/summary") {
@@ -1572,7 +1990,7 @@ export function createApp({
           });
           if (!validated.ok) return;
           const windowDays = validated.data.query.windowDays ?? config.expiryWarningDays;
-          const credentials = await readCredentials(config);
+          const credentials = await readCredentials(config, { tenantId });
           const expiring = findExpiringCredentials(credentials, {
             windowDays,
             includeNotified: true,
@@ -1851,6 +2269,42 @@ export function createApp({
             logger.error({ error: err.message, stack: err.stack }, 'Failed to export audit logs');
             return sendJson(res, 500, { error: 'audit_log_export_failed', message: err.message });
           }
+        }
+
+        // Session key lifecycle (#1049): a client can inspect and drop the
+        // keys it negotiated without going through the admin surface.
+        if (req.method === "GET" && pathname === "/encryption/keys") {
+          const keyId = req.headers[ENCRYPTION_KEY_ID_HEADER] ?? null;
+          if (!keyId) {
+            return sendJson(res, 400, {
+              error: "missing_key_id",
+              code: "MISSING_KEY_ID",
+              message: `Provide the session key id in the ${ENCRYPTION_KEY_ID_HEADER} header.`,
+            });
+          }
+          const key = encryptionKeys.describe(keyId);
+          if (!key) {
+            return sendJson(res, 404, {
+              error: "unknown_key_id",
+              code: "UNKNOWN_KEY_ID",
+              message: "The supplied session key id is unknown or has expired.",
+            });
+          }
+          return sendJson(res, 200, key);
+        }
+
+        if (req.method === "DELETE" && pathname === "/encryption/keys") {
+          const keyId = req.headers[ENCRYPTION_KEY_ID_HEADER] ?? null;
+          if (!keyId) {
+            return sendJson(res, 400, {
+              error: "missing_key_id",
+              code: "MISSING_KEY_ID",
+              message: `Provide the session key id in the ${ENCRYPTION_KEY_ID_HEADER} header.`,
+            });
+          }
+          const revoked = encryptionKeys.revoke(keyId);
+          if (!revoked) return notFound(res);
+          return sendJson(res, 200, { revoked: true, keyId });
         }
 
         // Multi-tenant administration and provisioning endpoints (#800)

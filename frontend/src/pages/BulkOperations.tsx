@@ -10,6 +10,7 @@ import {
 import { CredentialClient } from "../../../sdk/src";
 import { getNetworkConfig } from "../network";
 import { useWalletContext } from "../context/WalletContext";
+import { notifyBatchCredentialsUpdated } from "../hooks/useCredentialExpiryCheck";
 
 export interface ParsedCredentialRow {
   rowNumber: number;
@@ -381,6 +382,31 @@ export const BulkOperations: React.FC = () => {
         ]);
         await new Promise((res) => setTimeout(res, batchDelayMs));
       }
+    }
+
+    const succeededResults = currentResults.filter((r) => r.status === "success");
+    if (isIssuance) {
+      notifyBatchCredentialsUpdated({
+        issued: validItems
+          .filter((item) => succeededResults.some((r) => r.rowNumber === (item as ParsedCredentialRow).rowNumber))
+          .map((item) => {
+            const row = item as ParsedCredentialRow;
+            return {
+              id: `bulk-${row.rowNumber}-${row.subject}`,
+              issuer: caller,
+              subject: row.subject,
+              credentialType: row.credentialType,
+              claimHash: "",
+              issuedAt: Math.floor(Date.now() / 1000),
+              expiresAt: row.expiry,
+              revoked: false,
+            };
+          }),
+      });
+    } else {
+      notifyBatchCredentialsUpdated({
+        revokedIds: succeededResults.map((r) => r.idOrSubject),
+      });
     }
 
     setExecutionLog((prev) => [...prev, "[COMPLETED] All batches finished processing."]);

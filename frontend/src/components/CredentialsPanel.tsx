@@ -68,17 +68,35 @@ type FilterType = "All" | CredentialType;
 type ExpiryFilterType = "All" | "Active" | "Expired";
 type CredentialStatus = "active" | "expired" | "revoked";
 
-function formatExpiry(expiresAt: number): string {
-  if (expiresAt === 0) return "No expiry";
+const MAX_SAFE_TIMESTAMP_SECS = 8_640_000_000_000; // Max ECMAScript Date in seconds (~year 275760)
+const MAX_U64_TIMESTAMP = 18_446_744_073_709_551_615n;
 
-  const now = Date.now();
-  const expiryMs = expiresAt * 1000;
-  const diffMs = expiryMs - now;
-  const diffDays = Math.floor(Math.abs(diffMs) / (1000 * 60 * 60 * 24));
-  const diffHours = Math.floor(Math.abs(diffMs) / (1000 * 60 * 60));
-  const diffMinutes = Math.floor(Math.abs(diffMs) / (1000 * 60));
+function normalizeExpiryTimestamp(expiresAt: number | bigint | string): number {
+  if (typeof expiresAt === "bigint") {
+    if (expiresAt <= 0n) return 0;
+    return expiresAt > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(expiresAt);
+  }
+  const num = typeof expiresAt === "string" ? Number(expiresAt) : expiresAt;
+  if (!Number.isFinite(num)) return 0;
+  // Recover from signed 32-bit integer overflow (e.g. dates past 2038/2106 coerced via bitwise ops)
+  if (num < 0) {
+    return num + 0x100000000;
+  }
+  return num;
+}
 
-  if (diffMs < 0) {
+function formatExpiry(expiresAt: number | bigint): string {
+  const normalized = normalizeExpiryTimestamp(expiresAt);
+  if (normalized === 0) return "No expiry";
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const diffSec = normalized - nowSec;
+  const absSec = Math.abs(diffSec);
+  const diffDays = Math.floor(absSec / (60 * 60 * 24));
+  const diffHours = Math.floor(absSec / (60 * 60));
+  const diffMinutes = Math.floor(absSec / 60);
+
+  if (diffSec < 0) {
     if (diffDays > 0) return `Expired ${diffDays} day${diffDays > 1 ? "s" : ""} ago`;
     if (diffHours > 0) return `Expired ${diffHours} hour${diffHours > 1 ? "s" : ""} ago`;
     return `Expired ${diffMinutes} min${diffMinutes > 1 ? "s" : ""} ago`;
@@ -89,15 +107,15 @@ function formatExpiry(expiresAt: number): string {
   return `Expires in ${diffMinutes} min${diffMinutes > 1 ? "s" : ""}`;
 }
 
-function getExpiryStyle(expiresAt: number): React.CSSProperties {
-  if (expiresAt === 0) return { color: "var(--text-muted)" };
+function getExpiryStyle(expiresAt: number | bigint): React.CSSProperties {
+  const normalized = normalizeExpiryTimestamp(expiresAt);
+  if (normalized === 0) return { color: "var(--text-muted)" };
 
-  const now = Date.now();
-  const expiryMs = expiresAt * 1000;
-  const diffMs = expiryMs - now;
-  const diffDays = Math.floor(Math.abs(diffMs) / (1000 * 60 * 60 * 24));
+  const nowSec = Math.floor(Date.now() / 1000);
+  const diffSec = normalized - nowSec;
+  const diffDays = Math.floor(Math.abs(diffSec) / (60 * 60 * 24));
 
-  if (diffMs < 0) {
+  if (diffSec < 0) {
     return { color: "var(--error)", fontWeight: 600 };
   }
   if (diffDays <= 7) {
@@ -106,8 +124,9 @@ function getExpiryStyle(expiresAt: number): React.CSSProperties {
   return { color: "var(--text-muted)" };
 }
 
-function isExpired(expiresAt: number): boolean {
-  return expiresAt > 0 && Date.now() / 1000 > expiresAt;
+function isExpired(expiresAt: number | bigint): boolean {
+  const normalized = normalizeExpiryTimestamp(expiresAt);
+  return normalized > 0 && Math.floor(Date.now() / 1000) > normalized;
 }
 
 function getCredentialStatus(credential: Credential): CredentialStatus {
@@ -316,6 +335,61 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
   const [isExporting, setIsExporting] = useState(false);
   const [selectedCredentialsForExport, setSelectedCredentialsForExport] = useState<Set<string>>(new Set());
   const [sharingCredential, setSharingCredential] = useState<Credential | null>(null);
+
+  // ── Credential comparison (#1048) ───────────────────────────────────────
+  // Selection is separate from the export selection so the two features don't
+  // interfere with each other. 2-4 credentials can be compared at once.
+  const MIN_COMPARE = 2;
+  const MAX_COMPARE = 4;
+  const [selectedForComparison, setSelectedForComparison] = useState<Set<string>>(new Set());
+  const [showComparison, setShowComparison] = useState(false);
+  const [comparisonIds, setComparisonIds] = useState<string[]>([]);
+
+  const toggleComparisonSelection = (credentialId: string) => {
+    setSelectedForComparison((prev) => {
+      const next = new Set(prev);
+      if (next.has(credentialId)) {
+        next.delete(credentialId);
+      } else if (next.size < MAX_COMPARE) {
+        next.add(credentialId);
+      } else {
+        toast.error(`You can compare at most ${MAX_COMPARE} credentials at once.`);
+      }
+      return next;
+    });
+  };
+
+  const openComparison = (ids: string[]) => {
+    if (ids.length < MIN_COMPARE || ids.length > MAX_COMPARE) {
+      toast.error(`Select between ${MIN_COMPARE} and ${MAX_COMPARE} credentials to compare.`);
+      return;
+    }
+    setComparisonIds(ids);
+    setShowComparison(true);
+  };
+
+  // Shareable-link entry point: read `compare` credential IDs from the URL and
+  // open the comparison view automatically once the credentials are available.
+  const [pendingCompareIds] = useState<string[]>(() => {
+    const raw = new URLSearchParams(window.location.search).get("compare");
+    if (!raw) return [];
+    return raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .slice(0, MAX_COMPARE);
+  });
+
+  useEffect(() => {
+    if (pendingCompareIds.length < MIN_COMPARE) return;
+    if (displayCredentials.length === 0) return;
+    const available = pendingCompareIds.filter((id) => displayCredentials.some((c) => c.id === id));
+    if (available.length >= MIN_COMPARE) {
+      setSelectedForComparison(new Set(available));
+      setComparisonIds(available);
+      setShowComparison(true);
+    }
+  }, [pendingCompareIds, fetchedCredentials]);
 
   // ── Pagination ──────────────────────────────────────────────────────────
   const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
@@ -613,14 +687,19 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
       errors.claims = "At least one claim key-value pair is required";
     }
 
-    // Validate expiry date
-    const expiryNum = parseInt(expiresAt, 10);
-    if (isNaN(expiryNum) || expiryNum < 0) {
-      errors.expiresAt = "Expiry must be 0 or a positive number";
-    } else if (expiryNum > 0) {
-      const now = Math.floor(Date.now() / 1000);
-      if (expiryNum <= now) {
-        errors.expiresAt = "Expiry date must be in the future";
+    // Validate expiry date (supports 64-bit timestamps beyond year 2106 up to u64::MAX)
+    const trimmedExpiry = expiresAt.trim() || "0";
+    if (!/^\d+$/.test(trimmedExpiry)) {
+      errors.expiresAt = "Expiry must be 0 or a positive integer timestamp";
+    } else {
+      const expiryBig = BigInt(trimmedExpiry);
+      if (expiryBig > MAX_U64_TIMESTAMP) {
+        errors.expiresAt = "Expiry exceeds maximum 64-bit timestamp value";
+      } else if (expiryBig > 0n) {
+        const now = BigInt(Math.floor(Date.now() / 1000));
+        if (expiryBig <= now) {
+          errors.expiresAt = "Expiry date must be in the future";
+        }
       }
     }
 
@@ -730,6 +809,22 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
     setSelectedCredentialsForExport(newSet);
   };
 
+  const handleCopyComparisonLink = async () => {
+    const ids = Array.from(selectedForComparison);
+    if (ids.length < MIN_COMPARE) {
+      toast.error(`Select at least ${MIN_COMPARE} credentials to share a comparison link.`);
+      return;
+    }
+    const url = new URL(window.location.href);
+    url.searchParams.set("compare", ids.join(","));
+    try {
+      await navigator.clipboard.writeText(url.toString());
+      toast.success("Comparison link copied to clipboard.");
+    } catch {
+      toast.error("Could not copy the comparison link.");
+    }
+  };
+
   const displayCredentials = fetchedCredentials ?? [];
 
   const filteredCredentials =
@@ -766,6 +861,14 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
 
   const handleExpiryFilterChange = (status: ExpiryFilterType) => {
     setActiveExpiryFilter(status);
+    setPage(1);
+    updatePaginationParams(1, pageSize);
+  };
+
+  const handleResetFilters = () => {
+    setActiveFilter("All");
+    setActiveExpiryFilter("All");
+    setSearchAddress("");
     setPage(1);
     updatePaginationParams(1, pageSize);
   };
@@ -843,7 +946,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
             nativeToScVal(claimsMap, { type: "map" }),
             nativeToScVal(Buffer.from(claimsHashHex, "hex"), { type: "bytes" }),
             nativeToScVal(Buffer.from(sigHex, "hex"), { type: "bytes" }),
-            nativeToScVal(parseInt(expiresAt || "0", 10), { type: "u64" })
+            nativeToScVal(BigInt(expiresAt.trim() || "0"), { type: "u64" })
           )
         )
         .setTimeout(30)
@@ -1071,6 +1174,84 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
             Last checked: {formatCheckedAt(lastCheckedAt)} (auto-refreshes every 30s)
           </p>
         )}
+
+        {/* Comparison selection toolbar (#1048) */}
+        {displayCredentials.length >= MIN_COMPARE && (
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              alignItems: "center",
+              gap: "0.5rem",
+              marginBottom: "1rem",
+              padding: "0.5rem 0.75rem",
+              background: "var(--card-bg-accent)",
+              borderRadius: "0.5rem",
+              fontSize: "0.85rem",
+            }}
+          >
+            <span style={{ color: "var(--text-muted)" }}>
+              Compare ({selectedForComparison.size}/{MAX_COMPARE}):
+            </span>
+            <button
+              type="button"
+              onClick={() => openComparison(Array.from(selectedForComparison))}
+              disabled={selectedForComparison.size < MIN_COMPARE}
+              onMouseEnter={preloadCredentialComparison}
+              onFocus={preloadCredentialComparison}
+              style={{
+                padding: "0.35rem 0.85rem",
+                backgroundColor: "var(--accent-light)",
+                color: "white",
+                border: "none",
+                borderRadius: "0.25rem",
+                cursor: selectedForComparison.size < MIN_COMPARE ? "not-allowed" : "pointer",
+                fontSize: "0.85rem",
+                fontWeight: 500,
+                opacity: selectedForComparison.size < MIN_COMPARE ? 0.6 : 1,
+              }}
+              title={`Compare ${selectedForComparison.size} selected credential(s)`}
+            >
+              ⚖ Compare
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleCopyComparisonLink()}
+              disabled={selectedForComparison.size < MIN_COMPARE}
+              style={{
+                padding: "0.35rem 0.85rem",
+                backgroundColor: "transparent",
+                color: "var(--accent-light)",
+                border: "1px solid var(--accent-light)",
+                borderRadius: "0.25rem",
+                cursor: selectedForComparison.size < MIN_COMPARE ? "not-allowed" : "pointer",
+                fontSize: "0.85rem",
+                fontWeight: 500,
+                opacity: selectedForComparison.size < MIN_COMPARE ? 0.6 : 1,
+              }}
+              title="Copy a shareable comparison link"
+            >
+              🔗 Copy link
+            </button>
+            {selectedForComparison.size > 0 && (
+              <button
+                type="button"
+                onClick={() => setSelectedForComparison(new Set())}
+                style={{
+                  padding: "0.35rem 0.85rem",
+                  backgroundColor: "transparent",
+                  color: "var(--text-muted)",
+                  border: "1px solid var(--border-input)",
+                  borderRadius: "0.25rem",
+                  cursor: "pointer",
+                  fontSize: "0.85rem",
+                }}
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        )}
         <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginBottom: "1rem" }}>
           {EXPIRY_FILTER_OPTIONS.map((status) => {
             const count = countByExpiry(displayCredentials, status);
@@ -1108,6 +1289,23 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
               </button>
             );
           })}
+          {(activeFilter !== "All" || activeExpiryFilter !== "All" || searchAddress.trim() !== "") && (
+            <button
+              type="button"
+              onClick={handleResetFilters}
+              style={{
+                padding: "0.3rem 0.75rem",
+                borderRadius: "999px",
+                border: "2px solid var(--border-input)",
+                background: "transparent",
+                color: "var(--text-muted)",
+                cursor: "pointer",
+                fontSize: "0.85rem",
+              }}
+            >
+              Reset Filters
+            </button>
+          )}
         </div>
 
         {fetching ? (
@@ -1161,7 +1359,18 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
                       toggleCredentialSelection(cred.id);
                     }}
                     style={{ cursor: "pointer" }}
-                    aria-label={`Select credential ${cred.id}`}
+                    aria-label={`Select credential ${cred.id} for export`}
+                  />
+                  <input
+                    type="checkbox"
+                    checked={selectedForComparison.has(cred.id)}
+                    onChange={(e) => {
+                      e.stopPropagation();
+                      toggleComparisonSelection(cred.id);
+                    }}
+                    style={{ cursor: "pointer" }}
+                    aria-label={`Select credential ${cred.id} for comparison`}
+                    title="Select for comparison"
                   />
                   <span style={{ fontSize: "1.2rem", minWidth: "1.5rem" }}>
                     {CREDENTIAL_TYPE_ICONS[cred.credentialType] || "📋"}
@@ -1390,6 +1599,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
         </label>
         <input
           id="verify-credential-id"
+          data-tour="verify-credential-input"
           placeholder="Credential ID (hex)"
           value={credId}
           onChange={(e) => setCredId(e.target.value)}
@@ -1523,7 +1733,11 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
                 style={{ marginBottom: "1rem" }}
               />
 
-              <button onClick={handleIssue} disabled={issuing || Object.keys(issueErrors).length > 0}>
+              <button
+                data-tour="issue-credential-button"
+                onClick={handleIssue}
+                disabled={issuing || Object.keys(issueErrors).length > 0}
+              >
                 {issuing
                   ? "Issuing…"
                   : selectedTemplate
@@ -1591,6 +1805,16 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
           <CredentialShare
             credential={sharingCredential}
             onClose={() => setSharingCredential(null)}
+          />
+        </Suspense>
+      )}
+
+      {/* Comparison Modal (#1048) */}
+      {showComparison && comparisonIds.length >= MIN_COMPARE && (
+        <Suspense fallback={<LoadingFallback />}>
+          <CredentialComparison
+            credentials={displayCredentials.filter((c) => comparisonIds.includes(c.id))}
+            onClose={() => setShowComparison(false)}
           />
         </Suspense>
       )}

@@ -480,3 +480,151 @@ export interface AccountInfo {
    */
   sequence: string;
 }
+
+/**
+ * Merkle tree structure used for batch credential verification (#1056).
+ *
+ * ## Tree layout
+ *
+ * Credential leaves are hashed with SHA-256 and inserted in the order they are
+ * supplied to {@link MerkleTree}. The tree is built as a binary tree where:
+ *
+ * - Each **leaf** is `SHA-256(0x00 || credentialId)` — the `0x00` domain
+ *   separator prevents second-preimage attacks where an internal node could be
+ *   reinterpreted as a leaf.
+ * - Each **internal node** is `SHA-256(0x01 || left || right)` — the `0x01`
+ *   domain separator distinguishes internal nodes from leaves.
+ * - When a level has an odd number of nodes, the last node is **duplicated**
+ *   (paired with itself) before hashing, so every level has an even count.
+ * - The **root** is the single node remaining at the top of the tree. An empty
+ *   batch has a root of 32 zero bytes.
+ *
+ * ## Proofs
+ *
+ * A {@link MerkleProof} contains the sibling hashes on the path from the leaf
+ * to the root, ordered from the bottom (closest to the leaf) upwards. Each
+ * sibling carries a {@link MerkleProofSibling.index} that records the node's
+ * position within its level; the verifier uses this to decide whether the
+ * sibling is concatenated on the left or the right of the running hash.
+ *
+ * ## Incremental updates
+ *
+ * Appending a leaf to a batch updates only the rightmost path of the tree, so
+ * the root can be recomputed in `O(log n)` hashes. The on-chain root is
+ * replaced by submitting the new root with {@link MerkleBatchRoot.leafCount}
+ * incremented; see {@link SubmitMerkleRootOptions}.
+ */
+
+/**
+ * One sibling hash on the path from a credential leaf to the merkle root.
+ *
+ * `index` is the position of this node within its tree level. When
+ * `index % 2 === 0` the sibling sits to the **left** of the running hash and is
+ * concatenated first; when odd it sits to the **right**. `siblingOnLeft` is the
+ * pre-computed boolean form of that check, provided so callers that serialise
+ * proofs (e.g. to pass them to the contract) do not have to re-derive it.
+ */
+export interface MerkleProofSibling {
+  /** Hex-encoded 32-byte sibling hash. */
+  hash: string;
+  /** Zero-based position of this node within its tree level. */
+  index: number;
+  /** `true` when this sibling is concatenated to the left of the running hash. */
+  siblingOnLeft: boolean;
+}
+
+/**
+ * Merkle inclusion proof for a single credential in a batch (#1056).
+ *
+ * Produced by {@link generateMerkleProof} and consumed by
+ * {@link verifyMerkleProof}. The proof is self-contained: given the leaf hash,
+ * the siblings and the expected root, verification requires no tree state.
+ */
+export interface MerkleProof {
+  /** Hex-encoded 32-byte hash of the credential leaf being proven. */
+  leaf: string;
+  /**
+   * Sibling hashes from the leaf level upwards. The first entry is the sibling
+   * of the leaf itself; the last entry is the sibling of the child of the root.
+   */
+  siblings: MerkleProofSibling[];
+  /** Zero-based index of the leaf within the batch. */
+  leafIndex: number;
+  /** Total number of leaves in the batch the proof was generated from. */
+  leafCount: number;
+  /** Hex-encoded 32-byte merkle root the proof resolves to. */
+  root: string;
+}
+
+/**
+ * On-chain merkle root for a batch of credentials (#1056).
+ *
+ * Stored by the credential-manager contract so a verifier only needs the root
+ * (32 bytes) plus a proof (`O(log n)` hashes) instead of every credential in
+ * the batch. This keeps verification gas cost logarithmic in the batch size.
+ */
+export interface MerkleBatchRoot {
+  /** Identifier of the batch this root commits to. */
+  batchId: string;
+  /** Hex-encoded 32-byte merkle root. */
+  root: string;
+  /** Number of credential leaves committed to by `root`. */
+  leafCount: number;
+  /** Unix timestamp (seconds) when the root was last updated on-chain. */
+  updatedAt: number;
+}
+
+/**
+ * Options for {@link generateMerkleProof} / {@link generateMerkleProofs}.
+ */
+export interface MerkleProofOptions {
+  /**
+   * Hash function used to build the tree. Defaults to `"sha256"`, the only
+   * algorithm supported by the on-chain verifier.
+   */
+  algorithm?: "sha256";
+  /**
+   * When `true`, proofs are generated for every leaf in the batch rather than
+   * a single leaf. Used by {@link generateMerkleProofs}.
+   */
+  allLeaves?: boolean;
+}
+
+/**
+ * Options for submitting a merkle root to the credential-manager contract.
+ *
+ * Extends {@link CallOptions} so callers can override the transaction timeout
+ * for large batches.
+ */
+export interface SubmitMerkleRootOptions extends CallOptions {
+  /**
+   * Batch identifier to associate with the root. When omitted the contract
+   * derives one from the issuer address and the current ledger sequence.
+   */
+  batchId?: string;
+  /**
+   * When `true`, the contract treats the submission as an incremental update:
+   * the existing root for `batchId` is replaced and `leafCount` is expected to
+   * be greater than the stored value. Defaults to `false` (full replacement).
+   */
+  incremental?: boolean;
+  /**
+   * Expected leaf count after the update. The contract rejects the submission
+   * when this does not match the recomputed tree size, guarding against
+   * truncated batches.
+   */
+  expectedLeafCount?: number;
+}
+
+/**
+ * Options for verifying a merkle proof against an on-chain root.
+ */
+export interface VerifyMerkleProofOptions extends CallOptions {
+  /**
+   * Expected merkle root. When omitted the SDK fetches the stored root for
+   * {@link MerkleBatchRoot.batchId} from the contract before verifying.
+   */
+  root?: string;
+  /** Batch identifier whose stored root should be used when `root` is omitted. */
+  batchId?: string;
+}

@@ -2,6 +2,7 @@ import { SorobanRpc, Contract, TransactionBuilder, Transaction, Account, xdr, BA
 import type { SorobanIdentityConfig, SorobanIdentityLogger, AccountInfo } from "./types";
 import { ClientDisposedError, SorobanIdentityError, wrapNetworkError } from "./errors";
 import { retryWithBackoff } from "./utils";
+import { SessionEncryption, type EncryptedEnvelope } from "./encryption";
 
 /** Semantic version of this SDK build — must match package.json `version`. */
 export const SDK_VERSION = "0.1.0";
@@ -57,6 +58,16 @@ export abstract class BaseClient {
   protected requestQueue: RequestQueue;
   protected logger: SorobanIdentityLogger;
   private _disposed = false;
+
+  /**
+   * Active session encryption context, established lazily via
+   * {@link BaseClient.negotiateSessionKey}. `null` until a key exchange has
+   * completed; sensitive responses are only decrypted once this is set.
+   */
+  protected sessionEncryption: SessionEncryption | null = null;
+
+  /** Identifier of the currently negotiated session key, if any. */
+  protected sessionKeyId: string | null = null;
 
   /**
    * Resolves when the RPC node reports healthy status; rejects with a
@@ -146,12 +157,141 @@ export abstract class BaseClient {
   dispose(): void {
     if (this._disposed) return;
     this._disposed = true;
+    this.sessionEncryption = null;
+    this.sessionKeyId = null;
     this.requestQueue.dispose();
   }
 
   /** Returns `true` after {@link dispose} has been called. */
   get isDisposed(): boolean {
     return this._disposed;
+  }
+
+  /**
+   * Negotiate a per-session encryption key with the key-exchange endpoint.
+   *
+   * Performs an ephemeral ECDH key exchange, derives a shared AES-GCM key via
+   * HKDF, and stores the resulting {@link SessionEncryption} context along with
+   * the server-assigned session key id. Subsequent responses carrying an
+   * encrypted envelope are transparently decrypted before being returned to
+   * callers.
+   *
+   * Safe to call multiple times — each call rotates the session key.
+   *
+   * @example
+   * ```ts
+   * await client.negotiateSessionKey();
+   * const cred = await client.getCredential(caller, id); // decrypted transparently
+   * ```
+   *
+   * @throws {SorobanIdentityError} if the key exchange fails.
+   */
+  async negotiateSessionKey(): Promise<{ keyId: string }> {
+    if (this._disposed) {
+      throw new ClientDisposedError();
+    }
+    const encryption = new SessionEncryption();
+    const clientPublicKey = encryption.exportPublicKey();
+
+    const response = await this.executeWithFailover(async (server) => {
+      const result = await server.getHealth();
+      return result;
+    }).catch(() => undefined);
+
+    // The key-exchange endpoint is exposed via the contract's RPC surface.
+    // We request the server's ephemeral public key and session key id.
+    const exchange = await this._requestKeyExchange(clientPublicKey, response);
+
+    encryption.deriveSharedKey(exchange.serverPublicKey);
+    this.sessionEncryption = encryption;
+    this.sessionKeyId = exchange.keyId;
+    this.debug("encryption.session_established", { keyId: exchange.keyId });
+    return { keyId: exchange.keyId };
+  }
+
+  /**
+   * Perform the key-exchange round trip against the configured RPC endpoint.
+   *
+   * @param clientPublicKey Base64-encoded ephemeral client public key.
+   * @param _health         Optional health probe result (unused placeholder).
+   * @returns Server ephemeral public key and the assigned session key id.
+   */
+  protected async _requestKeyExchange(
+    clientPublicKey: string,
+    _health?: unknown
+  ): Promise<{ serverPublicKey: string; keyId: string }> {
+    const rpcUrl = (this.servers[this.currentServerIndex] as unknown as { serverURL?: string })
+      .serverURL;
+    if (!rpcUrl) {
+      throw new SorobanIdentityError("No RPC URL available for key exchange", "CLIENT_NOT_READY");
+    }
+
+    try {
+      const res = await fetch(`${rpcUrl}/key-exchange`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientPublicKey }),
+      });
+      if (!res.ok) {
+        throw new SorobanIdentityError(
+          `Key exchange failed with status ${res.status}`,
+          "CLIENT_NOT_READY"
+        );
+      }
+      const data = (await res.json()) as { serverPublicKey: string; keyId: string };
+      if (!data?.serverPublicKey || !data?.keyId) {
+        throw new SorobanIdentityError("Malformed key exchange response", "CLIENT_NOT_READY");
+      }
+      return { serverPublicKey: data.serverPublicKey, keyId: data.keyId };
+    } catch (err) {
+      if (err instanceof SorobanIdentityError) throw err;
+      wrapNetworkError(err, rpcUrl, "keyExchange");
+    }
+  }
+
+  /**
+   * Rotate the current session key by negotiating a fresh one.
+   *
+   * @returns The new session key id.
+   */
+  async rotateSessionKey(): Promise<{ keyId: string }> {
+    return this.negotiateSessionKey();
+  }
+
+  /**
+   * Decrypt an encrypted response envelope using the active session key.
+   *
+   * If no session key has been negotiated, or the value is not an envelope,
+   * the input is returned unchanged so non-encrypted responses keep working.
+   *
+   * @param value Raw response value, possibly an {@link EncryptedEnvelope}.
+   * @returns Decrypted plaintext value.
+   */
+  protected decryptResponse<T>(value: T): T {
+    if (!this.sessionEncryption || !this._isEncryptedEnvelope(value)) {
+      return value;
+    }
+    try {
+      const plaintext = this.sessionEncryption.decrypt(value);
+      return JSON.parse(plaintext) as T;
+    } catch (err) {
+      throw new SorobanIdentityError(
+        `Failed to decrypt response envelope: ${err instanceof Error ? err.message : String(err)}`,
+        "CONTRACT_ERROR",
+        err
+      );
+    }
+  }
+
+  /** Type guard for {@link EncryptedEnvelope} shaped values. */
+  private _isEncryptedEnvelope(value: unknown): value is EncryptedEnvelope {
+    return (
+      typeof value === "object" &&
+      value !== null &&
+      typeof (value as EncryptedEnvelope).iv === "string" &&
+      typeof (value as EncryptedEnvelope).ciphertext === "string" &&
+      typeof (value as EncryptedEnvelope).tag === "string"
+    );
   }
 
   /**

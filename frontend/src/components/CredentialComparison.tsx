@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useCallback } from "react";
 import type { Credential } from "../../../sdk/src/types";
 import { ReputationClient } from "../../../sdk/src/reputation";
 import { getNetworkConfig } from "../network";
 import { formatTimestamp } from "../utils/formatDate";
+import { exportToPdf, exportToPng } from "../export/pdf";
 
 export interface CredentialComparisonProps {
   credentials: Credential[];
@@ -66,15 +67,35 @@ export function getCredentialVerificationStatus(credential: Credential): Verific
   return { status: "active", isValid: true, label: "Valid / Active" };
 }
 
+export const MIN_COMPARE = 2;
+export const MAX_COMPARE = 4;
+
+/**
+ * Builds a shareable comparison URL encoding the selected credential IDs.
+ */
+export function buildComparisonLink(credentialIds: string[]): string {
+  const ids = credentialIds.slice(0, MAX_COMPARE).join(",");
+  const base =
+    typeof window !== "undefined" && window.location
+      ? `${window.location.origin}${window.location.pathname}`
+      : "";
+  return `${base}?compare=${encodeURIComponent(ids)}`;
+}
+
 export const CredentialComparison: React.FC<CredentialComparisonProps> = ({
   credentials,
   onRemoveCredential,
 }) => {
   // Support 2 to 4 credentials
-  const visibleCredentials = useMemo(() => credentials.slice(0, 4), [credentials]);
+  const visibleCredentials = useMemo(
+    () => credentials.slice(0, MAX_COMPARE),
+    [credentials]
+  );
   const [showOnlyDifferences, setShowOnlyDifferences] = useState<boolean>(false);
   const [reputationScores, setReputationScores] = useState<Record<string, number | null>>({});
   const [isLoadingReputation, setIsLoadingReputation] = useState<boolean>(false);
+  const [toast, setToast] = useState<string | null>(null);
+  const [isExporting, setIsExporting] = useState<boolean>(false);
 
   // Load issuer reputation scores
   useEffect(() => {
@@ -147,103 +168,124 @@ export const CredentialComparison: React.FC<CredentialComparisonProps> = ({
     return expiries.size > 1;
   }, [visibleCredentials]);
 
-  // Export comparison as PDF report
-  const handleExportPDF = () => {
-    const reportHtml = `
-      <!DOCTYPE html>
-      <html>
-        <head>
-          <title>Credential Comparison Report</title>
-          <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 24px; color: #1e293b; }
-            h1 { font-size: 20px; margin-bottom: 8px; }
-            p { font-size: 13px; color: #64748b; margin-bottom: 20px; }
-            table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 13px; }
-            th, td { border: 1px solid #cbd5e1; padding: 8px 12px; text-align: left; }
-            th { background: #f8fafc; font-weight: 600; }
-            .diff { background: #fef3c7; }
-            .badge { display: inline-block; padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 11px; }
-            .valid { background: #dcfce7; color: #166534; }
-            .expired { background: #fef9c3; color: #854d0e; }
-            .revoked { background: #fee2e2; color: #991b1b; }
-          </style>
-        </head>
-        <body>
-          <h1>Credential Comparison Report</h1>
-          <p>Generated on ${new Date().toLocaleString()} • Comparing ${visibleCredentials.length} credentials</p>
-          <table>
-            <thead>
-              <tr>
-                <th>Property</th>
-                ${visibleCredentials.map((c, i) => `<th>Credential #${i + 1} (${c.id.slice(0, 8)}...)</th>`).join("")}
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td><strong>Verification Status</strong></td>
-                ${visibleCredentials
-                  .map((c) => {
-                    const st = getCredentialVerificationStatus(c);
-                    return `<td><span class="badge ${st.status}">${st.label}</span></td>`;
-                  })
-                  .join("")}
-              </tr>
-              <tr class="${isTypeDiff ? "diff" : ""}">
-                <td><strong>Credential Type</strong></td>
-                ${visibleCredentials.map((c) => `<td>${c.credentialType}</td>`).join("")}
-              </tr>
-              <tr class="${isIssuerDiff ? "diff" : ""}">
-                <td><strong>Issuer</strong></td>
-                ${visibleCredentials.map((c) => `<td style="font-family: monospace;">${c.issuer}</td>`).join("")}
-              </tr>
-              <tr>
-                <td><strong>Issuer Reputation Score</strong></td>
-                ${visibleCredentials.map((c) => `<td>${reputationScores[c.issuer] ?? "N/A"}/100</td>`).join("")}
-              </tr>
-              <tr class="${isExpiryDiff ? "diff" : ""}">
-                <td><strong>Expires At</strong></td>
-                ${visibleCredentials
-                  .map((c) => `<td>${c.expiresAt === 0 ? "No Expiry" : formatTimestamp(c.expiresAt)}</td>`)
-                  .join("")}
-              </tr>
-              ${claimDiffs
-                .map(
-                  (d) => `
-                <tr class="${d.hasDifference ? "diff" : ""}">
-                  <td><strong>Claim: ${d.key}</strong></td>
-                  ${visibleCredentials.map((c) => `<td>${c.claims[d.key] || '<span style="color:#94a3b8">(none)</span>'}</td>`).join("")}
-                </tr>
-              `
-                )
-                .join("")}
-            </tbody>
-          </table>
-        </body>
-      </html>
-    `;
+  // Build a structured report model shared by PDF and PNG exports.
+  const buildReport = useCallback(() => {
+    const rows: Array<{ label: string; values: string[]; isDiff: boolean }> = [];
 
-    // Download formatted report or trigger print to PDF
-    const printWindow = window.open("", "_blank");
-    if (printWindow) {
-      printWindow.document.write(reportHtml);
-      printWindow.document.close();
-      printWindow.focus();
-      setTimeout(() => {
-        printWindow.print();
-      }, 300);
-    } else {
-      // Fallback to text file download
-      const blob = new Blob([reportHtml], { type: "application/pdf" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `credential-comparison-${Date.now()}.html`;
-      a.click();
-      URL.revokeObjectURL(url);
+    rows.push({
+      label: "Verification Status",
+      values: visibleCredentials.map((c) => getCredentialVerificationStatus(c).label),
+      isDiff: new Set(visibleCredentials.map((c) => getCredentialVerificationStatus(c).status)).size > 1,
+    });
+    rows.push({
+      label: "Credential Type",
+      values: visibleCredentials.map((c) => c.credentialType),
+      isDiff: isTypeDiff,
+    });
+    rows.push({
+      label: "Issuer",
+      values: visibleCredentials.map((c) => c.issuer),
+      isDiff: isIssuerDiff,
+    });
+    rows.push({
+      label: "Issuer Reputation",
+      values: visibleCredentials.map((c) => {
+        const score = reputationScores[c.issuer];
+        return score !== undefined && score !== null ? `${score}/100` : "N/A";
+      }),
+      isDiff: new Set(visibleCredentials.map((c) => reputationScores[c.issuer] ?? null)).size > 1,
+    });
+    rows.push({
+      label: "Expires At",
+      values: visibleCredentials.map((c) =>
+        c.expiresAt === 0 ? "No Expiry" : formatTimestamp(c.expiresAt)
+      ),
+      isDiff: isExpiryDiff,
+    });
+
+    claimDiffs.forEach((d) => {
+      rows.push({
+        label: `Claim: ${d.key}`,
+        values: visibleCredentials.map((c) => c.claims?.[d.key] ?? "(not present)"),
+        isDiff: d.hasDifference,
+      });
+    });
+
+    return {
+      title: "Credential Comparison Report",
+      subtitle: `Generated on ${new Date().toLocaleString()} • Comparing ${visibleCredentials.length} credentials`,
+      columns: visibleCredentials.map((c, i) => `Credential #${i + 1} (${c.id.slice(0, 8)}...)`),
+      rows,
+    };
+  }, [
+    visibleCredentials,
+    reputationScores,
+    claimDiffs,
+    isTypeDiff,
+    isIssuerDiff,
+    isExpiryDiff,
+  ]);
+
+  // Export comparison as PDF report using jsPDF helpers
+  const handleExportPDF = useCallback(async () => {
+    if (visibleCredentials.length < MIN_COMPARE) return;
+    setIsExporting(true);
+    try {
+      const report = buildReport();
+      await exportToPdf(report, `credential-comparison-${Date.now()}.pdf`);
+      setToast("Comparison exported as PDF");
+    } catch {
+      setToast("Failed to export PDF");
+    } finally {
+      setIsExporting(false);
     }
-  };
+  }, [buildReport, visibleCredentials.length]);
 
-  if (visibleCredentials.length < 2) {
+  // Export comparison as PNG image
+  const handleExportImage = useCallback(async () => {
+    if (visibleCredentials.length < MIN_COMPARE) return;
+    setIsExporting(true);
+    try {
+      const report = buildReport();
+      await exportToPng(report, `credential-comparison-${Date.now()}.png`);
+      setToast("Comparison exported as image");
+    } catch {
+      setToast("Failed to export image");
+    } finally {
+      setIsExporting(false);
+    }
+  }, [buildReport, visibleCredentials.length]);
+
+  // Copy a shareable comparison link to the clipboard
+  const handleCopyLink = useCallback(async () => {
+    const link = buildComparisonLink(visibleCredentials.map((c) => c.id));
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(link);
+      } else {
+        const textarea = document.createElement("textarea");
+        textarea.value = link;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+      }
+      setToast("Comparison link copied to clipboard");
+    } catch {
+      setToast("Failed to copy comparison link");
+    }
+  }, [visibleCredentials]);
+
+  // Auto-dismiss toast notifications
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), 2500);
+    return () => clearTimeout(timer);
+  }, [toast]);
+
+  if (visibleCredentials.length < MIN_COMPARE) {
     return (
       <div
         style={{
@@ -333,10 +375,49 @@ export const CredentialComparison: React.FC<CredentialComparisonProps> = ({
             <span style={{ fontWeight: 600 }}>Show Only Differences</span>
           </label>
 
+          {/* Copy comparison link */}
+          <button
+            type="button"
+            onClick={handleCopyLink}
+            style={{
+              background: "transparent",
+              color: "var(--accent, #7c3aed)",
+              border: "1px solid var(--accent, #7c3aed)",
+              borderRadius: "6px",
+              padding: "0.45rem 1rem",
+              fontSize: "0.85rem",
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            Copy comparison link
+          </button>
+
+          {/* Export Image Button */}
+          <button
+            type="button"
+            onClick={handleExportImage}
+            disabled={isExporting}
+            style={{
+              background: "transparent",
+              color: "var(--accent, #7c3aed)",
+              border: "1px solid var(--accent, #7c3aed)",
+              borderRadius: "6px",
+              padding: "0.45rem 1rem",
+              fontSize: "0.85rem",
+              fontWeight: 600,
+              cursor: isExporting ? "not-allowed" : "pointer",
+              opacity: isExporting ? 0.6 : 1,
+            }}
+          >
+            Export as Image
+          </button>
+
           {/* Export PDF Button */}
           <button
             type="button"
             onClick={handleExportPDF}
+            disabled={isExporting}
             style={{
               background: "var(--accent, #7c3aed)",
               color: "#ffffff",
@@ -345,13 +426,32 @@ export const CredentialComparison: React.FC<CredentialComparisonProps> = ({
               padding: "0.45rem 1rem",
               fontSize: "0.85rem",
               fontWeight: 600,
-              cursor: "pointer",
+              cursor: isExporting ? "not-allowed" : "pointer",
+              opacity: isExporting ? 0.6 : 1,
             }}
           >
             Export as PDF
           </button>
         </div>
       </div>
+
+      {/* Toast confirmation */}
+      {toast && (
+        <div
+          role="status"
+          style={{
+            marginBottom: "1rem",
+            padding: "0.5rem 0.75rem",
+            borderRadius: "6px",
+            background: "var(--badge-green-bg, #dcfce7)",
+            color: "var(--badge-green-text, #166534)",
+            fontSize: "0.85rem",
+            fontWeight: 600,
+          }}
+        >
+          {toast}
+        </div>
+      )}
 
       {/* Comparison Multi-Column Table / Grid */}
       <div style={{ overflowX: "auto" }}>

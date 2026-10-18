@@ -249,12 +249,12 @@ export function buildRevokeBatchArgs(params: {
 export function buildRenewCredentialArgs(params: {
   issuer: string;
   credentialId: Buffer;
-  newExpiresAt: number;
+  newExpiresAt: number | bigint;
 }): xdr.ScVal[] {
   return [
     nativeToScVal(params.issuer, { type: 'address' }),
     nativeToScVal(params.credentialId, { type: 'bytes' }),
-    nativeToScVal(params.newExpiresAt, { type: 'u64' }),
+    encodeU64(params.newExpiresAt),
   ];
 }
 

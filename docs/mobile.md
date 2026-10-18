@@ -144,7 +144,58 @@ A full-screen camera view uses `react-native-vision-camera` to scan a verifier's
 
 All sensitive operations (opening the credential store, signing a transaction, approving a presentation) require biometric verification. The app uses `react-native-biometrics` to invoke Face ID, Touch ID, or Android Biometric Prompt.
 
-Fallback: if biometrics are unavailable or disabled, the app prompts for a 6-digit PIN. The PIN is stored in the system keychain, not in AsyncStorage.
+The mobile app is a native client for the same WebAuthn-based biometric authentication implemented in the frontend. See [Frontend WebAuthn implementation](./webauthn.md) for the browser-side registration and assertion flows, the credential data model, and the relying-party configuration. The mobile app registers and asserts against the same relying party ID and backend endpoints, so a credential enrolled on the web can be managed from the device management screen and vice versa.
+
+#### Platform authenticators
+
+| Platform | Authenticator | Notes |
+|----------|---------------|-------|
+| iOS | Face ID / Touch ID | Exposed through `ASAuthorizationPlatformPublicKeyCredentialProvider`; requires `NSFaceIDUsageDescription` in `Info.plist` |
+| Android | Biometric Prompt | Backed by `androidx.biometric`; supports fingerprint, face, and iris where the OEM provides them |
+| Windows / macOS | Windows Hello / Touch ID | Supported by the desktop build of the frontend; see [Frontend WebAuthn implementation](./webauthn.md) |
+
+Platform authenticators are preferred over roaming (security key) authenticators. The app requests `authenticatorAttachment: 'platform'` during registration and checks `isPlatformAuthenticatorAvailable()` before offering biometric enrolment.
+
+#### Registration flow
+
+1. User enables biometrics from **Settings → Security → Biometric authentication**.
+2. App calls the backend registration options endpoint to obtain a `PublicKeyCredentialCreationOptions` challenge.
+3. `react-native-biometrics` invokes the platform authenticator (Face ID, Touch ID, or Biometric Prompt).
+4. The generated credential is sent to the backend verification endpoint and stored server-side.
+5. The credential ID and metadata are cached locally for the device management screen.
+
+#### Assertion flow
+
+1. A gated action (app foreground, viewing claims, approving a presentation, signing a DID transaction) triggers an assertion.
+2. App requests a fresh challenge from the backend.
+3. The platform authenticator signs the challenge.
+4. The backend verifies the signature and the app proceeds with the action.
+
+#### Fallback to password / PIN
+
+If biometrics are unavailable, not enrolled, or fail repeatedly, the app falls back to a 6-digit PIN. The PIN is stored in the system keychain, not in AsyncStorage. Users can also fall back to password authentication against the Soroban Identity API when the PIN is unavailable (for example, after a device restore). The fallback path is always offered — biometrics are never the sole authentication factor.
+
+#### Secure credential storage
+
+| Platform | Store | Notes |
+|----------|-------|-------|
+| iOS | Keychain | `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`; biometric-gated entries use `SecAccessControl` with `.biometryCurrentSet` |
+| Android | Keystore | Keys generated with `setUserAuthenticationRequired(true)`; credential blobs encrypted with an AES key held in the Keystore |
+
+Credential IDs and public key material are stored in the Keychain/Keystore; private keys never leave the platform authenticator. The device management screen lists enrolled credentials and allows the user to revoke any of them.
+
+#### Device management UI
+
+The **Settings → Security → Devices** screen lists every enrolled credential with its platform, enrolment date, and last-used timestamp. Users can rename a device, revoke a credential (which deletes it server-side and clears the local cache), or enrol an additional authenticator.
+
+#### Cross-platform testing
+
+Biometric flows must be smoke-tested on each target platform before a release:
+
+- **iOS:** Face ID on a device with a TrueDepth camera, Touch ID on a device with a Home button; test both enrolment and assertion, plus the PIN fallback.
+- **Android:** Biometric Prompt on a device with fingerprint and, where available, face unlock; test API 28+ (BiometricPrompt) and the legacy fingerprint path.
+- **Windows / macOS:** Windows Hello and Touch ID via the desktop frontend build; verify the same credential works across the web and mobile clients.
+- **Fallback:** Disable biometrics in OS settings and confirm the PIN/password fallback is offered.
 
 Biometric auth gates:
 
@@ -234,3 +285,4 @@ The app targets WCAG 2.1 AA. Key requirements:
 - [OAuth2](./oauth2.md)
 - [API server](./api-server.md)
 - [Accessibility](./accessibility.md)
+- [Frontend WebAuthn implementation](./webauthn.md)

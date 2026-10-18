@@ -93,6 +93,35 @@ export const schemas = {
     body: looseObject({ name: z.string().min(1).optional(), scopes: z.array(z.string()).optional(), tier: optionalText }),
   }),
   rotateApiKey: looseObject({ body: looseObject({ name: optionalText }) }),
+  keyExchange: looseObject({
+    body: looseObject({
+      clientPublicKey: z.string().min(1),
+      keyId: optionalText,
+      algorithm: z.enum(['AES-GCM']).optional(),
+    }),
+  }),
+  keyExchangeResponse: looseObject({
+    body: looseObject({
+      keyId: z.string().min(1),
+      serverPublicKey: z.string().min(1),
+      algorithm: z.enum(['AES-GCM']),
+      expiresAt: z.string().min(1),
+      rotationIntervalSeconds: z.coerce.number().int().min(1).optional(),
+    }),
+  }),
+  rotateEncryptionKey: looseObject({
+    body: looseObject({ keyId: optionalText }),
+  }),
+  encryptedEnvelope: looseObject({
+    body: looseObject({
+      keyId: z.string().min(1),
+      algorithm: z.enum(['AES-GCM']),
+      iv: z.string().min(1),
+      ciphertext: z.string().min(1),
+      tag: z.string().min(1),
+      aad: optionalText,
+    }),
+  }),
 };
 
 function normalizeInput(input = {}) {

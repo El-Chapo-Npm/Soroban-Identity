@@ -18,6 +18,9 @@ export class EventStore extends EventEmitter {
     this.snapshotInterval = options.snapshotInterval || 50; // Snapshot every 50 events per aggregate
     this._initialized = false;
     this._lock = Promise.resolve();
+    this._sequence = 0; // Monotonic global sequence number
+    this._subscribers = new Set(); // Live stream subscribers
+    this._lastAppendAt = null;
   }
 
   async init() {
@@ -29,8 +32,6 @@ export class EventStore extends EventEmitter {
 
   async append(event) {
     await this.init();
-    const serialized = EventSerializer.serialize(event);
-    const line = `${serialized}\n`;
 
     // Mutex write to ensure append-only consistency
     let release;
@@ -38,21 +39,91 @@ export class EventStore extends EventEmitter {
     const currentLock = this._lock;
     this._lock = currentLock.then(() => nextLock);
 
+    let stored;
     try {
       await currentLock;
+      // Assign monotonic sequence and freeze the record to keep it immutable
+      this._sequence += 1;
+      stored = Object.freeze({
+        ...event,
+        sequence: this._sequence,
+        recordedAt: new Date().toISOString(),
+      });
+      const serialized = EventSerializer.serialize(stored);
+      const line = `${serialized}\n`;
       await fs.appendFile(this.eventsFilePath, line, 'utf8');
+      this._lastAppendAt = Date.now();
     } finally {
       release();
     }
 
     // Emit live event for real-time subscribers
-    this.emit('event', event);
-    this.emit(`event:${event.type}`, event);
-    if (event.tenantId) {
-      this.emit(`tenant:${event.tenantId}`, event);
+    this.emit('event', stored);
+    this.emit(`event:${stored.type}`, stored);
+    if (stored.tenantId) {
+      this.emit(`tenant:${stored.tenantId}`, stored);
     }
 
-    return event;
+    // Notify live stream subscribers
+    for (const subscriber of this._subscribers) {
+      try {
+        subscriber(stored);
+      } catch (err) {
+        logger.warn({ err }, 'Event store subscriber threw during dispatch');
+      }
+    }
+
+    return stored;
+  }
+
+  /**
+   * Subscribe to the live stream of newly appended events.
+   * Returns an unsubscribe function.
+   */
+  subscribe(handler, { filter = null } = {}) {
+    if (typeof handler !== 'function') {
+      throw new TypeError('EventStore.subscribe requires a handler function');
+    }
+    const wrapped = (event) => {
+      if (filter && !filter(event)) return;
+      handler(event);
+    };
+    this._subscribers.add(wrapped);
+    return () => {
+      this._subscribers.delete(wrapped);
+    };
+  }
+
+  /**
+   * Stream events from a given sequence (exclusive) onward, invoking handler for each.
+   */
+  async streamFrom(sequence, handler) {
+    const events = await this.getEvents();
+    const ordered = events
+      .filter((e) => typeof e.sequence === 'number' && e.sequence > sequence)
+      .sort((a, b) => a.sequence - b.sequence);
+    for (const event of ordered) {
+      await handler(event);
+    }
+    return ordered.length;
+  }
+
+  /**
+   * Expose metrics about store size and event lag.
+   */
+  async getMetrics() {
+    const events = await this.getEvents();
+    const lastEvent = events.length > 0 ? events[events.length - 1] : null;
+    const lastTimestamp = lastEvent ? new Date(lastEvent.timestamp).getTime() : null;
+    const lagMs = lastTimestamp ? Date.now() - lastTimestamp : 0;
+    return {
+      eventCount: events.length,
+      sequence: this._sequence,
+      subscriberCount: this._subscribers.size,
+      lastAppendAt: this._lastAppendAt ? new Date(this._lastAppendAt).toISOString() : null,
+      lastEventTimestamp: lastEvent ? lastEvent.timestamp : null,
+      eventLagMs: lagMs,
+    };
   }
 
   /**
@@ -72,6 +143,9 @@ export class EventStore extends EventEmitter {
           if (tenantId && event.tenantId !== tenantId) continue;
           if (fromTimestamp && new Date(event.timestamp) < new Date(fromTimestamp)) continue;
           events.push(event);
+          if (typeof event.sequence === 'number' && event.sequence > this._sequence) {
+            this._sequence = event.sequence;
+          }
         } catch {
           // ignore corrupted lines
         }

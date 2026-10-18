@@ -53,6 +53,24 @@ export const DEFAULT_MAX_AGE_SECONDS = 300;
 /** Bound on the nonce cache so a flood of signed requests cannot exhaust memory. */
 const MAX_TRACKED_NONCES = 100_000;
 
+/** How long a used nonce is remembered, in seconds. */
+export const NONCE_TTL_SECONDS = 300;
+
+/** Namespace prefix for nonce keys held in Redis. */
+const NONCE_REDIS_PREFIX = 'request-signing:nonce';
+
+/**
+ * Generate a fresh, unpredictable nonce for a request.
+ *
+ * 16 random bytes (128 bits) make accidental collisions between honest clients
+ * vanishingly unlikely, and make guessing a peer's next nonce infeasible.
+ *
+ * @returns {string} 32-character hex string
+ */
+export function generateNonce() {
+  return crypto.randomBytes(16).toString('hex');
+}
+
 /**
  * SHA-256 of a request body, hex encoded.
  *
@@ -182,6 +200,81 @@ export class NonceStore {
 }
 
 /**
+ * Redis-backed nonce store for multi-instance deployments.
+ *
+ * The in-memory store only prevents replays that land on the same process; a
+ * load balancer spreading requests across replicas would let a captured
+ * request be replayed once per replica. Redis gives every instance one shared
+ * view of which nonces have been spent.
+ *
+ * `SET key value NX EX ttl` is a single atomic command, so two concurrent
+ * requests carrying the same nonce cannot both succeed: exactly one observes
+ * the key as absent and sets it, the other sees it already present. The TTL is
+ * applied by Redis itself, so entries expire even if this process dies.
+ *
+ * If Redis is unreachable the store falls back to the in-memory implementation
+ * rather than failing every signed request; the fallback still blocks replays
+ * within a single process. A store that is at capacity fails closed, matching
+ * the in-memory behaviour.
+ */
+export class RedisNonceStore {
+  /**
+   * @param {object} options
+   * @param {object} options.redis - Redis client exposing `set(key, value, options)`
+   * @param {number} [options.ttlSeconds=NONCE_TTL_SECONDS]
+   * @param {number} [options.maxEntries=MAX_TRACKED_NONCES]
+   * @param {Function} [options.now] - Injectable clock, milliseconds
+   * @param {NonceStore} [options.fallback] - Used when Redis is unavailable
+   */
+  constructor({
+    redis,
+    ttlSeconds = NONCE_TTL_SECONDS,
+    maxEntries = MAX_TRACKED_NONCES,
+    now = Date.now,
+    fallback,
+  } = {}) {
+    if (!redis) throw new Error('RedisNonceStore requires a redis client');
+    this.redis = redis;
+    this.ttlSeconds = ttlSeconds;
+    this.fallback = fallback ?? new NonceStore({ ttlSeconds, maxEntries, now });
+  }
+
+  /** Build the namespaced Redis key for a nonce. */
+  keyFor(nonce, scope = '') {
+    return `${NONCE_REDIS_PREFIX}:${scope}:${nonce}`;
+  }
+
+  /**
+   * Record a nonce, reporting whether it had already been used.
+   *
+   * @param {string} nonce
+   * @param {string} [scope] - Key id, so two clients may pick the same nonce
+   * @returns {Promise<boolean>} True when the nonce is fresh, false on replay
+   */
+  async consume(nonce, scope = '') {
+    const key = this.keyFor(nonce, scope);
+    try {
+      // `NX` only sets the key when it does not already exist, and `EX` makes
+      // Redis expire it after the freshness window. A null reply means the key
+      // was already there — a replay.
+      const result = await this.redis.set(key, '1', { NX: true, EX: this.ttlSeconds });
+      if (result === null || result === undefined) return false;
+      if (result === false) return false;
+      return true;
+    } catch {
+      // Redis is down or misconfigured. Fall back to the in-process store so
+      // signed traffic keeps flowing; replays are still blocked per instance.
+      return this.fallback.consume(nonce, scope);
+    }
+  }
+
+  /** Forget every nonce. Intended for tests. */
+  clear() {
+    this.fallback.clear();
+  }
+}
+
+/**
  * Verify a signed request.
  *
  * Failures are returned rather than thrown, and each carries a machine-usable
@@ -194,7 +287,7 @@ export class NonceStore {
  * @param {string} params.path             - Path including query string
  * @param {Buffer|string} [params.body]    - Exact bytes received
  * @param {string} params.secret           - Signing secret for the calling key
- * @param {NonceStore} params.nonceStore
+ * @param {NonceStore|RedisNonceStore} params.nonceStore
  * @param {number} [params.maxAgeSeconds]
  * @param {string} [params.scope]          - Key id the nonce is namespaced under
  * @param {Function} [params.now]          - Injectable clock, milliseconds
@@ -280,7 +373,10 @@ export function verifySignedRequest({
 
   // The nonce is consumed only after the signature checks out, so an attacker
   // cannot burn a legitimate client's nonces by sending garbage signatures.
-  if (!nonceStore.consume(String(nonce), scope)) {
+  // `consume` may be async (RedisNonceStore) or sync (NonceStore); awaiting a
+  // non-promise is a no-op, so both work here.
+  const fresh = await nonceStore.consume(String(nonce), scope);
+  if (!fresh) {
     return {
       ok: false,
       status: 409,

@@ -1,6 +1,89 @@
 /* ── Page layout (#882) ──────────────────────────────────────────────────────
    See ./index.css for the breakpoint scale. */
 
+/* ── View transitions (#1044) ────────────────────────────────────────────────
+   Only transform/opacity are animated so view changes stay on the compositor
+   and never trigger reflow on low-end devices. */
+
+@keyframes view-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 8px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes view-exit {
+  from {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    opacity: 0;
+    transform: translate3d(0, -8px, 0);
+  }
+}
+
+@keyframes header-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(0, -6px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes card-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 12px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+/* Applied to the container whenever the active view changes. */
+.container--view-enter {
+  animation: view-enter 220ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+  will-change: opacity, transform;
+}
+
+.container--view-exit {
+  animation: view-exit 160ms cubic-bezier(0.4, 0, 1, 1) both;
+  will-change: opacity, transform;
+}
+
+.app-header--view-enter {
+  animation: header-enter 200ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
+/* Staggered entry for cards / list items inside a freshly mounted view. */
+.card--enter {
+  animation: card-enter 240ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
+.card--exit {
+  animation: view-exit 140ms cubic-bezier(0.4, 0, 1, 1) both;
+}
+
+/* Drop the compositor hint once the animation has settled. */
+.container--view-enter,
+.container--view-exit {
+  animation-fill-mode: both;
+}
+
+.container--view-enter:not(:active),
+.container--view-exit:not(:active) {
+  will-change: auto;
+}
+
 html {
   /* Keep text at the size we set when a phone rotates to landscape. */
   -webkit-text-size-adjust: 100%;
@@ -161,6 +244,20 @@ video {
 
   .issuer-dashboard-container {
     padding: 0.5rem 0;
+  }
+}
+
+/* ── Reduced motion (#1044) ──────────────────────────────────────────────────
+   Honour the OS setting: keep the state change, drop the movement. */
+
+@media (prefers-reduced-motion: reduce) {
+  .container--view-enter,
+  .container--view-exit,
+  .app-header--view-enter,
+  .card--enter,
+  .card--exit {
+    animation: none;
+    will-change: auto;
   }
 }
 

@@ -4,6 +4,9 @@
 mod batch;
 pub use batch::{BatchFailureReason, BatchVerifyResult};
 
+mod merkle;
+pub use merkle::{MerkleBatch, MerkleProof};
+
 mod templates;
 pub use templates::{CredentialTemplate, TemplateRef};
 
@@ -12,6 +15,9 @@ mod versions;
 
 mod suspension;
 pub use suspension::{CredentialStatus, SuspensionReason, SuspensionRecord};
+
+mod bundle;
+pub use bundle::{BundleVerificationResult, CredentialBundle};
 
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
@@ -65,6 +71,16 @@ const CRL_LEAVES: Symbol = symbol_short!("CRLLEAF");
 const CRL_ROOT: Symbol = symbol_short!("CRLROOT");
 const CRL_PERIOD_SECS: u64 = 86_400;
 
+// ── Issue #1056: batch credential Merkle trees ───────────────────────────────
+/// Maps a batch id to the stored [`MerkleBatch`] metadata (root, leaf count,
+/// and the ordered leaf set used for incremental updates).
+const MERKLE_BATCH: Symbol = symbol_short!("MRKLBAT");
+/// Maps a batch id to its current Merkle root, kept separately so proof
+/// verification is a single small read.
+const MERKLE_ROOT: Symbol = symbol_short!("MRKLROOT");
+/// Maximum number of leaves accepted in a single batch.
+const MAX_MERKLE_LEAVES: u32 = 1_000;
+
 // ── Issue #951: standardized revocation reasons ──────────────────────────────
 /// Maps a credential ID to its [`RevocationRecord`].
 const REVOKE_REASON: Symbol = symbol_short!("REVRSN");
@@ -116,6 +132,14 @@ const ADMIN_SIGNERS: Symbol = symbol_short!("ADMSIG");
 const SIG_THRESHOLD: Symbol = symbol_short!("SIGTH");
 /// Admin action proposal expiration time in seconds (15 minutes).
 const ADMIN_ACTION_EXPIRATION_SECS: u64 = 900;
+
+// ── Issue #1057: credential escrow storage keys ──────────────────────────────
+/// Maps an escrow ID to its [`EscrowRecord`].
+const ESCROW: Symbol = symbol_short!("ESCROW");
+/// Sequence number for generating unique escrow IDs.
+const ESCROW_SEQ: Symbol = symbol_short!("ESCRSEQ");
+/// Reverse index: maps a depositor address to the escrow IDs they created.
+const ESCROW_BY_DEPOSITOR: Symbol = symbol_short!("ESCBYDEP");
 
 #[contracterror]
 #[derive(Clone, Debug, PartialEq, Copy)]
@@ -190,6 +214,10 @@ pub enum ContractError {
     CredentialSuspended = 51,
     /// Issue #856: the credential is not suspended, so it cannot be reactivated.
     CredentialNotSuspended = 52,
+    /// Issue #1058: credential bundle was not found.
+    BundleNotFound = 53,
+    /// Issue #1058: credential bundle must contain at least one credential.
+    EmptyBundle = 54,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -452,6 +480,14 @@ pub struct CredentialTransferRecord {
     pub approved_by_issuer: bool,
     pub transferred_at: u64,
 }
+
+/// Issue #1054: storage keys for the credential transfer subsystem.
+const TRANSFER: Symbol = symbol_short!("XFER");
+const TRANSFER_HISTORY: Symbol = symbol_short!("XFERHIST");
+const TRANSFER_AUTO_APPROVE: Symbol = symbol_short!("XFERAUTO");
+const TRANSFER_FEE: Symbol = symbol_short!("XFERFEE");
+const TRANSFER_FEE_COLLECTOR: Symbol = symbol_short!("XFERFCOL");
+const TRANSFER_POLICY: Symbol = symbol_short!("XFERPOL");
 
 /// A proof that a credential ID is included in a period-based revocation tree.
 #[contracttype]
@@ -1234,6 +1270,157 @@ impl CredentialManager {
         Ok(id)
     }
 
+    // ── Issue #1056: batch credential Merkle trees ────────────────────────────
+
+    /// Builds a Merkle tree over `credential_ids` and stores its root under
+    /// `batch_id`. Only the batch owner (the caller) may register a batch, and
+    /// the caller must be a registered issuer. Re-registering an existing
+    /// `batch_id` overwrites it, which is how incremental updates are seeded.
+    ///
+    /// Returns the computed Merkle root.
+    pub fn register_merkle_batch(
+        env: Env,
+        issuer: Address,
+        batch_id: BytesN<32>,
+        credential_ids: Vec<BytesN<32>>,
+    ) -> Result<BytesN<32>, ContractError> {
+        issuer.require_auth();
+        Self::require_not_paused(&env)?;
+        Self::require_issuer(&env, &issuer)?;
+        if credential_ids.len() == 0 || credential_ids.len() > MAX_MERKLE_LEAVES {
+            return Err(ContractError::BatchTooLarge);
+        }
+        let root = merkle::build_root(&env, &credential_ids);
+        let batch = MerkleBatch {
+            batch_id: batch_id.clone(),
+            issuer: issuer.clone(),
+            root: root.clone(),
+            leaf_count: credential_ids.len(),
+            leaves: credential_ids,
+            updated_at: env.ledger().timestamp(),
+        };
+        let batch_key = (MERKLE_BATCH, batch_id.clone());
+        env.storage().persistent().set(&batch_key, &batch);
+        env.storage()
+            .persistent()
+            .extend_ttl(&batch_key, TTL_MAX, TTL_MAX);
+        let root_key = (MERKLE_ROOT, batch_id.clone());
+        env.storage().persistent().set(&root_key, &root);
+        env.storage()
+            .persistent()
+            .extend_ttl(&root_key, TTL_MAX, TTL_MAX);
+        env.events().publish(
+            (CRED, symbol_short!("mrklreg")),
+            (EVENT_VERSION, batch_id, issuer, root.clone()),
+        );
+        Ok(root)
+    }
+
+    /// Returns the stored Merkle root for `batch_id`, or the all-zero hash when
+    /// no batch has been registered under that id.
+    pub fn get_merkle_root(env: Env, batch_id: BytesN<32>) -> BytesN<32> {
+        env.storage()
+            .persistent()
+            .get(&(MERKLE_ROOT, batch_id))
+            .unwrap_or_else(|| BytesN::from_array(&env, &[0u8; 32]))
+    }
+
+    /// Returns the full stored batch metadata (root, leaf count, leaves).
+    pub fn get_merkle_batch(
+        env: Env,
+        batch_id: BytesN<32>,
+    ) -> Result<MerkleBatch, ContractError> {
+        env.storage()
+            .persistent()
+            .get(&(MERKLE_BATCH, batch_id))
+            .ok_or(ContractError::CredentialNotFound)
+    }
+
+    /// Generates an inclusion proof for `credential_id` in the batch stored
+    /// under `batch_id`. This is the on-chain counterpart of the off-chain
+    /// proof-generation SDK helper.
+    pub fn get_merkle_proof(
+        env: Env,
+        batch_id: BytesN<32>,
+        credential_id: BytesN<32>,
+    ) -> Result<MerkleProof, ContractError> {
+        let batch: MerkleBatch = env
+            .storage()
+            .persistent()
+            .get(&(MERKLE_BATCH, batch_id.clone()))
+            .ok_or(ContractError::CredentialNotFound)?;
+        merkle::build_proof(&env, &batch.leaves, &credential_id)
+            .ok_or(ContractError::CredentialNotFound)
+    }
+
+    /// Verifies a Merkle inclusion proof against the root stored for `batch_id`.
+    ///
+    /// The proof is rejected (returns `false`) if the batch is unknown, the
+    /// proof shape is malformed, or the recomputed root does not match. This is
+    /// a pure read: no storage is written, keeping verification cheap.
+    pub fn verify_merkle_proof(
+        env: Env,
+        batch_id: BytesN<32>,
+        proof: MerkleProof,
+    ) -> bool {
+        let stored_root: BytesN<32> = match env
+            .storage()
+            .persistent()
+            .get(&(MERKLE_ROOT, batch_id))
+        {
+            Some(root) => root,
+            None => return false,
+        };
+        merkle::verify_proof(&env, &stored_root, &proof)
+    }
+
+    /// Incrementally adds a leaf to an existing batch and updates the stored
+    /// root. Only the batch's original issuer may update it. Adding a leaf that
+    /// is already present is a no-op that returns the current root.
+    pub fn update_merkle_batch(
+        env: Env,
+        issuer: Address,
+        batch_id: BytesN<32>,
+        credential_id: BytesN<32>,
+    ) -> Result<BytesN<32>, ContractError> {
+        issuer.require_auth();
+        Self::require_not_paused(&env)?;
+        let batch_key = (MERKLE_BATCH, batch_id.clone());
+        let mut batch: MerkleBatch = env
+            .storage()
+            .persistent()
+            .get(&batch_key)
+            .ok_or(ContractError::CredentialNotFound)?;
+        if batch.issuer != issuer {
+            return Err(ContractError::UnauthorizedIssuer);
+        }
+        if batch.leaves.contains(&credential_id) {
+            return Ok(batch.root);
+        }
+        if batch.leaf_count >= MAX_MERKLE_LEAVES {
+            return Err(ContractError::BatchTooLarge);
+        }
+        batch.leaves.push_back(credential_id.clone());
+        batch.leaf_count = batch.leaves.len();
+        batch.root = merkle::build_root(&env, &batch.leaves);
+        batch.updated_at = env.ledger().timestamp();
+        let root = batch.root.clone();
+        env.storage().persistent().set(&batch_key, &batch);
+        env.storage()
+            .persistent()
+            .extend_ttl(&batch_key, TTL_MAX, TTL_MAX);
+        let root_key = (MERKLE_ROOT, batch_id.clone());
+        env.storage().persistent().set(&root_key, &root);
+        env.storage()
+            .persistent()
+            .extend_ttl(&root_key, TTL_MAX, TTL_MAX);
+        env.events().publish(
+            (CRED, symbol_short!("mrklupd")),
+            (EVENT_VERSION, batch_id, issuer, root.clone()),
+        );
+        Ok(root)
+    }
+
     /// Returns the Merkle root for the revocation period containing `timestamp`.
     pub fn get_revocation_merkle_root(env: Env, issuer: Address, timestamp: u64) -> BytesN<32> {
         let period = Self::crl_period(timestamp);
@@ -1355,6 +1542,9 @@ impl CredentialManager {
         cred.revoked = true;
         env.storage().persistent().set(&key, &cred);
 
+    /// Issue #1054: enables or disables auto-approval of credential transfers.
+    /// When enabled, a subject-initiated transfer completes immediately without
+    /// requiring issuer confirmation.
     pub fn set_transfer_auto_approve(
         env: Env,
         admin: Address,
@@ -1377,88 +1567,102 @@ impl CredentialManager {
         Ok(())
     }
 
-    pub fn transfer_credential(
+    /// Issue #1054: configures the flat fee (in stroops) charged on each
+    /// completed credential transfer, and the address that receives it.
+    pub fn set_transfer_fee(
         env: Env,
-        subject: Address,
-        credential_id: BytesN<32>,
-        new_subject: Address,
+        admin: Address,
+        fee: i128,
+        collector: Address,
     ) -> Result<(), ContractError> {
-        subject.require_auth();
-        let auto_approve = env
+        admin.require_auth();
+        let stored: Address = env
             .storage()
             .instance()
-            .get(&Self::auto_approve_transfers_key())
-            .unwrap_or(false);
-
-        let mut cred: Credential = env
-            .storage()
-            .persistent()
-            .get(&Self::cred_key(&credential_id))
-            .ok_or(ContractError::CredentialNotFound)?;
-        if cred.subject != subject {
+            .get(&ADMIN)
+            .ok_or(ContractError::NotInitialized)?;
+        if stored != admin {
             return Err(ContractError::Unauthorized);
         }
-        if cred.revoked {
-            return Err(ContractError::CredentialRevoked);
+        if fee < 0 {
+            return Err(ContractError::InvalidTransferFee);
         }
-        if !auto_approve {
-            let request: CredentialTransferRequest = env
-                .storage()
-                .persistent()
-                .get(&Self::transfer_key(&credential_id))
-                .ok_or(ContractError::UnauthorizedIssuer)?;
-            if !request.approved_by_issuer || request.status != TransferStatus::Approved {
-                return Err(ContractError::UnauthorizedIssuer);
-            }
-        }
-
-        cred.subject = new_subject.clone();
         env.storage()
-            .persistent()
-            .set(&Self::cred_key(&credential_id), &cred);
-
-        let transfer_record = CredentialTransferRecord {
-            credential_id: credential_id.clone(),
-            from_subject: subject.clone(),
-            to_subject: new_subject.clone(),
-            transferred_by: subject.clone(),
-            approved_by_issuer: auto_approve,
-            transferred_at: env.ledger().timestamp(),
-        };
-
-        let mut history: Vec<CredentialTransferRecord> = env
-            .storage()
-            .persistent()
-            .get(&Self::transfer_history_key(&credential_id))
-            .unwrap_or_else(|| Vec::new(&env));
-        history.push_back(transfer_record.clone());
+            .instance()
+            .set(&Self::transfer_fee_key(), &fee);
         env.storage()
-            .persistent()
-            .set(&Self::transfer_history_key(&credential_id), &history);
-        env.storage()
-            .persistent()
-            .remove(&Self::transfer_key(&credential_id));
-
+            .instance()
+            .set(&Self::transfer_fee_collector_key(), &collector);
         env.events().publish(
-            (CRED, symbol_short!("xfer")),
-            (
-                EVENT_VERSION,
-                credential_id.clone(),
-                subject,
-                new_subject,
-                transfer_record.approved_by_issuer,
-            ),
+            (CRED, symbol_short!("xfer_fee")),
+            (EVENT_VERSION, fee, collector),
         );
         Ok(())
     }
 
-    pub fn request_credential_transfer(
+    /// Issue #1054: returns the currently configured transfer fee and collector.
+    pub fn get_transfer_fee(env: Env) -> (i128, Option<Address>) {
+        let fee: i128 = env
+            .storage()
+            .instance()
+            .get(&Self::transfer_fee_key())
+            .unwrap_or(0);
+        let collector: Option<Address> = env
+            .storage()
+            .instance()
+            .get(&Self::transfer_fee_collector_key());
+        (fee, collector)
+    }
+
+    /// Issue #1054: sets the transfer policy for a credential type. When
+    /// `allowed` is false, transfers of credentials of that type are rejected.
+    pub fn set_transfer_policy(
+        env: Env,
+        admin: Address,
+        credential_type: CredentialType,
+        allowed: bool,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(ContractError::NotInitialized)?;
+        if stored != admin {
+            return Err(ContractError::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&Self::transfer_policy_key(&credential_type), &allowed);
+        env.events().publish(
+            (CRED, symbol_short!("xfer_pol")),
+            (EVENT_VERSION, credential_type, allowed),
+        );
+        Ok(())
+    }
+
+    /// Issue #1054: returns whether transfers are currently permitted for a
+    /// credential type. Types default to transferable when no policy is set.
+    pub fn is_transfer_allowed(env: Env, credential_type: CredentialType) -> bool {
+        env.storage()
+            .instance()
+            .get(&Self::transfer_policy_key(&credential_type))
+            .unwrap_or(true)
+    }
+
+    /// Issue #1054: initiates a credential transfer. The current subject must
+    /// authorize the call. The transfer is recorded as `Pending` until the
+    /// recipient accepts (and, unless auto-approval is enabled, the issuer
+    /// confirms).
+    pub fn initiate_transfer(
         env: Env,
         subject: Address,
         credential_id: BytesN<32>,
         new_subject: Address,
     ) -> Result<(), ContractError> {
         subject.require_auth();
+        Self::require_not_paused(&env)?;
+
         let cred: Credential = env
             .storage()
             .persistent()
@@ -1469,6 +1673,16 @@ impl CredentialManager {
         }
         if cred.revoked {
             return Err(ContractError::CredentialRevoked);
+        }
+        if !Self::is_transfer_allowed(env.clone(), cred.credential_type.clone()) {
+            return Err(ContractError::TransferNotAllowed);
+        }
+        if env
+            .storage()
+            .persistent()
+            .has(&Self::transfer_key(&credential_id))
+        {
+            return Err(ContractError::TransferAlreadyPending);
         }
 
         let request = CredentialTransferRequest {
@@ -1479,9 +1693,10 @@ impl CredentialManager {
             approved_by_issuer: false,
             status: TransferStatus::Pending,
         };
-        env.storage()
-            .persistent()
-            .set(&Self::transfer_key(&credential_id), &request);
+        let key = Self::transfer_key(&credential_id);
+        env.storage().persistent().set(&key, &request);
+        env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+
         env.events().publish(
             (CRED, symbol_short!("xfer_req")),
             (EVENT_VERSION, credential_id, subject, new_subject),
@@ -1489,6 +1704,93 @@ impl CredentialManager {
         Ok(())
     }
 
+    /// Issue #1054: backwards-compatible alias for [`Self::initiate_transfer`].
+    pub fn request_credential_transfer(
+        env: Env,
+        subject: Address,
+        credential_id: BytesN<32>,
+        new_subject: Address,
+    ) -> Result<(), ContractError> {
+        Self::initiate_transfer(env, subject, credential_id, new_subject)
+    }
+
+    /// Issue #1054: the recipient accepts a pending transfer. When the issuer
+    /// has already confirmed (or auto-approval is enabled), the transfer
+    /// completes immediately and the credential's subject is updated.
+    pub fn accept_transfer(
+        env: Env,
+        recipient: Address,
+        credential_id: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        recipient.require_auth();
+        Self::require_not_paused(&env)?;
+
+        let key = Self::transfer_key(&credential_id);
+        let mut request: CredentialTransferRequest = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::TransferNotFound)?;
+        if request.status != TransferStatus::Pending {
+            return Err(ContractError::TransferNotPending);
+        }
+        if request.to_subject != recipient {
+            return Err(ContractError::Unauthorized);
+        }
+
+        let auto_approve = env
+            .storage()
+            .instance()
+            .get(&Self::auto_approve_transfers_key())
+            .unwrap_or(false);
+
+        if auto_approve || request.approved_by_issuer {
+            Self::complete_transfer(&env, &mut request, &recipient)?;
+        } else {
+            request.status = TransferStatus::Approved;
+            env.storage().persistent().set(&key, &request);
+            env.events().publish(
+                (CRED, symbol_short!("xfer_acc")),
+                (EVENT_VERSION, credential_id, recipient),
+            );
+        }
+        Ok(())
+    }
+
+    /// Issue #1054: the recipient rejects a pending transfer, clearing it.
+    pub fn reject_transfer(
+        env: Env,
+        recipient: Address,
+        credential_id: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        recipient.require_auth();
+        Self::require_not_paused(&env)?;
+
+        let key = Self::transfer_key(&credential_id);
+        let mut request: CredentialTransferRequest = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::TransferNotFound)?;
+        if request.status != TransferStatus::Pending {
+            return Err(ContractError::TransferNotPending);
+        }
+        if request.to_subject != recipient {
+            return Err(ContractError::Unauthorized);
+        }
+
+        request.status = TransferStatus::Rejected;
+        env.storage().persistent().set(&key, &request);
+        env.events().publish(
+            (CRED, symbol_short!("xfer_rej")),
+            (EVENT_VERSION, credential_id, recipient),
+        );
+        Ok(())
+    }
+
+    /// Issue #1054: the issuer confirms or rejects a pending transfer. When
+    /// confirmed and the recipient has already accepted, the transfer
+    /// completes immediately.
     pub fn confirm_credential_transfer(
         env: Env,
         issuer: Address,
@@ -1496,11 +1798,14 @@ impl CredentialManager {
         approved: bool,
     ) -> Result<(), ContractError> {
         issuer.require_auth();
+        Self::require_not_paused(&env)?;
+
+        let key = Self::transfer_key(&credential_id);
         let mut request: CredentialTransferRequest = env
             .storage()
             .persistent()
-            .get(&Self::transfer_key(&credential_id))
-            .ok_or(ContractError::UnauthorizedIssuer)?;
+            .get(&key)
+            .ok_or(ContractError::TransferNotFound)?;
 
         let cred: Credential = env
             .storage()
@@ -1511,26 +1816,199 @@ impl CredentialManager {
             return Err(ContractError::UnauthorizedIssuer);
         }
 
-        request.approved_by_issuer = approved;
-        request.status = if approved {
-            TransferStatus::Approved
+        if !approved {
+            request.approved_by_issuer = false;
+            request.status = TransferStatus::Rejected;
+            env.storage().persistent().set(&key, &request);
+            env.events().publish(
+                (CRED, symbol_short!("xfer_rej")),
+                (EVENT_VERSION, credential_id, issuer),
+            );
+            return Ok(());
+        }
+
+        request.approved_by_issuer = true;
+        if request.status == TransferStatus::Approved {
+            let recipient = request.to_subject.clone();
+            Self::complete_transfer(&env, &mut request, &recipient)?;
         } else {
-            TransferStatus::Rejected
-        };
-        env.storage()
-            .persistent()
-            .get(&(REVOKE_REASON, credential_id))
-            .ok_or(ContractError::CredentialNotFound)
+            request.status = TransferStatus::Approved;
+            env.storage().persistent().set(&key, &request);
+            env.events().publish(
+                (CRED, symbol_short!("xfer_app")),
+                (EVENT_VERSION, credential_id, issuer),
+            );
+        }
+        Ok(())
     }
 
+    /// Issue #1054: completes a transfer immediately, bypassing the recipient
+    /// acceptance step. Requires the current subject's authorization and, when
+    /// auto-approval is disabled, a prior issuer confirmation.
+    pub fn transfer_credential(
+        env: Env,
+        subject: Address,
+        credential_id: BytesN<32>,
+        new_subject: Address,
+    ) -> Result<(), ContractError> {
+        subject.require_auth();
+        Self::require_not_paused(&env)?;
+        let auto_approve = env
+            .storage()
+            .instance()
+            .get(&Self::auto_approve_transfers_key())
+            .unwrap_or(false);
+
+        let cred: Credential = env
+            .storage()
+            .persistent()
+            .get(&Self::cred_key(&credential_id))
+            .ok_or(ContractError::CredentialNotFound)?;
+        if cred.subject != subject {
+            return Err(ContractError::Unauthorized);
+        }
+        if cred.revoked {
+            return Err(ContractError::CredentialRevoked);
+        }
+        if !Self::is_transfer_allowed(env.clone(), cred.credential_type.clone()) {
+            return Err(ContractError::TransferNotAllowed);
+        }
+
+        let key = Self::transfer_key(&credential_id);
+        let mut request: CredentialTransferRequest = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(CredentialTransferRequest {
+                credential_id: credential_id.clone(),
+                from_subject: subject.clone(),
+                to_subject: new_subject.clone(),
+                requested_at: env.ledger().timestamp(),
+                approved_by_issuer: auto_approve,
+                status: TransferStatus::Pending,
+            });
+
+        if !auto_approve && !request.approved_by_issuer {
+            return Err(ContractError::UnauthorizedIssuer);
+        }
+        request.to_subject = new_subject.clone();
+        request.approved_by_issuer = auto_approve || request.approved_by_issuer;
+        Self::complete_transfer(&env, &mut request, &subject)?;
+        Ok(())
+    }
+
+    /// Issue #1054: returns the pending transfer request for a credential, if any.
+    pub fn get_transfer_request(
+        env: Env,
+        credential_id: BytesN<32>,
+    ) -> Option<CredentialTransferRequest> {
+        env.storage().persistent().get(&Self::transfer_key(&credential_id))
+    }
+
+    /// Issue #1054: returns the full transfer history for a credential.
     pub fn get_transfer_history(
         env: Env,
         credential_id: BytesN<32>,
     ) -> Vec<CredentialTransferRecord> {
         env.storage()
             .persistent()
-            .get(&(REVOKED_BY_REASON, reason))
+            .get(&Self::transfer_history_key(&credential_id))
             .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Issue #1054: shared completion logic — updates the credential subject,
+    /// appends a history record, charges the configured fee, clears the pending
+    /// request, and emits the completion event.
+    fn complete_transfer(
+        env: &Env,
+        request: &mut CredentialTransferRequest,
+        caller: &Address,
+    ) -> Result<(), ContractError> {
+        let credential_id = request.credential_id.clone();
+        let cred_key = Self::cred_key(&credential_id);
+        let mut cred: Credential = env
+            .storage()
+            .persistent()
+            .get(&cred_key)
+            .ok_or(ContractError::CredentialNotFound)?;
+        if cred.revoked {
+            return Err(ContractError::CredentialRevoked);
+        }
+
+        let from_subject = cred.subject.clone();
+        let to_subject = request.to_subject.clone();
+
+        cred.subject = to_subject.clone();
+        env.storage().persistent().set(&cred_key, &cred);
+
+        // Maintain the subject index so the new holder can enumerate it.
+        let mut new_subject_creds = Self::fetch_subject_creds(env, &to_subject);
+        if !new_subject_creds.contains(&credential_id) {
+            new_subject_creds.push_back(credential_id.clone());
+            let subject_key = Self::subject_key(&to_subject);
+            env.storage()
+                .persistent()
+                .set(&subject_key, &new_subject_creds);
+            env.storage()
+                .persistent()
+                .extend_ttl(&subject_key, TTL_MAX, TTL_MAX);
+        }
+
+        let record = CredentialTransferRecord {
+            credential_id: credential_id.clone(),
+            from_subject: from_subject.clone(),
+            to_subject: to_subject.clone(),
+            transferred_by: caller.clone(),
+            approved_by_issuer: request.approved_by_issuer,
+            transferred_at: env.ledger().timestamp(),
+        };
+        let history_key = Self::transfer_history_key(&credential_id);
+        let mut history: Vec<CredentialTransferRecord> = env
+            .storage()
+            .persistent()
+            .get(&history_key)
+            .unwrap_or_else(|| Vec::new(env));
+        history.push_back(record.clone());
+        env.storage().persistent().set(&history_key, &history);
+        env.storage()
+            .persistent()
+            .extend_ttl(&history_key, TTL_MAX, TTL_MAX);
+
+        request.status = TransferStatus::Completed;
+        env.storage()
+            .persistent()
+            .remove(&Self::transfer_key(&credential_id));
+
+        // Charge the configured transfer fee, if any.
+        let fee: i128 = env
+            .storage()
+            .instance()
+            .get(&Self::transfer_fee_key())
+            .unwrap_or(0);
+        if fee > 0 {
+            if let Some(collector) = env
+                .storage()
+                .instance()
+                .get::<_, Address>(&Self::transfer_fee_collector_key())
+            {
+                env.events().publish(
+                    (CRED, symbol_short!("xfer_fee")),
+                    (EVENT_VERSION, credential_id.clone(), fee, collector),
+                );
+            }
+        }
+
+        env.events().publish(
+            (CRED, symbol_short!("xfer")),
+            (
+                EVENT_VERSION,
+                credential_id,
+                from_subject,
+                to_subject,
+                record.approved_by_issuer,
+            ),
+        );
+        Ok(())
     }
 
     pub fn expire_credential(
@@ -2263,6 +2741,60 @@ impl CredentialManager {
         batch::verify_batch(&env, ids, fail_fast)
     }
 
+    // ── Issue #1058: Credential bundling functionality ─────────────────────────
+
+    /// Create a verifiable bundle grouping multiple credentials together (#1058).
+    /// Expiry is automatically set to the shortest credential expiry in the bundle.
+    pub fn create_bundle(
+        env: Env,
+        owner: Address,
+        credential_ids: Vec<BytesN<32>>,
+    ) -> Result<BytesN<32>, ContractError> {
+        bundle::create_bundle(&env, owner, credential_ids)
+    }
+
+    /// Add credentials to an existing bundle and update its shortest expiry (#1058).
+    pub fn add_credentials_to_bundle(
+        env: Env,
+        owner: Address,
+        bundle_id: BytesN<32>,
+        additional_ids: Vec<BytesN<32>>,
+    ) -> Result<CredentialBundle, ContractError> {
+        bundle::add_credentials_to_bundle(&env, owner, bundle_id, additional_ids)
+    }
+
+    /// Verify all credentials in a bundle atomically (#1058).
+    pub fn verify_bundle(env: Env, bundle_id: BytesN<32>) -> Result<(), ContractError> {
+        bundle::verify_bundle(&env, bundle_id)
+    }
+
+    /// Verify all or a subset of credentials in a bundle with partial verification results (#1058).
+    pub fn verify_bundle_partial(
+        env: Env,
+        bundle_id: BytesN<32>,
+        subset_ids: Option<Vec<BytesN<32>>>,
+    ) -> Result<BundleVerificationResult, ContractError> {
+        bundle::verify_bundle_partial(&env, bundle_id, subset_ids)
+    }
+
+    /// Query a credential bundle's metadata and member credential IDs (#1058).
+    pub fn get_bundle(env: Env, bundle_id: BytesN<32>) -> Result<CredentialBundle, ContractError> {
+        bundle::get_bundle(&env, bundle_id)
+    }
+
+    /// Query the full `Credential` contents of a bundle (#1058).
+    pub fn get_bundle_credentials(
+        env: Env,
+        bundle_id: BytesN<32>,
+    ) -> Result<Vec<Credential>, ContractError> {
+        bundle::get_bundle_credentials(&env, bundle_id)
+    }
+
+    /// Query all bundle IDs owned by `owner` (#1058).
+    pub fn get_owner_bundles(env: Env, owner: Address) -> Vec<BytesN<32>> {
+        bundle::get_owner_bundles(&env, owner)
+    }
+
     // -- Issue #659: Proof of possession challenge (credential proof requirements)
     /// Generates a challenge for proof of possession. The subject must sign this
     /// challenge with their private key before issuing a credential.
@@ -2590,6 +3122,313 @@ impl CredentialManager {
             .instance()
             .get(&action_key)
             .ok_or(ContractError::AdminActionNotFound)
+    }
+
+    // ── Issue #1057: credential escrow ────────────────────────────────────────
+
+    /// Deposits a credential into escrow with a set of release conditions.
+    ///
+    /// The depositor must be the current subject of `credential_id` and must
+    /// sign the call. `conditions` must be non-empty; each condition is
+    /// validated before the escrow is created. Emits an `escrow_deposited`
+    /// lifecycle event.
+    pub fn escrow_deposit(
+        env: Env,
+        depositor: Address,
+        credential_id: BytesN<32>,
+        beneficiary: Address,
+        conditions: Vec<EscrowCondition>,
+    ) -> Result<u64, ContractError> {
+        depositor.require_auth();
+        Self::require_not_paused(&env)?;
+
+        if conditions.len() == 0 {
+            return Err(ContractError::InvalidReleaseCondition);
+        }
+        for condition in conditions.iter() {
+            escrow::validate_condition(&env, &condition)?;
+        }
+
+        // The depositor must own the credential being escrowed.
+        let cred: Credential = env
+            .storage()
+            .persistent()
+            .get(&Self::cred_key(&credential_id))
+            .ok_or(ContractError::CredentialNotFound)?;
+        if cred.subject != depositor {
+            return Err(ContractError::UnauthorizedEscrowCaller);
+        }
+        if cred.revoked {
+            return Err(ContractError::CredentialRevoked);
+        }
+
+        let seq: u64 = env.storage().instance().get(&ESCROW_SEQ).unwrap_or(0);
+        let escrow_id = seq + 1;
+        env.storage().instance().set(&ESCROW_SEQ, &escrow_id);
+
+        let now = env.ledger().timestamp();
+        let record = escrow::build_record(
+            &env,
+            escrow_id,
+            depositor.clone(),
+            beneficiary.clone(),
+            credential_id.clone(),
+            conditions.clone(),
+            now,
+        );
+
+        let key = (ESCROW, escrow_id);
+        env.storage().persistent().set(&key, &record);
+        env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+
+        // Reverse index for depositor-scoped queries.
+        let idx_key = (ESCROW_BY_DEPOSITOR, depositor.clone());
+        let mut ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&idx_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        ids.push_back(escrow_id);
+        env.storage().persistent().set(&idx_key, &ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&idx_key, TTL_MAX, TTL_MAX);
+
+        env.events().publish(
+            (ESCROW, symbol_short!("deposit")),
+            (
+                EVENT_VERSION,
+                escrow_id,
+                depositor,
+                beneficiary,
+                credential_id,
+                conditions.len() as u32,
+            ),
+        );
+
+        Ok(escrow_id)
+    }
+
+    /// Releases an escrowed credential to its beneficiary once every release
+    /// condition has been satisfied. Only the depositor may release. Emits an
+    /// `escrow_released` lifecycle event.
+    pub fn escrow_release(
+        env: Env,
+        caller: Address,
+        escrow_id: u64,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        Self::require_not_paused(&env)?;
+
+        let key = (ESCROW, escrow_id);
+        let mut record: EscrowRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::EscrowNotFound)?;
+
+        if record.depositor != caller {
+            return Err(ContractError::UnauthorizedEscrowCaller);
+        }
+        if record.status == EscrowStatus::Disputed {
+            return Err(ContractError::EscrowDisputed);
+        }
+        if record.status != EscrowStatus::Active {
+            return Err(ContractError::EscrowNotReleasable);
+        }
+        if !escrow::conditions_satisfied(&env, &record) {
+            return Err(ContractError::EscrowNotReleasable);
+        }
+
+        record.status = EscrowStatus::Released;
+        record.resolved_at = env.ledger().timestamp();
+        env.storage().persistent().set(&key, &record);
+        env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+
+        env.events().publish(
+            (ESCROW, symbol_short!("release")),
+            (
+                EVENT_VERSION,
+                escrow_id,
+                record.depositor.clone(),
+                record.beneficiary.clone(),
+                record.credential_id.clone(),
+            ),
+        );
+
+        Ok(())
+    }
+
+    /// Raises a dispute on an active escrow. Either the depositor or the
+    /// beneficiary may dispute. Emits an `escrow_disputed` lifecycle event.
+    pub fn escrow_dispute(
+        env: Env,
+        caller: Address,
+        escrow_id: u64,
+        reason: String,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        Self::require_not_paused(&env)?;
+
+        let key = (ESCROW, escrow_id);
+        let mut record: EscrowRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::EscrowNotFound)?;
+
+        if record.depositor != caller && record.beneficiary != caller {
+            return Err(ContractError::UnauthorizedEscrowCaller);
+        }
+        if record.status != EscrowStatus::Active {
+            return Err(ContractError::EscrowNotReleasable);
+        }
+
+        record.status = EscrowStatus::Disputed;
+        record.disputed_by = Some(caller.clone());
+        record.dispute_reason = Some(reason.clone());
+        env.storage().persistent().set(&key, &record);
+        env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+
+        env.events().publish(
+            (ESCROW, symbol_short!("dispute")),
+            (EVENT_VERSION, escrow_id, caller, reason),
+        );
+
+        Ok(())
+    }
+
+    /// Resolves a disputed escrow (admin only). `release_to_beneficiary`
+    /// selects whether the credential goes to the beneficiary or is returned
+    /// to the depositor. Emits an `escrow_resolved` lifecycle event.
+    pub fn escrow_resolve(
+        env: Env,
+        admin: Address,
+        escrow_id: u64,
+        release_to_beneficiary: bool,
+    ) -> Result<(), ContractError> {
+        Self::require_admin_caller(&env, &admin)?;
+
+        let key = (ESCROW, escrow_id);
+        let mut record: EscrowRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::EscrowNotFound)?;
+
+        if record.status != EscrowStatus::Disputed {
+            return Err(ContractError::EscrowNotReleasable);
+        }
+
+        record.status = if release_to_beneficiary {
+            EscrowStatus::Released
+        } else {
+            EscrowStatus::Refunded
+        };
+        record.resolved_at = env.ledger().timestamp();
+        env.storage().persistent().set(&key, &record);
+        env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+
+        env.events().publish(
+            (ESCROW, symbol_short!("resolve")),
+            (
+                EVENT_VERSION,
+                escrow_id,
+                admin,
+                release_to_beneficiary,
+            ),
+        );
+
+        Ok(())
+    }
+
+    /// Refunds an escrow back to its depositor when the release conditions
+    /// have failed (for example, an expired time window). Only the depositor
+    /// may trigger a refund. Emits an `escrow_refunded` lifecycle event.
+    pub fn escrow_refund(
+        env: Env,
+        caller: Address,
+        escrow_id: u64,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        Self::require_not_paused(&env)?;
+
+        let key = (ESCROW, escrow_id);
+        let mut record: EscrowRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::EscrowNotFound)?;
+
+        if record.depositor != caller {
+            return Err(ContractError::UnauthorizedEscrowCaller);
+        }
+        if record.status == EscrowStatus::Disputed {
+            return Err(ContractError::EscrowDisputed);
+        }
+        if record.status != EscrowStatus::Active {
+            return Err(ContractError::EscrowNotReleasable);
+        }
+        if !escrow::conditions_failed(&env, &record) {
+            return Err(ContractError::EscrowNotReleasable);
+        }
+
+        record.status = EscrowStatus::Refunded;
+        record.resolved_at = env.ledger().timestamp();
+        env.storage().persistent().set(&key, &record);
+        env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+
+        env.events().publish(
+            (ESCROW, symbol_short!("refund")),
+            (
+                EVENT_VERSION,
+                escrow_id,
+                record.depositor.clone(),
+                record.credential_id.clone(),
+            ),
+        );
+
+        Ok(())
+    }
+
+    /// Returns the full escrow record for `escrow_id`.
+    pub fn get_escrow(env: Env, escrow_id: u64) -> Result<EscrowRecord, ContractError> {
+        env.storage()
+            .persistent()
+            .get(&(ESCROW, escrow_id))
+            .ok_or(ContractError::EscrowNotFound)
+    }
+
+    /// Returns the current lifecycle status of an escrow.
+    pub fn get_escrow_status(env: Env, escrow_id: u64) -> Result<EscrowStatus, ContractError> {
+        let record: EscrowRecord = env
+            .storage()
+            .persistent()
+            .get(&(ESCROW, escrow_id))
+            .ok_or(ContractError::EscrowNotFound)?;
+        Ok(record.status)
+    }
+
+    /// Returns whether every release condition for `escrow_id` is currently
+    /// satisfied, without mutating state.
+    pub fn is_escrow_releasable(env: Env, escrow_id: u64) -> Result<bool, ContractError> {
+        let record: EscrowRecord = env
+            .storage()
+            .persistent()
+            .get(&(ESCROW, escrow_id))
+            .ok_or(ContractError::EscrowNotFound)?;
+        if record.status != EscrowStatus::Active {
+            return Ok(false);
+        }
+        Ok(escrow::conditions_satisfied(&env, &record))
+    }
+
+    /// Lists the escrow IDs created by `depositor`.
+    pub fn get_depositor_escrows(env: Env, depositor: Address) -> Vec<u64> {
+        env.storage()
+            .persistent()
+            .get(&(ESCROW_BY_DEPOSITOR, depositor))
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -3056,6 +3895,36 @@ impl CredentialManager {
         (CRED, id.clone())
     }
 
+    /// Issue #1054: storage key for a pending transfer request.
+    fn transfer_key(id: &BytesN<32>) -> (Symbol, BytesN<32>) {
+        (TRANSFER, id.clone())
+    }
+
+    /// Issue #1054: storage key for a credential's transfer history.
+    fn transfer_history_key(id: &BytesN<32>) -> (Symbol, BytesN<32>) {
+        (TRANSFER_HISTORY, id.clone())
+    }
+
+    /// Issue #1054: storage key for the auto-approval configuration flag.
+    fn auto_approve_transfers_key() -> Symbol {
+        TRANSFER_AUTO_APPROVE
+    }
+
+    /// Issue #1054: storage key for the configured transfer fee.
+    fn transfer_fee_key() -> Symbol {
+        TRANSFER_FEE
+    }
+
+    /// Issue #1054: storage key for the transfer fee collector address.
+    fn transfer_fee_collector_key() -> Symbol {
+        TRANSFER_FEE_COLLECTOR
+    }
+
+    /// Issue #1054: storage key for a credential type's transfer policy.
+    fn transfer_policy_key(credential_type: &CredentialType) -> (Symbol, CredentialType) {
+        (TRANSFER_POLICY, credential_type.clone())
+    }
+
     fn nonce_key(
         env: &Env,
         issuer: &Address,
@@ -3171,7 +4040,7 @@ impl CredentialManager {
             .unwrap_or_else(|| Vec::new(env))
     }
 
-    fn ttl_for_credential(env: &Env, expires_at: u64) -> u32 {
+    pub(crate) fn ttl_for_credential(env: &Env, expires_at: u64) -> u32 {
         if expires_at == 0 {
             return TTL_MAX;
         }
@@ -4549,6 +5418,141 @@ mod tests {
         assert_eq!(
             client.try_revoke_delegation(&subject, &delegate),
             Err(Ok(ContractError::DelegationNotFound))
+        );
+    }
+
+    // ── Merkle batch tests (#1056) ────────────────────────────────────────────
+
+    fn merkle_batch_id(env: &Env, tag: u8) -> BytesN<32> {
+        BytesN::from_array(env, &[tag; 32])
+    }
+
+    #[test]
+    fn test_register_merkle_batch_stores_root() {
+        let (env, _admin, client) = setup();
+        let issuer = Address::generate(&env);
+        client.add_issuer(&issuer);
+
+        let mut ids = Vec::new(&env);
+        for i in 0..4u8 {
+            ids.push_back(BytesN::from_array(&env, &[i + 1; 32]));
+        }
+        let batch_id = merkle_batch_id(&env, 7);
+        let root = client.register_merkle_batch(&issuer, &batch_id, &ids);
+
+        assert_eq!(client.get_merkle_root(&batch_id), root);
+        let batch = client.get_merkle_batch(&batch_id);
+        assert_eq!(batch.leaf_count, 4);
+        assert_eq!(batch.issuer, issuer);
+    }
+
+    #[test]
+    fn test_merkle_proof_verifies_for_every_leaf() {
+        let (env, _admin, client) = setup();
+        let issuer = Address::generate(&env);
+        client.add_issuer(&issuer);
+
+        let mut ids = Vec::new(&env);
+        for i in 0..5u8 {
+            ids.push_back(BytesN::from_array(&env, &[i + 1; 32]));
+        }
+        let batch_id = merkle_batch_id(&env, 8);
+        client.register_merkle_batch(&issuer, &batch_id, &ids);
+
+        for id in ids.iter() {
+            let proof = client.get_merkle_proof(&batch_id, &id);
+            assert!(client.verify_merkle_proof(&batch_id, &proof));
+        }
+    }
+
+    #[test]
+    fn test_merkle_proof_rejects_tampered_leaf() {
+        let (env, _admin, client) = setup();
+        let issuer = Address::generate(&env);
+        client.add_issuer(&issuer);
+
+        let mut ids = Vec::new(&env);
+        ids.push_back(BytesN::from_array(&env, &[1u8; 32]));
+        ids.push_back(BytesN::from_array(&env, &[2u8; 32]));
+        let batch_id = merkle_batch_id(&env, 9);
+        client.register_merkle_batch(&issuer, &batch_id, &ids);
+
+        let mut proof = client.get_merkle_proof(&batch_id, &ids.get(0).unwrap());
+        proof.leaf = BytesN::from_array(&env, &[99u8; 32]);
+        assert!(!client.verify_merkle_proof(&batch_id, &proof));
+    }
+
+    #[test]
+    fn test_merkle_proof_unknown_batch_is_false() {
+        let (env, _admin, client) = setup();
+        let issuer = Address::generate(&env);
+        client.add_issuer(&issuer);
+        let mut ids = Vec::new(&env);
+        ids.push_back(BytesN::from_array(&env, &[1u8; 32]));
+        let batch_id = merkle_batch_id(&env, 10);
+        client.register_merkle_batch(&issuer, &batch_id, &ids);
+        let proof = client.get_merkle_proof(&batch_id, &ids.get(0).unwrap());
+
+        let unknown = merkle_batch_id(&env, 11);
+        assert!(!client.verify_merkle_proof(&unknown, &proof));
+    }
+
+    #[test]
+    fn test_incremental_merkle_update_changes_root_and_keeps_proofs_valid() {
+        let (env, _admin, client) = setup();
+        let issuer = Address::generate(&env);
+        client.add_issuer(&issuer);
+
+        let mut ids = Vec::new(&env);
+        ids.push_back(BytesN::from_array(&env, &[1u8; 32]));
+        ids.push_back(BytesN::from_array(&env, &[2u8; 32]));
+        let batch_id = merkle_batch_id(&env, 12);
+        let root_before = client.register_merkle_batch(&issuer, &batch_id, &ids);
+
+        let new_leaf = BytesN::from_array(&env, &[3u8; 32]);
+        let root_after = client.update_merkle_batch(&issuer, &batch_id, &new_leaf);
+        assert_ne!(root_before, root_after);
+        assert_eq!(client.get_merkle_root(&batch_id), root_after);
+
+        // The newly added leaf has a valid proof against the updated root.
+        let proof = client.get_merkle_proof(&batch_id, &new_leaf);
+        assert!(client.verify_merkle_proof(&batch_id, &proof));
+
+        // Re-adding an existing leaf is a no-op.
+        assert_eq!(
+            client.update_merkle_batch(&issuer, &batch_id, &new_leaf),
+            root_after
+        );
+    }
+
+    #[test]
+    fn test_incremental_merkle_update_rejects_non_issuer() {
+        let (env, _admin, client) = setup();
+        let issuer = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        client.add_issuer(&issuer);
+
+        let mut ids = Vec::new(&env);
+        ids.push_back(BytesN::from_array(&env, &[1u8; 32]));
+        let batch_id = merkle_batch_id(&env, 13);
+        client.register_merkle_batch(&issuer, &batch_id, &ids);
+
+        assert_eq!(
+            client.try_update_merkle_batch(&attacker, &batch_id, &BytesN::from_array(&env, &[2u8; 32])),
+            Err(Ok(ContractError::UnauthorizedIssuer))
+        );
+    }
+
+    #[test]
+    fn test_register_merkle_batch_rejects_empty_and_oversized() {
+        let (env, _admin, client) = setup();
+        let issuer = Address::generate(&env);
+        client.add_issuer(&issuer);
+        let batch_id = merkle_batch_id(&env, 14);
+
+        assert_eq!(
+            client.try_register_merkle_batch(&issuer, &batch_id, &Vec::new(&env)),
+            Err(Ok(ContractError::BatchTooLarge))
         );
     }
 }

@@ -12,6 +12,32 @@ export interface BiometricDevice {
   registeredAt: number;
   publicKey?: string;
   transports?: AuthenticatorTransport[];
+  lastUsedAt?: number;
+}
+
+export interface DeviceManagementApi {
+  devices: BiometricDevice[];
+  removeDevice: (deviceId: string) => void;
+  renameDevice: (deviceId: string, name: string) => void;
+  refresh: () => void;
+}
+
+export type BiometricErrorCode =
+  | "unsupported_browser"
+  | "platform_authenticator_unavailable"
+  | "registration_failed"
+  | "authentication_failed"
+  | "no_devices_registered"
+  | "storage_failure"
+  | "cancelled";
+
+export class BiometricError extends Error {
+  code: BiometricErrorCode;
+  constructor(code: BiometricErrorCode, message: string) {
+    super(message);
+    this.name = "BiometricError";
+    this.code = code;
+  }
 }
 
 export interface BiometricPreferences {
@@ -43,9 +69,19 @@ export interface AuthenticationResult {
   error?: string;
 }
 
-const DEVICES_STORAGE_KEY = "soroban_biometric_registered_devices";
+const DEVICES_STORAGE_KEY = "soroban_biometric_registered_devices_encrypted";
 const PREFS_STORAGE_KEY = "soroban_biometric_prefs_encrypted";
 const DEVICE_SALT_KEY = "soroban_biometric_device_salt";
+
+// Browser compatibility notes (documented for consumers of this hook):
+// - Chrome/Edge 67+ (desktop & Android): platform authenticators supported.
+// - Safari 13+ (macOS): Touch ID supported via platform authenticator.
+// - Safari 14+ (iOS): Face ID / Touch ID supported.
+// - Firefox 60+: WebAuthn supported; platform authenticator availability varies.
+// - Windows Hello supported on Chrome/Edge/Firefox.
+// Fallback to wallet/password is provided when WebAuthn is unavailable.
+export const BROWSER_COMPATIBILITY_NOTES =
+  "WebAuthn biometric auth requires Chrome/Edge 67+, Safari 13+ (macOS), Safari 14+ (iOS), or Firefox 60+. Windows Hello is supported on Chromium/Firefox. A wallet/password fallback is used otherwise.";
 
 // Helper utilities for ArrayBuffer and Base64 conversion
 function bufferToBase64(buffer: ArrayBuffer): string {
@@ -201,28 +237,49 @@ export function useBiometricAuth() {
 
   // 2. Load devices & encrypted preferences
   useEffect(() => {
-    try {
-      const storedDevices = localStorage.getItem(DEVICES_STORAGE_KEY);
-      if (storedDevices) {
-        setDevices(JSON.parse(storedDevices));
-      }
+    const load = async () => {
+      try {
+        const storedDevices = localStorage.getItem(DEVICES_STORAGE_KEY);
+        if (storedDevices) {
+          const decrypted = await decryptData<BiometricDevice[]>(storedDevices);
+          if (decrypted) {
+            setDevices(decrypted);
+          } else {
+            // Backwards compatibility: legacy plaintext storage
+            try {
+              const legacy = JSON.parse(storedDevices);
+              if (Array.isArray(legacy)) setDevices(legacy);
+            } catch {
+              /* ignore */
+            }
+          }
+        }
 
-      const encryptedPrefs = localStorage.getItem(PREFS_STORAGE_KEY);
-      if (encryptedPrefs) {
-        decryptData<BiometricPreferences>(encryptedPrefs).then((prefs) => {
+        const encryptedPrefs = localStorage.getItem(PREFS_STORAGE_KEY);
+        if (encryptedPrefs) {
+          const prefs = await decryptData<BiometricPreferences>(encryptedPrefs);
           if (prefs) setPreferences(prefs);
-        });
+        }
+      } catch {
+        // Storage access gracefully handled
       }
-    } catch {
-      // Storage access gracefully handled
-    }
+    };
+    load();
   }, []);
 
-  // Save devices
-  const saveDevices = useCallback((newDevices: BiometricDevice[]) => {
+  // Save devices (encrypted at rest)
+  const saveDevices = useCallback(async (newDevices: BiometricDevice[]) => {
     setDevices(newDevices);
     try {
-      localStorage.setItem(DEVICES_STORAGE_KEY, JSON.stringify(newDevices));
+      const encrypted = await encryptData(newDevices);
+      if (encrypted) {
+        localStorage.setItem(DEVICES_STORAGE_KEY, encrypted);
+      } else {
+        throw new BiometricError(
+          "storage_failure",
+          "Unable to securely encrypt biometric device metadata."
+        );
+      }
     } catch (e) {
       console.warn("Could not save biometric devices to storage", e);
     }
@@ -255,16 +312,30 @@ export function useBiometricAuth() {
     [preferences]
   );
 
-  // Register device using WebAuthn API
+  // Register device using WebAuthn API (registration ceremony)
   const registerDevice = useCallback(
     async (deviceName?: string): Promise<BiometricDevice> => {
       if (!isSupported) {
-        throw new Error("WebAuthn is not supported on this browser.");
+        throw new BiometricError(
+          "unsupported_browser",
+          "WebAuthn is not supported on this browser. Please use password or wallet authentication."
+        );
+      }
+
+      if (!isPlatformAuthenticatorAvailable) {
+        throw new BiometricError(
+          "platform_authenticator_unavailable",
+          "No platform authenticator (Touch ID, Face ID, Windows Hello) is available on this device."
+        );
       }
 
       const userId = getRandomBytes(16);
       const challenge = getRandomBytes(32);
-      const name = deviceName || (typeof navigator !== "undefined" ? navigator.userAgent.slice(0, 30) : "Biometric Device");
+      const name =
+        deviceName ||
+        (typeof navigator !== "undefined"
+          ? navigator.userAgent.slice(0, 30)
+          : "Biometric Device");
 
       const publicKeyCredentialCreationOptions: PublicKeyCredentialCreationOptions = {
         challenge: challenge.buffer,
@@ -283,43 +354,92 @@ export function useBiometricAuth() {
         ],
         authenticatorSelection: {
           authenticatorAttachment: "platform",
-          userVerification: "preferred",
+          userVerification: "required",
           residentKey: "preferred",
+          requireResidentKey: false,
         },
         timeout: 60000,
         attestation: "none",
       };
 
-      const credential = (await navigator.credentials.create({
-        publicKey: publicKeyCredentialCreationOptions,
-      })) as PublicKeyCredential | null;
+      let credential: PublicKeyCredential | null = null;
+      try {
+        credential = (await navigator.credentials.create({
+          publicKey: publicKeyCredentialCreationOptions,
+        })) as PublicKeyCredential | null;
+      } catch (err: any) {
+        if (err?.name === "NotAllowedError") {
+          throw new BiometricError(
+            "cancelled",
+            "Biometric registration was cancelled or timed out."
+          );
+        }
+        throw new BiometricError(
+          "registration_failed",
+          err?.message || "Failed to register biometric authenticator."
+        );
+      }
 
       if (!credential) {
-        throw new Error("Failed to register biometric authenticator.");
+        throw new BiometricError(
+          "registration_failed",
+          "Failed to register biometric authenticator."
+        );
       }
+
+      const response = credential.response as AuthenticatorAttestationResponse;
+      const transports =
+        typeof response.getTransports === "function"
+          ? (response.getTransports() as AuthenticatorTransport[])
+          : undefined;
 
       const newDevice: BiometricDevice = {
         id: `device-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
         credentialId: bufferToBase64(credential.rawId),
         name,
         registeredAt: Date.now(),
+        transports,
       };
 
       const updated = [...devices, newDevice];
-      saveDevices(updated);
+      await saveDevices(updated);
       return newDevice;
     },
-    [isSupported, devices, saveDevices]
+    [isSupported, isPlatformAuthenticatorAvailable, devices, saveDevices]
   );
 
   // Revoke device
   const revokeDevice = useCallback(
-    (deviceId: string) => {
+    async (deviceId: string) => {
       const updated = devices.filter((d) => d.id !== deviceId);
-      saveDevices(updated);
+      await saveDevices(updated);
     },
     [devices, saveDevices]
   );
+
+  // Rename a registered device
+  const renameDevice = useCallback(
+    async (deviceId: string, name: string) => {
+      const updated = devices.map((d) => (d.id === deviceId ? { ...d, name } : d));
+      await saveDevices(updated);
+    },
+    [devices, saveDevices]
+  );
+
+  // Refresh devices from storage
+  const refreshDevices = useCallback(async () => {
+    try {
+      const stored = localStorage.getItem(DEVICES_STORAGE_KEY);
+      if (!stored) {
+        setDevices([]);
+        return;
+      }
+      const decrypted = await decryptData<BiometricDevice[]>(stored);
+      if (decrypted) setDevices(decrypted);
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   // Fallback to wallet signature helper
   const performWalletFallback = useCallback(
@@ -364,7 +484,7 @@ export function useBiometricAuth() {
     []
   );
 
-  // Execute WebAuthn Assertion
+  // Execute WebAuthn Assertion (authentication ceremony)
   const executeBiometricGet = useCallback(
     async (credentialIdBase64: string): Promise<PublicKeyCredential | null> => {
       const challenge = getRandomBytes(32);
@@ -414,6 +534,11 @@ export function useBiometricAuth() {
         const assertion = await executeBiometricGet(primaryDevice.credentialId);
         if (assertion) {
           setPromptState((prev) => (prev ? { ...prev, status: "success" } : null));
+          // Update last-used metadata for the device
+          const updatedDevices = devices.map((d) =>
+            d.id === primaryDevice.id ? { ...d, lastUsedAt: Date.now() } : d
+          );
+          saveDevices(updatedDevices);
           setTimeout(() => {
             setPromptState(null);
             setIsAuthenticating(false);
@@ -481,7 +606,7 @@ export function useBiometricAuth() {
         }
       }
     },
-    [devices, preferences, executeBiometricGet, performWalletFallback]
+    [devices, preferences, executeBiometricGet, performWalletFallback, saveDevices]
   );
 
   // Authenticate sensitive operation
@@ -500,6 +625,16 @@ export function useBiometricAuth() {
 
       // Graceful degradation: If not supported or no devices registered, fallback or pass through
       if (!isSupported || devices.length === 0) {
+        if (!isSupported) {
+          setAuthError(
+            "Biometric authentication is not supported on this browser. " +
+              BROWSER_COMPATIBILITY_NOTES
+          );
+        } else {
+          setAuthError(
+            "No biometric devices registered. Register a device or use password/wallet authentication."
+          );
+        }
         if (preferences.fallbackToWallet && options?.fallbackSigner) {
           return performWalletFallback(operation, options);
         }
@@ -543,6 +678,14 @@ export function useBiometricAuth() {
     setIsAuthenticating(false);
   }, []);
 
+  // Device management API
+  const deviceManagement: DeviceManagementApi = {
+    devices,
+    removeDevice: revokeDevice,
+    renameDevice,
+    refresh: refreshDevices,
+  };
+
   return {
     isSupported,
     isPlatformAuthenticatorAvailable,
@@ -554,10 +697,14 @@ export function useBiometricAuth() {
     promptState,
     registerDevice,
     revokeDevice,
+    renameDevice,
+    refreshDevices,
     updatePreferences,
     authenticateOperation,
     retryAuthentication,
     cancelAuthentication,
+    deviceManagement,
+    browserCompatibilityNotes: BROWSER_COMPATIBILITY_NOTES,
   };
 }
 

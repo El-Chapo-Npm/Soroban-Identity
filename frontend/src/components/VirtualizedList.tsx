@@ -7,6 +7,74 @@ import { useMemo, useRef, useEffect, useState } from "react";
  * Only renders visible items, significantly improving performance.
  */
 
+/**
+ * Hook to detect the user's reduced-motion preference (#1044).
+ * When set, list item entry/exit animations are skipped entirely.
+ */
+function usePrefersReducedMotion(): boolean {
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return;
+
+    const query = window.matchMedia("(prefers-reduced-motion: reduce)");
+    setPrefersReducedMotion(query.matches);
+
+    const handleChange = (e: MediaQueryListEvent) => {
+      setPrefersReducedMotion(e.matches);
+    };
+
+    query.addEventListener("change", handleChange);
+    return () => query.removeEventListener("change", handleChange);
+  }, []);
+
+  return prefersReducedMotion;
+}
+
+/**
+ * Injects the keyframes used for list item entry/exit animations (#1044).
+ * Uses transform/opacity only so animations stay on the compositor thread.
+ */
+const LIST_ANIMATION_STYLE_ID = "virtualized-list-animations";
+
+function useListAnimationStyles() {
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    if (document.getElementById(LIST_ANIMATION_STYLE_ID)) return;
+
+    const style = document.createElement("style");
+    style.id = LIST_ANIMATION_STYLE_ID;
+    style.textContent = `
+      @keyframes virtualized-list-item-enter {
+        from {
+          opacity: 0;
+          transform: translateY(8px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+      .virtualized-list-item-enter {
+        animation: virtualized-list-item-enter 0.22s ease-out both;
+        will-change: transform, opacity;
+      }
+      .virtualized-list-item-exit {
+        animation: virtualized-list-item-enter 0.18s ease-in reverse both;
+        will-change: transform, opacity;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .virtualized-list-item-enter,
+        .virtualized-list-item-exit {
+          animation: none;
+          will-change: auto;
+        }
+      }
+    `;
+    document.head.appendChild(style);
+  }, []);
+}
+
 interface VirtualizedListProps<T> {
   items: T[];
   itemHeight: number | ((index: number, item: T) => number);
@@ -30,6 +98,15 @@ export function VirtualizedList<T>({
 }: VirtualizedListProps<T>) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
+  const prefersReducedMotion = usePrefersReducedMotion();
+
+  useListAnimationStyles();
+
+  // Track which items have already animated in so entry animations only run once
+  const enteredItemsRef = useRef<Set<number>>(new Set());
+  // Track items that are animating out, keyed by their index
+  const [exitingItems, setExitingItems] = useState<Set<number>>(new Set());
+  const prevVisibleRef = useRef<Set<number>>(new Set());
 
   // Calculate dynamic heights if itemHeight is a function
   const itemHeights = useMemo(() => {
@@ -85,6 +162,48 @@ export function VirtualizedList<T>({
 
   const visibleItems = items.slice(startIndex, endIndex);
 
+  // Determine which previously visible items have left the window so we can
+  // play an exit animation for them without affecting windowing logic (#1044).
+  useEffect(() => {
+    if (prefersReducedMotion) {
+      prevVisibleRef.current = new Set();
+      setExitingItems((prev) => (prev.size === 0 ? prev : new Set()));
+      return;
+    }
+
+    const currentVisible = new Set<number>();
+    for (let i = startIndex; i < endIndex; i++) {
+      currentVisible.add(i);
+    }
+
+    const leaving = new Set<number>();
+    prevVisibleRef.current.forEach((index) => {
+      if (!currentVisible.has(index)) {
+        leaving.add(index);
+      }
+    });
+
+    prevVisibleRef.current = currentVisible;
+
+    if (leaving.size === 0) return;
+
+    setExitingItems((prev) => {
+      const next = new Set(prev);
+      leaving.forEach((index) => next.add(index));
+      return next;
+    });
+
+    const timeout = window.setTimeout(() => {
+      setExitingItems((prev) => {
+        const next = new Set(prev);
+        leaving.forEach((index) => next.delete(index));
+        return next;
+      });
+    }, 200);
+
+    return () => window.clearTimeout(timeout);
+  }, [startIndex, endIndex, prefersReducedMotion]);
+
   return (
     <div
       ref={containerRef}
@@ -109,8 +228,23 @@ export function VirtualizedList<T>({
           {visibleItems.map((item, i) => {
             const actualIndex = startIndex + i;
             const height = itemHeights[actualIndex];
+            const isEntering =
+              !prefersReducedMotion && !enteredItemsRef.current.has(actualIndex);
+            if (isEntering) {
+              enteredItemsRef.current.add(actualIndex);
+            }
+            const isExiting = !prefersReducedMotion && exitingItems.has(actualIndex);
+            const animationClass = isExiting
+              ? "virtualized-list-item-exit"
+              : isEntering
+                ? "virtualized-list-item-enter"
+                : "";
             return (
-              <div key={actualIndex} style={{ height, overflow: "hidden" }}>
+              <div
+                key={actualIndex}
+                className={animationClass}
+                style={{ height, overflow: "hidden" }}
+              >
                 {renderItem(item, actualIndex)}
               </div>
             );

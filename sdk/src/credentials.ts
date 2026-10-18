@@ -58,6 +58,9 @@ import {
   buildGetRevocationsArgs,
   buildCancelActivationArgs,
   buildGetPendingActivationsArgs,
+  buildGetMerkleRootArgs,
+  buildUpdateMerkleRootArgs,
+  buildVerifyMerkleProofArgs,
 } from "./contract-args";
 
 const PROBE_ADDRESS = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
@@ -87,11 +90,217 @@ export interface BatchResult {
 }
 
 /**
+ * A single sibling hash on the path from a leaf to the merkle root.
+ *
+ * `position` records whether the sibling sits to the `'left'` or `'right'`
+ * of the node being hashed at that level, which is required to reconstruct
+ * the parent deterministically.
+ */
+export interface MerkleProofNode {
+  /** Sibling hash as a 64-char lowercase hex string (32 bytes). */
+  hash: string;
+  /** Whether the sibling is the left or right child of the parent. */
+  position: "left" | "right";
+}
+
+/**
+ * A merkle inclusion proof for a single credential within a batch.
+ *
+ * The tree is a standard binary merkle tree over the batch's credential IDs:
+ * - **Leaf**: `SHA-256(0x00 || credentialIdBytes)` (32-byte credential ID).
+ * - **Internal node**: `SHA-256(0x01 || leftHash || rightHash)`.
+ * - **Odd level**: the final unpaired node is promoted unchanged to the next level.
+ *
+ * Domain-separation prefixes (`0x00` for leaves, `0x01` for internal nodes)
+ * prevent second-preimage attacks between leaf and internal hashes.
+ */
+export interface MerkleProof {
+  /** The credential ID this proof is for, as a 64-char hex string. */
+  credentialId: string;
+  /** Sibling hashes ordered from the leaf level up to the root. */
+  path: MerkleProofNode[];
+  /** The merkle root the proof resolves to, as a 64-char hex string. */
+  root: string;
+  /** Zero-based index of the credential within the batch. */
+  index: number;
+  /** Total number of credentials in the batch. */
+  leafCount: number;
+}
+
+/** A merkle tree built off-chain over a batch of credential IDs. */
+export interface MerkleTree {
+  /** The merkle root as a 64-char lowercase hex string. */
+  root: string;
+  /** Leaf hashes (hex) in batch order. */
+  leaves: string[];
+  /** All tree levels, `levels[0]` being the leaves and the last level the root. */
+  levels: string[][];
+}
+
+/**
  * Converts a JavaScript Date or millisecond timestamp to Unix seconds.
  */
 export function toCredentialExpiry(dateOrMs: Date | number): number {
   const ms = dateOrMs instanceof Date ? dateOrMs.getTime() : dateOrMs;
   return Math.floor(ms / 1000);
+}
+
+const MERKLE_LEAF_PREFIX = Buffer.from([0x00]);
+const MERKLE_NODE_PREFIX = Buffer.from([0x01]);
+
+function normalizeCredentialIdHex(credentialId: string): string {
+  const hex = credentialId.startsWith("0x") ? credentialId.slice(2) : credentialId;
+  if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
+    throw new SorobanIdentityError(
+      "InvalidCredentialId: credential ID must be a 64-character hex string (32 bytes)",
+      "VALIDATION_ERROR"
+    );
+  }
+  return hex.toLowerCase();
+}
+
+function hashMerkleLeaf(credentialIdHex: string): string {
+  const idBytes = Buffer.from(normalizeCredentialIdHex(credentialIdHex), "hex");
+  return createHash("sha256")
+    .update(Buffer.concat([MERKLE_LEAF_PREFIX, idBytes]))
+    .digest("hex");
+}
+
+function hashMerkleNode(leftHex: string, rightHex: string): string {
+  return createHash("sha256")
+    .update(
+      Buffer.concat([
+        MERKLE_NODE_PREFIX,
+        Buffer.from(leftHex, "hex"),
+        Buffer.from(rightHex, "hex"),
+      ])
+    )
+    .digest("hex");
+}
+
+/**
+ * Build a merkle tree off-chain over a batch of credential IDs.
+ *
+ * The tree uses SHA-256 with domain separation (see {@link MerkleProof}).
+ * When a level has an odd number of nodes the trailing node is promoted
+ * unchanged to the next level.
+ *
+ * @param credentialIds Hex-encoded 32-byte credential IDs (with or without `0x`).
+ * @returns The {@link MerkleTree} including the root and all levels.
+ * @throws {SorobanIdentityError} with code `VALIDATION_ERROR` if the batch is
+ *   empty or any ID is malformed.
+ */
+export function buildMerkleTree(credentialIds: string[]): MerkleTree {
+  if (!Array.isArray(credentialIds) || credentialIds.length === 0) {
+    throw new SorobanIdentityError(
+      "InvalidBatch: at least one credential ID is required to build a merkle tree",
+      "VALIDATION_ERROR"
+    );
+  }
+  const leaves = credentialIds.map(hashMerkleLeaf);
+  const levels: string[][] = [leaves];
+  let current = leaves;
+  while (current.length > 1) {
+    const next: string[] = [];
+    for (let i = 0; i < current.length; i += 2) {
+      if (i + 1 < current.length) {
+        next.push(hashMerkleNode(current[i]!, current[i + 1]!));
+      } else {
+        next.push(current[i]!);
+      }
+    }
+    levels.push(next);
+    current = next;
+  }
+  return { root: current[0]!, leaves, levels };
+}
+
+/**
+ * Generate a merkle inclusion proof for a single credential within a batch.
+ *
+ * The tree is built entirely off-chain; only the resulting root needs to be
+ * stored on-chain (see {@link CredentialClient.updateMerkleRoot}).
+ *
+ * @param credentialIds All credential IDs in the batch.
+ * @param credentialId  The credential to prove membership for.
+ * @returns The {@link MerkleProof} for `credentialId`.
+ * @throws {SorobanIdentityError} with code `VALIDATION_ERROR` if the batch is
+ *   empty, any ID is malformed, or `credentialId` is not part of the batch.
+ *
+ * @example
+ * ```ts
+ * const proof = generateMerkleProof(batchIds, batchIds[3]);
+ * const ok = verifyMerkleProof(proof, proof.root); // true
+ * ```
+ */
+export function generateMerkleProof(
+  credentialIds: string[],
+  credentialId: string
+): MerkleProof {
+  const target = normalizeCredentialIdHex(credentialId);
+  const normalized = credentialIds.map(normalizeCredentialIdHex);
+  const index = normalized.indexOf(target);
+  if (index === -1) {
+    throw new SorobanIdentityError(
+      `InvalidProof: credential ${credentialId} is not part of the batch`,
+      "VALIDATION_ERROR"
+    );
+  }
+
+  const tree = buildMerkleTree(normalized);
+  const path: MerkleProofNode[] = [];
+  let idx = index;
+  for (let level = 0; level < tree.levels.length - 1; level++) {
+    const nodes = tree.levels[level]!;
+    const isRightNode = idx % 2 === 1;
+    const siblingIdx = isRightNode ? idx - 1 : idx + 1;
+    if (siblingIdx < nodes.length) {
+      path.push({
+        hash: nodes[siblingIdx]!,
+        position: isRightNode ? "left" : "right",
+      });
+    }
+    idx = Math.floor(idx / 2);
+  }
+
+  return {
+    credentialId: target,
+    path,
+    root: tree.root,
+    index,
+    leafCount: normalized.length,
+  };
+}
+
+/**
+ * Verify a merkle inclusion proof client-side, without any network calls.
+ *
+ * Recomputes the root from the leaf hash of `proof.credentialId` and the
+ * sibling path, then compares it to `root`.
+ *
+ * @param proof The proof returned by {@link generateMerkleProof}.
+ * @param root  The expected merkle root (64-char hex). Defaults to `proof.root`
+ *              when omitted.
+ * @returns `true` when the proof resolves to `root`.
+ */
+export function verifyMerkleProof(proof: MerkleProof, root?: string): boolean {
+  if (!proof || !Array.isArray(proof.path)) return false;
+  let current: string;
+  try {
+    current = hashMerkleLeaf(proof.credentialId);
+  } catch {
+    return false;
+  }
+  for (const node of proof.path) {
+    if (!node || !/^[0-9a-fA-F]{64}$/.test(node.hash)) return false;
+    const sibling = node.hash.toLowerCase();
+    current =
+      node.position === "left"
+        ? hashMerkleNode(sibling, current)
+        : hashMerkleNode(current, sibling);
+  }
+  const expected = (root ?? proof.root).toLowerCase();
+  return current === expected;
 }
 
 /** Contract error codes returned by credential-manager — see {@link CREDENTIAL_MANAGER_ERRORS}. */
@@ -1194,7 +1403,7 @@ export class CredentialClient extends BaseClient {
   private async simulateRead(
     callerAddress: string,
     method: string,
-    args: ReturnType<typeof buildGetRevokedByReasonArgs>,
+    args: unknown[],
     options?: CallOptions
   ): Promise<unknown> {
     validateStellarAddress(callerAddress);
@@ -1204,7 +1413,7 @@ export class CredentialClient extends BaseClient {
       fee: BASE_FEE,
       networkPassphrase: this.config.networkPassphrase,
     })
-      .addOperation(this.contract.call(method, ...args))
+      .addOperation(this.contract.call(method, ...(args as never[])))
       .setTimeout(timeout)
       .build();
 
@@ -1500,6 +1709,110 @@ export class CredentialClient extends BaseClient {
     }
 
     return { succeeded, failed };
+  }
+
+  /**
+   * Read the on-chain merkle root stored for a credential batch. #1056
+   *
+   * @param callerAddress Any valid Stellar address used to build the read simulation.
+   * @param batchId       Identifier of the batch whose root to fetch.
+   * @param options       Per-call overrides.
+   * @returns The merkle root as a 64-char lowercase hex string, or `null` when
+   *   no root has been stored for the batch.
+   */
+  async getMerkleRoot(
+    callerAddress: string,
+    batchId: string,
+    options?: CallOptions
+  ): Promise<string | null> {
+    const raw = await this.simulateRead(
+      callerAddress,
+      'get_merkle_root',
+      buildGetMerkleRootArgs({ batchId }),
+      options
+    ) as Uint8Array | null;
+    if (!raw) return null;
+    return Buffer.from(raw).toString('hex');
+  }
+
+  /**
+   * Store or incrementally update the merkle root for a credential batch. #1056
+   *
+   * Only a registered issuer may call this. Passing a `proof` lets the contract
+   * verify the update against the previous root before persisting the new one,
+   * which keeps incremental updates cheap (O(log n) hashing on-chain).
+   *
+   * @param issuerKeypair The registered issuer signing the transaction.
+   * @param batchId       Identifier of the batch to update.
+   * @param newRoot       New merkle root as a 64-char hex string (32 bytes).
+   * @param options       Optional inclusion proof for the incremental update.
+   * @returns `{ txHash }` — the on-chain transaction hash.
+   */
+  async updateMerkleRoot(
+    issuerKeypair: Keypair,
+    batchId: string,
+    newRoot: string,
+    options?: CallOptions & { proof?: MerkleProof }
+  ): Promise<{ txHash: string }> {
+    const rootHex = normalizeCredentialIdHex(newRoot);
+    const account = await this.server.getAccount(issuerKeypair.publicKey());
+    const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
+
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        this.contract.call(
+          'update_merkle_root',
+          ...buildUpdateMerkleRootArgs({
+            issuer: issuerKeypair.publicKey(),
+            batchId,
+            newRoot: Buffer.from(rootHex, 'hex'),
+            proof: options?.proof,
+          })
+        )
+      )
+      .setTimeout(timeout)
+      .build();
+
+    try {
+      const prepared = await retryWithBackoff(() => this.server.prepareTransaction(tx));
+      prepared.sign(issuerKeypair);
+
+      const result = await retryWithBackoff(() => this.server.sendTransaction(prepared));
+      this.debug('sdk.submission_outcome', { operation: 'credentials.updateMerkleRoot', status: result.status });
+      if (result.status !== 'PENDING') {
+        throw new SorobanIdentityError(`Transaction failed: ${result.status}`, 'CONTRACT_ERROR');
+      }
+
+      const txHash = result.hash;
+      await pollTransactionStatus(this.server, txHash);
+      return { txHash };
+    } catch (e) {
+      throw wrapError(e);
+    }
+  }
+
+  /**
+   * Verify a merkle inclusion proof against the on-chain root for a batch. #1056
+   *
+   * This is a read-only simulation; the proof is checked by the contract so the
+   * caller does not need to trust a locally-cached root.
+   */
+  async verifyMerkleProofOnChain(
+    callerAddress: string,
+    batchId: string,
+    proof: MerkleProof,
+    options?: CallOptions
+  ): Promise<boolean> {
+    const result = await this.simulateRead(
+      callerAddress,
+      'verify_merkle_proof',
+      buildVerifyMerkleProofArgs({ batchId, proof }),
+      options
+    );
+    return result === true;
   }
 
   /**

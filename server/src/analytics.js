@@ -249,6 +249,158 @@ export class AnalyticsService {
     };
   }
 
+  /**
+   * Aggregate network statistics for the frontend NetworkStatistics page.
+   *
+   * Combines the existing request-oriented summary/geography/timeSeries data
+   * with credential-store-derived aggregates (top issuers, verification
+   * success rate, credential type distribution) into a single payload.
+   *
+   * @param {object} [options]
+   * @param {Array} [options.credentials] Credential records to aggregate.
+   * @param {Array} [options.verifications] Verification attempt records.
+   * @param {number} [options.topIssuersLimit] Max issuers to return.
+   * @returns {object} Network statistics payload.
+   */
+  getNetworkStatistics(options = {}) {
+    const credentials = Array.isArray(options.credentials)
+      ? options.credentials
+      : [];
+    const verifications = Array.isArray(options.verifications)
+      ? options.verifications
+      : [];
+    const topIssuersLimit = options.topIssuersLimit ?? 10;
+
+    const summary = this.getSummary();
+
+    // --- Totals over time (DIDs/credentials) ---
+    // Derive cumulative totals from credential issuance timestamps, falling
+    // back to the request time series when no credential data is available.
+    const credentialBuckets = new Map();
+    let didCount = 0;
+    const seenDids = new Set();
+
+    for (const credential of credentials) {
+      const issuerDid = credential.issuer || credential.issuerDid;
+      if (issuerDid && !seenDids.has(issuerDid)) {
+        seenDids.add(issuerDid);
+        didCount += 1;
+      }
+      const issuedAt = credential.issuedAt || credential.createdAt;
+      if (!issuedAt) continue;
+      const bucketDate = new Date(issuedAt);
+      if (Number.isNaN(bucketDate.getTime())) continue;
+      bucketDate.setSeconds(0, 0);
+      const bucketIso = bucketDate.toISOString();
+      credentialBuckets.set(
+        bucketIso,
+        (credentialBuckets.get(bucketIso) || 0) + 1,
+      );
+    }
+
+    let cumulativeCredentials = 0;
+    const totalsOverTime = Array.from(credentialBuckets.entries())
+      .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+      .map(([bucket, count]) => {
+        cumulativeCredentials += count;
+        return {
+          timestamp: bucket,
+          credentials: count,
+          cumulativeCredentials,
+        };
+      });
+
+    const timeSeries =
+      totalsOverTime.length > 0
+        ? totalsOverTime
+        : summary.timeSeries.map((bucket) => ({
+            timestamp: bucket.timestamp,
+            credentials: bucket.requests,
+            cumulativeCredentials: bucket.requests,
+          }));
+
+    // --- Top issuers by volume ---
+    const issuerCounts = new Map();
+    for (const credential of credentials) {
+      const issuerDid = credential.issuer || credential.issuerDid || "unknown";
+      issuerCounts.set(issuerDid, (issuerCounts.get(issuerDid) || 0) + 1);
+    }
+    const totalCredentials = credentials.length;
+    const topIssuers = Array.from(issuerCounts.entries())
+      .map(([issuer, count]) => ({
+        issuer,
+        count,
+        percentage:
+          totalCredentials > 0
+            ? Math.round((count / totalCredentials) * 10000) / 100
+            : 0,
+      }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, topIssuersLimit);
+
+    // --- Geographic distribution ---
+    const geographicDistribution = summary.geographicDistribution;
+
+    // --- Verification success rate ---
+    let successCount = 0;
+    let failureCount = 0;
+    for (const verification of verifications) {
+      const succeeded =
+        verification.success === true ||
+        verification.verified === true ||
+        verification.status === "success" ||
+        verification.status === "verified";
+      if (succeeded) successCount += 1;
+      else failureCount += 1;
+    }
+    const totalVerifications = successCount + failureCount;
+    const verificationSuccessRate = {
+      total: totalVerifications,
+      success: successCount,
+      failure: failureCount,
+      successRate:
+        totalVerifications > 0
+          ? Math.round((successCount / totalVerifications) * 10000) / 100
+          : 0,
+    };
+
+    // --- Credential type distribution ---
+    const typeCounts = new Map();
+    for (const credential of credentials) {
+      const type =
+        credential.type ||
+        credential.credentialType ||
+        (Array.isArray(credential.types) ? credential.types.join(",") : null) ||
+        "unknown";
+      typeCounts.set(type, (typeCounts.get(type) || 0) + 1);
+    }
+    const credentialTypeDistribution = Array.from(typeCounts.entries())
+      .map(([type, count]) => ({
+        type,
+        count,
+        percentage:
+          totalCredentials > 0
+            ? Math.round((count / totalCredentials) * 10000) / 100
+            : 0,
+      }))
+      .sort((a, b) => b.count - a.count);
+
+    return {
+      generatedAt: new Date().toISOString(),
+      overview: {
+        ...summary.overview,
+        totalDids: didCount,
+        totalCredentials,
+        totalVerifications,
+      },
+      totalsOverTime: timeSeries,
+      topIssuers,
+      geographicDistribution,
+      verificationSuccessRate,
+      credentialTypeDistribution,
+    };
+  }
+
   exportCsv() {
     const header =
       "timestamp,method,endpoint,path,statusCode,durationMs,consumer,country\n";

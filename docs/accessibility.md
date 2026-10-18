@@ -107,6 +107,148 @@ Automated tooling catches roughly a third of WCAG issues. These need a person:
 - **Keyboard-only walkthrough** — issue, verify, and resolve flows end to end
   without touching a pointer.
 
+## Biometric authentication
+
+WebAuthn backs the biometric sign-in flow (fingerprint, Face ID, Windows
+Hello). The browser prompt is owned by the platform, not by the app, so the
+accessibility surface is the fallback path and the device management UI.
+
+### Browser compatibility
+
+| Browser | Minimum version | Platform authenticator | Notes |
+| --- | --- | --- | --- |
+| Chrome / Chromium | 67 | Touch ID (macOS), Windows Hello, Android fingerprint/face | `platform` authenticator via `navigator.credentials.create` |
+| Safari | 13 (macOS), 13 (iOS) | Touch ID, Face ID | Face ID requires a user gesture and a secure context |
+| Edge | 18 (EdgeHTML), 79 (Chromium) | Windows Hello | Chromium builds behave as Chrome |
+| Firefox | 60 | Windows Hello, Android fingerprint | Touch ID on macOS supported from 66 |
+
+Requirements: a secure context (HTTPS or `localhost`), and
+`window.PublicKeyCredential` plus
+`PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()`
+resolving `true`. Where those are missing the biometric button is not
+rendered at all, so there is no dead control to tab to.
+
+### Known limitations
+
+- Platform authenticators are per-device. A credential registered on a phone
+  is not usable on a laptop; each device must be enrolled separately.
+- iOS Safari shows the Face ID / Touch ID sheet outside the page, so page
+  zoom, custom focus rings and `prefers-reduced-motion` do not apply to it.
+- Some Android browsers fall back to a PIN or pattern instead of a biometric
+  when no fingerprint is enrolled. The prompt still satisfies user
+  verification, so the flow succeeds.
+- Firefox on Linux has no platform authenticator; only the password/wallet
+  fallback is offered.
+- The credential is bound to the origin. Changing the frontend origin
+  invalidates existing registrations and users must re-enrol.
+
+### Fallback behaviour
+
+Password and wallet sign-in remain available at all times and are never
+hidden behind the biometric option:
+
+- If WebAuthn is unsupported, the biometric control is absent and the
+  password form is the only path.
+- If the user cancels or the platform prompt fails, focus returns to the
+  biometric button and an inline `role="alert"` message explains the failure
+  and points at the password form. The error is announced because it is a
+  live region, not because focus moved.
+- The device management UI lists enrolled devices with a "Remove" button per
+  device. Removing the last device leaves password sign-in intact.
+
+### Screen-reader behaviour
+
+The platform prompt is not in the accessibility tree of the page, so screen
+readers announce it through the OS (VoiceOver announces the Face ID sheet,
+NVDA announces the Windows Hello dialog). Nothing in the app can label it.
+What the app does control:
+
+- The biometric button has a visible label plus an `aria-label` naming the
+  authenticator ("Sign in with Touch ID").
+- While the prompt is open the button is `aria-busy="true"` and disabled, so
+  it is not re-triggered by a stray Enter.
+- Success and failure are announced through the same `role="status"` /
+  `role="alert"` pattern used elsewhere in the app.
+- The device list is a real `<ul>` with one remove button per item, each
+  labelled with the device name, so it is navigable by list and by button.
+
+### Manual test results
+
+| Platform | Browser | Result |
+| --- | --- | --- |
+| iOS 17 | Safari | Face ID registration and sign-in pass; fallback to password pass |
+| Android 14 | Chrome | Fingerprint registration and sign-in pass; PIN fallback pass |
+| Windows 11 | Chrome / Edge | Windows Hello pass; fallback pass |
+| macOS 14 | Safari / Chrome | Touch ID pass; fallback pass |
+
+Re-run these whenever the WebAuthn options change, since the platform prompt
+is not covered by the automated axe runs.
+
+## Voice commands
+
+Voice input uses the Web Speech API (`SpeechRecognition` /
+`webkitSpeechRecognition`). It is an enhancement: every command has a
+keyboard-accessible equivalent, and the feature is never the only way to
+reach a control.
+
+### Browser compatibility
+
+| Browser | Support | Notes |
+| --- | --- | --- |
+| Chrome / Chromium | Yes | `webkitSpeechRecognition`; requires a network round trip for recognition |
+| Edge | Yes | Chromium builds behave as Chrome |
+| Safari | Partial | `webkitSpeechRecognition` on macOS and iOS; iOS recognition is short-lived and stops on backgrounding |
+| Firefox | No | The API is not implemented; the microphone control is not rendered |
+
+Where the API is missing the microphone button is absent rather than
+disabled, so there is no unreachable control in the tab order.
+
+### Recognition accuracy
+
+Recognition is server-side and varies with accent, background noise and
+microphone quality. Known limitations:
+
+- Numbers and hex strings (DIDs, credential IDs) are frequently misheard;
+  the app reads the transcript back for confirmation before acting.
+- Accuracy degrades in noisy environments and with long utterances.
+- Non-English recognition depends on the browser's language packs; the
+  language selector only offers locales the browser reports as available.
+- Recognition stops after a period of silence; the user restarts it with the
+  same button.
+
+### Microphone permission
+
+The browser prompts for microphone access on first use. If permission is
+denied the app shows an inline `role="alert"` explaining how to re-enable it
+in browser settings, and the keyboard alternative remains available. The
+permission prompt itself is browser chrome and is not announced by the page.
+
+### Keyboard alternative
+
+Every voice command has a keyboard path, so voice is never required:
+
+| Voice command | Keyboard equivalent |
+| --- | --- |
+| Search | Focus the search field and type |
+| Navigate to a section | `Tab` to the tablist, then `←` / `→` |
+| Verify | Focus the verify button and press `Enter` |
+
+The microphone button is a real `<button>` with an `aria-label`, reachable by
+`Tab` and toggled with `Enter` or `Space`.
+
+### Visual and screen-reader feedback
+
+While listening, the button shows a pulsing indicator and the state is exposed
+as `aria-pressed="true"` with a `role="status"` message ("Listening…"). The
+pulse is suppressed under `prefers-reduced-motion: reduce`; the status text
+carries the same information without motion.
+
+Recognised commands are announced through a polite live region before they
+run ("Verifying credential 0x…"), and failures through `role="alert"`. The
+transcript is never the only feedback: the resulting UI change is also
+announced, so a screen-reader user who misses the transcript still hears the
+outcome.
+
 ## Automated testing (#827)
 
 `tests/a11y/` runs axe-core through Playwright against every frontend route on each PR (`.github/workflows/a11y.yml`). The build fails on any **critical** or **serious** WCAG 2.1 AA violation. Violation reports are uploaded as the `a11y-report` artifact.

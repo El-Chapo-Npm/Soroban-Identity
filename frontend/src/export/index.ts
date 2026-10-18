@@ -21,3 +21,21 @@ export {
   newTemplateId,
 } from "./templates";
 export { DEFAULT_FIELD_LABELS, credentialStatus } from "./format";
+export {
+  buildComparisonExport,
+  comparisonToJson,
+  comparisonToCsv,
+  comparisonToHtml,
+  exportComparison,
+  exportComparisonAsImage,
+  exportComparisonAsPdf,
+  copyComparisonLink,
+  buildComparisonLink,
+  readComparisonFromLink,
+} from "./comparison";
+export type {
+  ComparisonExportOptions,
+  ComparisonExportFormat,
+  ComparisonExportResult,
+  ComparisonLinkOptions,
+} from "./comparison";

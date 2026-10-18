@@ -8,7 +8,7 @@
 use shared_events::{CredentialEvent, EventEmitter, EventPayload, EventReceipt, EventType};
 use soroban_sdk::{Address, BytesN, Env, String};
 
-use crate::types::RevocationReason;
+use crate::types::{RevocationReason, TransferRejectionReason};
 
 /// Emit a credential issued event and notify all subscribers.
 ///
@@ -130,6 +130,144 @@ pub fn emit_credential_renewed(
     // TODO: Notify subscribers (see comment in emit_credential_issued)
 }
 
+/// Emit a credential transfer initiated event and notify all subscribers.
+///
+/// This is called when the current owner of a credential initiates a
+/// transfer of ownership to another address. The transfer is not final
+/// until the recipient accepts it.
+///
+/// # Parameters
+/// - `credential_id`: The unique identifier of the credential being transferred
+/// - `from`: The current owner initiating the transfer
+/// - `to`: The intended recipient of the credential
+/// - `initiated_at`: Timestamp when the transfer was initiated
+/// - `expires_at`: Timestamp after which the pending transfer expires
+pub fn emit_transfer_initiated(
+    env: &Env,
+    credential_id: BytesN<32>,
+    from: Address,
+    to: Address,
+    initiated_at: u64,
+    expires_at: u64,
+) {
+    let event = CredentialEvent::TransferInitiated {
+        credential_id: credential_id.clone(),
+        from: from.clone(),
+        to: to.clone(),
+        initiated_at,
+        expires_at,
+    };
+
+    let payload = EventPayload::Credential(event);
+
+    // Emit to Soroban event stream for indexers
+    EventEmitter::emit(env, payload);
+
+    // TODO: Notify subscribers (see comment in emit_credential_issued)
+}
+
+/// Emit a credential transfer accepted event and notify all subscribers.
+///
+/// This is called when the intended recipient accepts a pending transfer,
+/// completing the ownership change.
+///
+/// # Parameters
+/// - `credential_id`: The unique identifier of the transferred credential
+/// - `from`: The previous owner of the credential
+/// - `to`: The new owner of the credential
+/// - `accepted_at`: Timestamp when the transfer was accepted
+pub fn emit_transfer_accepted(
+    env: &Env,
+    credential_id: BytesN<32>,
+    from: Address,
+    to: Address,
+    accepted_at: u64,
+) {
+    let event = CredentialEvent::TransferAccepted {
+        credential_id: credential_id.clone(),
+        from: from.clone(),
+        to: to.clone(),
+        accepted_at,
+    };
+
+    let payload = EventPayload::Credential(event);
+
+    // Emit to Soroban event stream for indexers
+    EventEmitter::emit(env, payload);
+
+    // TODO: Notify subscribers (see comment in emit_credential_issued)
+}
+
+/// Emit a credential transfer rejected event and notify all subscribers.
+///
+/// This is called when the intended recipient rejects a pending transfer,
+/// or when the transfer is cancelled/expired.
+///
+/// # Parameters
+/// - `credential_id`: The unique identifier of the credential
+/// - `from`: The current owner who initiated the transfer
+/// - `to`: The intended recipient who rejected the transfer
+/// - `reason`: The reason the transfer was rejected
+/// - `rejected_at`: Timestamp when the transfer was rejected
+pub fn emit_transfer_rejected(
+    env: &Env,
+    credential_id: BytesN<32>,
+    from: Address,
+    to: Address,
+    reason: TransferRejectionReason,
+    rejected_at: u64,
+) {
+    let event = CredentialEvent::TransferRejected {
+        credential_id: credential_id.clone(),
+        from: from.clone(),
+        to: to.clone(),
+        reason: reason as u32,
+        rejected_at,
+    };
+
+    let payload = EventPayload::Credential(event);
+
+    // Emit to Soroban event stream for indexers
+    EventEmitter::emit(env, payload);
+
+    // TODO: Notify subscribers (see comment in emit_credential_issued)
+}
+
+/// Emit a credential transfer completed event and notify all subscribers.
+///
+/// This is called once a transfer has fully settled, including any fee
+/// handling, so indexers can record the final ownership state.
+///
+/// # Parameters
+/// - `credential_id`: The unique identifier of the transferred credential
+/// - `from`: The previous owner of the credential
+/// - `to`: The new owner of the credential
+/// - `fee`: The transfer fee charged, if any
+/// - `completed_at`: Timestamp when the transfer completed
+pub fn emit_transfer_completed(
+    env: &Env,
+    credential_id: BytesN<32>,
+    from: Address,
+    to: Address,
+    fee: i128,
+    completed_at: u64,
+) {
+    let event = CredentialEvent::TransferCompleted {
+        credential_id: credential_id.clone(),
+        from: from.clone(),
+        to: to.clone(),
+        fee,
+        completed_at,
+    };
+
+    let payload = EventPayload::Credential(event);
+
+    // Emit to Soroban event stream for indexers
+    EventEmitter::emit(env, payload);
+
+    // TODO: Notify subscribers (see comment in emit_credential_issued)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,6 +316,18 @@ mod tests {
     }
 
     #[test]
+    fn test_emit_merkle_root_updated() {
+        let env = Env::default();
+        let batch_id = BytesN::from_array(&env, &[4u8; 32]);
+        let merkle_root = BytesN::from_array(&env, &[5u8; 32]);
+
+        emit_merkle_root_updated(&env, batch_id, merkle_root, 42);
+
+        let events = env.events().all();
+        assert!(events.len() > 0);
+    }
+
+    #[test]
     fn test_emit_credential_renewed() {
         let env = Env::default();
         let subject = Address::generate(&env);
@@ -185,6 +335,65 @@ mod tests {
         let cred_id = BytesN::from_array(&env, &[3u8; 32]);
 
         emit_credential_renewed(&env, cred_id, subject, issuer, 10000, 20000, 12345);
+
+        let events = env.events().all();
+        assert!(events.len() > 0);
+    }
+
+    #[test]
+    fn test_emit_transfer_initiated() {
+        let env = Env::default();
+        let from = Address::generate(&env);
+        let to = Address::generate(&env);
+        let cred_id = BytesN::from_array(&env, &[4u8; 32]);
+
+        emit_transfer_initiated(&env, cred_id, from, to, 12345, 99999);
+
+        let events = env.events().all();
+        assert!(events.len() > 0);
+    }
+
+    #[test]
+    fn test_emit_transfer_accepted() {
+        let env = Env::default();
+        let from = Address::generate(&env);
+        let to = Address::generate(&env);
+        let cred_id = BytesN::from_array(&env, &[5u8; 32]);
+
+        emit_transfer_accepted(&env, cred_id, from, to, 12345);
+
+        let events = env.events().all();
+        assert!(events.len() > 0);
+    }
+
+    #[test]
+    fn test_emit_transfer_rejected() {
+        let env = Env::default();
+        let from = Address::generate(&env);
+        let to = Address::generate(&env);
+        let cred_id = BytesN::from_array(&env, &[6u8; 32]);
+
+        emit_transfer_rejected(
+            &env,
+            cred_id,
+            from,
+            to,
+            TransferRejectionReason::RecipientRejected,
+            12345,
+        );
+
+        let events = env.events().all();
+        assert!(events.len() > 0);
+    }
+
+    #[test]
+    fn test_emit_transfer_completed() {
+        let env = Env::default();
+        let from = Address::generate(&env);
+        let to = Address::generate(&env);
+        let cred_id = BytesN::from_array(&env, &[7u8; 32]);
+
+        emit_transfer_completed(&env, cred_id, from, to, 100, 12345);
 
         let events = env.events().all();
         assert!(events.len() > 0);

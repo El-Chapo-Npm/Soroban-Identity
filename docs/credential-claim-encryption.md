@@ -2,6 +2,8 @@
 
 Issue #947 (SC-21). Source: [`contracts/credential-manager/src/encryption.rs`](../contracts/credential-manager/src/encryption.rs).
 
+Issue #1049 adds transport encryption for sensitive credential data in transit. See [Request/response encryption](#requestresponse-encryption-issue-1049) below.
+
 ## Overview
 
 Soroban ledger state is public. The credential-manager contract therefore never receives plaintext sensitive claims or symmetric keys. Issuers encrypt sensitive fields off-chain. The contract does four things:
@@ -115,3 +117,69 @@ Every event is published under the topic `("ENC", <action>)`:
 | 42 | `TooManyEncryptedFields` |
 | 43 | `UnsupportedEncryptionScheme` |
 | 44 | `TooManyClaimReaders` |
+
+## Request/response encryption (issue #1049)
+
+The on-chain scheme above protects data at rest. Issue #1049 adds end-to-end encryption for sensitive credential data in transit between the client and the backend API, so that plaintext credentials never appear on the wire.
+
+### Overview
+
+- The backend generates a fresh symmetric key **per session**; no long-lived transport key is reused across sessions.
+- Sensitive fields in responses are encrypted with **AES-256-GCM** (authenticated encryption).
+- Clients decrypt locally with the session key; the backend never returns plaintext for the covered fields.
+- Session keys are rotated on a fixed interval and on demand, and a key exchange protocol establishes the shared key without transmitting it.
+
+### Session key exchange
+
+The session key is derived with an ephemeral X25519 ECDH handshake followed by HKDF-SHA256, so the key itself is never sent over the wire:
+
+1. The client generates an ephemeral X25519 key pair and sends its public key with the session request.
+2. The backend generates its own ephemeral X25519 key pair for the session and returns its public key.
+3. Both sides compute the shared secret `X25519(ephemeral_sk, peer_ephemeral_pk)`.
+4. The 32-byte AES-256-GCM session key is derived as `HKDF-SHA256(shared_secret, salt = client_nonce || server_nonce, info = "soroban-identity/transport/v1", length = 32)`.
+5. The handshake is authenticated by binding the session to the caller's existing auth token, so a party without a valid token cannot complete the exchange.
+
+The ephemeral key pairs are discarded when the session ends. Because the key is derived rather than transmitted, an observer of the handshake cannot recover the session key.
+
+### AES-GCM parameters
+
+| Purpose | Algorithm | Parameters |
+| --- | --- | --- |
+| Session key | X25519 + HKDF-SHA256 | 32-byte key, `info = "soroban-identity/transport/v1"` |
+| Field encryption | AES-256-GCM | 32-byte key, random 96-bit (12-byte) nonce per message, 128-bit auth tag |
+| Nonce | Random per message | Never reused under the same session key; a nonce collision forces a key rotation |
+
+Each encrypted field is transmitted as `{ "alg": "A256GCM", "kid": <key_id>, "nonce": <base64>, "ct": <base64> }`, where `ct` is the ciphertext with the 16-byte GCM tag appended. The field name and the session id are passed as additional authenticated data (AAD), so a ciphertext cannot be replayed under a different field or session.
+
+### Sensitive fields covered
+
+The following response fields are encrypted when present:
+
+- credential claim values for fields marked sensitive,
+- wrapped DEKs and encryption metadata returned by the credential endpoints,
+- holder PII (name, date of birth, document numbers),
+- access tokens and refresh tokens,
+- any field explicitly flagged `sensitive` by the API schema.
+
+Non-sensitive fields (ids, timestamps, status flags, field names) stay in plaintext so clients can route and cache responses without decrypting.
+
+### Key rotation
+
+- Session keys have a maximum lifetime (default 15 minutes) and a maximum message count; whichever is reached first triggers rotation.
+- Rotation runs a fresh X25519/HKDF handshake and issues a new `kid`. The old key is retained only long enough to decrypt in-flight responses, then discarded.
+- A response always carries the `kid` it was encrypted with, so a client that receives a response across a rotation can still decrypt it.
+- If a session key is suspected compromised, the client can request immediate rotation; the backend invalidates the old key and rejects further messages that reference it.
+
+### Client-side decryption
+
+1. Complete the key exchange and derive the session key (see above).
+2. For each encrypted field, read `kid`, `nonce`, and `ct`.
+3. Decrypt with AES-256-GCM using the session key for that `kid`, the transmitted nonce, and the AAD `field_name || session_id`.
+4. Verify the 16-byte auth tag; if verification fails, discard the response and do not use any of its fields.
+5. Decode the resulting plaintext according to the field's declared type.
+
+Clients must never log session keys or decrypted sensitive fields, and must zero key material when the session ends.
+
+### Threat model note
+
+Transport encryption protects data in transit and complements, but does not replace, the on-chain claim encryption. It does not protect against a compromised client or backend endpoint, and it does not hide traffic metadata (sizes, timing, endpoints). Confidentiality of stored claims still comes from the on-chain scheme described above.

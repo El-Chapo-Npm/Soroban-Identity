@@ -1,8 +1,126 @@
 import { useState, useCallback, useRef, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import type { WalletType } from "../hooks/useWallet";
 import { useWalletContext } from "../context/WalletContext";
+import { useBiometricAuth } from "../hooks/useBiometricAuth";
+
+interface BiometricDevice {
+  id: string;
+  name: string;
+  registeredAt: string;
+  transports?: string[];
+}
+
+function DeviceManagementPanel({
+  devices,
+  status,
+  onRegister,
+  onRemove,
+}: {
+  devices: BiometricDevice[];
+  status: string;
+  onRegister: () => void;
+  onRemove: (id: string) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div
+      role="region"
+      aria-label={t("biometric.devices.title", "Biometric devices")}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: "0.5rem",
+        padding: "0.5rem",
+        border: "1px solid var(--border-input)",
+        borderRadius: "0.5rem",
+        minWidth: "220px",
+      }}
+    >
+      <span style={{ fontSize: "0.8rem", fontWeight: 600 }}>
+        {t("biometric.devices.title", "Biometric devices")}
+      </span>
+      {devices.length === 0 ? (
+        <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+          {t("biometric.devices.empty", "No devices registered yet.")}
+        </span>
+      ) : (
+        <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+          {devices.map((device) => (
+            <li
+              key={device.id}
+              style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.5rem" }}
+            >
+              <span style={{ display: "flex", flexDirection: "column", fontSize: "0.75rem" }}>
+                <span>{device.name}</span>
+                <span style={{ color: "var(--text-muted)" }}>
+                  {t("biometric.devices.registeredAt", "Registered {{date}}", {
+                    date: device.registeredAt,
+                  })}
+                </span>
+                {device.transports && device.transports.length > 0 && (
+                  <span style={{ color: "var(--text-muted)" }}>
+                    {t("biometric.devices.transports", "Transports: {{transports}}", {
+                      transports: device.transports.join(", "),
+                    })}
+                  </span>
+                )}
+              </span>
+              <button
+                type="button"
+                onClick={() => onRemove(device.id)}
+                aria-label={t("biometric.devices.remove", "Remove device {{name}}", {
+                  name: device.name,
+                })}
+                style={{
+                  background: "none",
+                  border: "1px solid var(--error-text)",
+                  color: "var(--error-text)",
+                  borderRadius: "0.25rem",
+                  padding: "0.15rem 0.5rem",
+                  fontSize: "0.75rem",
+                  cursor: "pointer",
+                }}
+              >
+                {t("biometric.devices.removeAction", "Remove")}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <button
+        type="button"
+        onClick={onRegister}
+        aria-label={t("biometric.devices.register", "Register this device")}
+        style={{
+          background: "transparent",
+          border: "1px solid var(--border-input)",
+          color: "var(--text)",
+          borderRadius: "0.25rem",
+          padding: "0.3rem 0.6rem",
+          fontSize: "0.8rem",
+          cursor: "pointer",
+        }}
+      >
+        {t("biometric.devices.register", "Register this device")}
+      </button>
+      <span role="status" aria-live="polite" style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+        {status}
+      </span>
+    </div>
+  );
+}
 
 export default function WalletButton() {
+  const { t } = useTranslation();
+  const {
+    isSupported: biometricSupported,
+    devices: biometricDevices,
+    registerDevice,
+    removeDevice,
+  } = useBiometricAuth();
+  const [biometricStatus, setBiometricStatus] = useState("");
+  const [showBiometricFallback, setShowBiometricFallback] = useState(false);
   const {
     connected,
     publicKey,
@@ -57,6 +175,42 @@ export default function WalletButton() {
       console.error("[WalletButton] Failed to copy address:", err);
     }
   }, [publicKey]);
+
+  const handleRegisterDevice = useCallback(async () => {
+    if (!biometricSupported) {
+      setShowBiometricFallback(true);
+      setBiometricStatus(
+        t(
+          "biometric.unavailable",
+          "Biometric authentication is unavailable. Use your wallet or password instead.",
+        ),
+      );
+      return;
+    }
+    try {
+      await registerDevice();
+      setBiometricStatus(t("biometric.registerSuccess", "Device registered successfully."));
+    } catch (err) {
+      console.error("[WalletButton] Failed to register biometric device:", err);
+      setShowBiometricFallback(true);
+      setBiometricStatus(
+        t("biometric.registerError", "Registration failed. Use your wallet or password instead."),
+      );
+    }
+  }, [biometricSupported, registerDevice, t]);
+
+  const handleRemoveDevice = useCallback(
+    async (id: string) => {
+      try {
+        await removeDevice(id);
+        setBiometricStatus(t("biometric.removeSuccess", "Device removed."));
+      } catch (err) {
+        console.error("[WalletButton] Failed to remove biometric device:", err);
+        setBiometricStatus(t("biometric.removeError", "Failed to remove device."));
+      }
+    },
+    [removeDevice, t],
+  );
 
   const handleSwitchAccount = useCallback(async () => {
     try {
@@ -352,6 +506,53 @@ export default function WalletButton() {
             </div>
           )}
         </>
+      )}
+
+      <DeviceManagementPanel
+        devices={biometricDevices}
+        status={biometricStatus}
+        onRegister={handleRegisterDevice}
+        onRemove={handleRemoveDevice}
+      />
+
+      {showBiometricFallback && (
+        <div
+          role="alert"
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: "0.4rem",
+            fontSize: "0.75rem",
+            color: "var(--text-muted)",
+          }}
+        >
+          <span>
+            {t(
+              "biometric.fallbackPrompt",
+              "Biometric sign-in is unavailable. Please connect your wallet or enter your password to continue.",
+            )}
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              setShowBiometricFallback(false);
+              setShowPicker(true);
+            }}
+            aria-label={t("biometric.useWallet", "Use wallet instead")}
+            style={{
+              alignSelf: "flex-start",
+              background: "transparent",
+              border: "1px solid var(--border-input)",
+              color: "var(--text)",
+              borderRadius: "0.25rem",
+              padding: "0.2rem 0.5rem",
+              fontSize: "0.75rem",
+              cursor: "pointer",
+            }}
+          >
+            {t("biometric.useWallet", "Use wallet instead")}
+          </button>
+        </div>
       )}
 
       {error && (

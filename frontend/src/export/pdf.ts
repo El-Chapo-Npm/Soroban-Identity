@@ -2,6 +2,7 @@ import { jsPDF } from "jspdf";
 import type { Credential, ExportOptions, ExportTemplate } from "./types";
 import { DEFAULT_FIELD_LABELS, credentialStatus, fieldValue } from "./format";
 import { credentialQrDataUrl, verificationUrl } from "./qr";
+import { downloadFile } from "./download";
 
 const PAGE_MARGIN = 48;
 const HEADER_HEIGHT = 72;
@@ -133,4 +134,241 @@ export function credentialToPdf(
   options: ExportOptions = {}
 ): Promise<Blob> {
   return credentialsToPdf([cred], template, options);
+}
+
+/** A single row of the side-by-side comparison table. */
+export interface ComparisonRow {
+  /** Stable key for the attribute (e.g. "issuer", "expiresAt"). */
+  key: string;
+  /** Human readable label shown in the first column. */
+  label: string;
+  /** One value per credential, in the same order as the compared list. */
+  values: string[];
+  /** Whether the values differ across the compared credentials. */
+  differs: boolean;
+}
+
+export interface ComparisonInput {
+  credentials: Credential[];
+  /** Optional issuer reputation score (0-100) per credential, same order. */
+  issuerReputations?: (number | null | undefined)[];
+  /** Optional verification status label per credential, same order. */
+  verificationStatuses?: (string | null | undefined)[];
+}
+
+const COMPARISON_ACCENT = "#4f46e5";
+const COMPARISON_DIFF_BG = "#fef3c7";
+const COMPARISON_ALT_BG = "#f8fafc";
+
+function normalizeValue(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function formatReputation(score: number | null | undefined): string {
+  if (score === null || score === undefined || Number.isNaN(score)) return "Unknown";
+  return `${Math.round(score)}/100`;
+}
+
+function formatExpiry(cred: Credential): string {
+  const raw = fieldValue(cred, "expiresAt");
+  if (!raw) return "No expiry";
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return raw;
+  return date.toISOString().slice(0, 10);
+}
+
+/**
+ * Build the attribute rows used by both the PDF and image comparison exports.
+ * Rows are aligned by attribute key so differences can be highlighted.
+ */
+export function buildComparisonRows(input: ComparisonInput): ComparisonRow[] {
+  const { credentials, issuerReputations = [], verificationStatuses = [] } = input;
+  const rows: ComparisonRow[] = [];
+
+  const push = (key: string, label: string, values: string[]) => {
+    const differs = values.some((v) => normalizeValue(v) !== normalizeValue(values[0] ?? ""));
+    rows.push({ key, label, values, differs });
+  };
+
+  push(
+    "issuer",
+    "Issuer",
+    credentials.map((c) => fieldValue(c, "issuer") || "—")
+  );
+  push(
+    "issuerReputation",
+    "Issuer reputation",
+    credentials.map((_, i) => formatReputation(issuerReputations[i]))
+  );
+  push(
+    "status",
+    "Status",
+    credentials.map((c) => credentialStatus(c))
+  );
+  push(
+    "verification",
+    "Verification",
+    credentials.map((_, i) => verificationStatuses[i] ?? "Unverified")
+  );
+  push(
+    "expiresAt",
+    "Expiry date",
+    credentials.map((c) => formatExpiry(c))
+  );
+  push(
+    "issuedAt",
+    "Issued",
+    credentials.map((c) => fieldValue(c, "issuedAt") || "—")
+  );
+
+  // Union of all claim keys across the compared credentials.
+  const claimKeys = new Set<string>();
+  for (const cred of credentials) {
+    for (const key of Object.keys(cred.claims ?? {})) claimKeys.add(key);
+  }
+  for (const key of Array.from(claimKeys).sort()) {
+    push(
+      key,
+      DEFAULT_FIELD_LABELS[key] ?? key,
+      credentials.map((c) => fieldValue(c, key) || "—")
+    );
+  }
+
+  return rows;
+}
+
+/** Render the side-by-side comparison table onto the current jsPDF page. */
+function drawComparison(
+  doc: jsPDF,
+  input: ComparisonInput,
+  template: ExportTemplate
+): void {
+  const { credentials } = input;
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const contentWidth = pageWidth - PAGE_MARGIN * 2;
+  const labelWidth = 120;
+  const columnWidth = (contentWidth - labelWidth) / Math.max(1, credentials.length);
+  const rows = buildComparisonRows(input);
+
+  doc.setFillColor(template.accentColor || COMPARISON_ACCENT);
+  doc.rect(0, 0, pageWidth, HEADER_HEIGHT, "F");
+  doc.setTextColor("#ffffff");
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(18);
+  doc.text(template.title || "Credential comparison", PAGE_MARGIN, 44);
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9);
+  doc.text("Soroban Identity", pageWidth - PAGE_MARGIN, 44, { align: "right" });
+
+  let y = HEADER_HEIGHT + 32;
+
+  const drawHeader = () => {
+    doc.setFillColor("#e2e8f0");
+    doc.rect(PAGE_MARGIN, y - 12, contentWidth, 22, "F");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(9);
+    doc.setTextColor("#0f172a");
+    doc.text("ATTRIBUTE", PAGE_MARGIN + 6, y + 3);
+    credentials.forEach((cred, i) => {
+      const x = PAGE_MARGIN + labelWidth + columnWidth * i + 6;
+      const title = fieldValue(cred, "name") || fieldValue(cred, "id") || `Credential ${i + 1}`;
+      doc.text(doc.splitTextToSize(title, columnWidth - 12)[0], x, y + 3);
+    });
+    y += 22;
+  };
+
+  drawHeader();
+
+  for (const row of rows) {
+    const cellLines = row.values.map((value) =>
+      doc.splitTextToSize(value, columnWidth - 12)
+    );
+    const rowHeight = Math.max(20, ...cellLines.map((l) => l.length * LINE_HEIGHT + 8));
+
+    if (y + rowHeight > pageHeight - PAGE_MARGIN - 30) {
+      doc.addPage();
+      y = PAGE_MARGIN;
+      drawHeader();
+    }
+
+    if (row.differs) {
+      doc.setFillColor(COMPARISON_DIFF_BG);
+      doc.rect(PAGE_MARGIN, y - 12, contentWidth, rowHeight, "F");
+    }
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(9);
+    doc.setTextColor("#334155");
+    doc.text(doc.splitTextToSize(row.label, labelWidth - 12), PAGE_MARGIN + 6, y);
+
+    cellLines.forEach((lines, i) => {
+      const x = PAGE_MARGIN + labelWidth + columnWidth * i + 6;
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(9);
+      doc.setTextColor(row.differs ? "#92400e" : "#0f172a");
+      doc.text(lines, x, y);
+    });
+
+    y += rowHeight;
+    doc.setDrawColor("#e2e8f0");
+    doc.line(PAGE_MARGIN, y - 12, pageWidth - PAGE_MARGIN, y - 12);
+  }
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(8);
+  doc.setTextColor("#64748b");
+  doc.text(
+    `Compared ${credentials.length} credentials · Exported ${new Date().toISOString()}`,
+    PAGE_MARGIN,
+    pageHeight - PAGE_MARGIN
+  );
+}
+
+/** Build a side-by-side comparison PDF for 2-4 credentials. */
+export function comparisonToPdf(
+  input: ComparisonInput,
+  template: ExportTemplate = { title: "Credential comparison", accentColor: COMPARISON_ACCENT, fields: [] }
+): Blob {
+  const doc = new jsPDF({ unit: "pt", format: "a4" });
+  doc.setProperties({
+    title: template.title || "Credential comparison",
+    subject: `${input.credentials.length} credentials compared`,
+    creator: "Soroban Identity",
+  });
+  drawComparison(doc, input, template);
+  return doc.output("blob");
+}
+
+/** Build a PNG image of the side-by-side comparison table. */
+export function comparisonToImage(
+  input: ComparisonInput,
+  template: ExportTemplate = { title: "Credential comparison", accentColor: COMPARISON_ACCENT, fields: [] }
+): Blob {
+  const doc = new jsPDF({ unit: "pt", format: "a4" });
+  drawComparison(doc, input, template);
+  const dataUrl = doc.output("datauristring");
+  const base64 = dataUrl.split(",")[1] ?? "";
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: "image/png" });
+}
+
+/** Export the comparison as a PDF and trigger a download. */
+export function downloadComparisonPdf(
+  input: ComparisonInput,
+  filename = "credential-comparison.pdf",
+  template?: ExportTemplate
+): void {
+  downloadFile(comparisonToPdf(input, template), filename);
+}
+
+/** Export the comparison as a PNG image and trigger a download. */
+export function downloadComparisonImage(
+  input: ComparisonInput,
+  filename = "credential-comparison.png",
+  template?: ExportTemplate
+): void {
+  downloadFile(comparisonToImage(input, template), filename);
 }

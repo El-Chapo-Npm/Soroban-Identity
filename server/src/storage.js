@@ -14,6 +14,137 @@ function getEventStore(config) {
   return _eventStoreInstance;
 }
 
+// ── Event sourcing metrics (#1050) ───────────────────────────────────────────
+/**
+ * In-memory counters tracking event-sourcing health. Exposed via
+ * getEventSourcingMetrics() so health/readiness endpoints can surface event
+ * lag and store size without touching the event store on every probe.
+ */
+const _eventMetrics = {
+  appended: 0,
+  appendFailures: 0,
+  rebuilds: 0,
+  lastAppendAt: null,
+  lastRebuildAt: null,
+  lastEventLagMs: 0,
+};
+
+/**
+ * Append a lifecycle event to the append-only event store, tolerating
+ * failures so a broken event store never blocks the primary write path.
+ *
+ * @param {object} config
+ * @param {object} eventInput - Arguments forwarded to createEvent()
+ * @returns {Promise<object|null>} The appended event, or null on failure
+ */
+async function _appendLifecycleEvent(config, eventInput) {
+  try {
+    const eventStore = getEventStore(config);
+    const event = await eventStore.append(createEvent(eventInput));
+    _eventMetrics.appended += 1;
+    _eventMetrics.lastAppendAt = new Date().toISOString();
+    return event;
+  } catch (e) {
+    _eventMetrics.appendFailures += 1;
+    logger.warn({ error: e.message, type: eventInput?.type }, 'Failed to append credential lifecycle event');
+    return null;
+  }
+}
+
+/**
+ * Rebuild a credential's state by replaying its event stream from the
+ * append-only store. Returns null when no events exist for the aggregate.
+ *
+ * @param {object} config
+ * @param {string} id - Credential aggregate id
+ * @returns {Promise<object|null>} The projected credential state
+ */
+export async function rebuildCredentialFromEvents(config, id) {
+  const eventStore = getEventStore(config);
+  const events = await eventStore.getEvents(id);
+  if (!events || events.length === 0) return null;
+
+  let state = null;
+  for (const event of events) {
+    state = applyCredentialEvent(state, event);
+  }
+
+  _eventMetrics.rebuilds += 1;
+  _eventMetrics.lastRebuildAt = new Date().toISOString();
+  if (events.length > 0) {
+    const lastTs = Date.parse(events[events.length - 1].timestamp ?? events[events.length - 1].createdAt ?? '');
+    if (Number.isFinite(lastTs)) {
+      _eventMetrics.lastEventLagMs = Math.max(0, Date.now() - lastTs);
+    }
+  }
+  return state;
+}
+
+/**
+ * Pure projection function: fold a single event into the credential state.
+ * Exported so read models and tests can reuse the same logic.
+ *
+ * @param {object|null} state
+ * @param {object} event
+ * @returns {object|null}
+ */
+export function applyCredentialEvent(state, event) {
+  const payload = event?.payload ?? {};
+  switch (event?.type) {
+    case EventTypes.CREDENTIAL_ISSUED:
+      return { ...payload, id: event.aggregateId, tenant_id: event.tenantId ?? payload.tenant_id ?? 'default', revoked: false };
+    case EventTypes.CREDENTIAL_REVOKED:
+      return { ...(state ?? { id: event.aggregateId }), revoked: true, revokedAt: payload.revokedAt ?? event.timestamp };
+    case EventTypes.CREDENTIAL_SUSPENDED:
+      return { ...(state ?? { id: event.aggregateId }), suspended: true, suspendedAt: payload.suspendedAt ?? event.timestamp };
+    case EventTypes.CREDENTIAL_RENEWED:
+      return { ...(state ?? { id: event.aggregateId }), ...payload, renewedAt: payload.renewedAt ?? event.timestamp };
+    case EventTypes.CREDENTIAL_VERIFIED:
+      return { ...(state ?? { id: event.aggregateId }), lastVerifiedAt: payload.verifiedAt ?? event.timestamp };
+    default:
+      return state;
+  }
+}
+
+/**
+ * Snapshot of event-sourcing health: append counters, rebuild counters and
+ * event lag. Safe to call from health/readiness probes.
+ *
+ * @returns {object}
+ */
+export function getEventSourcingMetrics() {
+  return { ..._eventMetrics };
+}
+
+/**
+ * Report the on-disk size of the event store directory in bytes.
+ * Returns 0 when the directory does not exist yet.
+ *
+ * @param {object} config
+ * @returns {Promise<number>}
+ */
+export async function getEventStoreSize(config) {
+  const dir = `${config?.dataDir || './data'}/events`;
+  let total = 0;
+  let entries;
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === 'ENOENT') return 0;
+    throw error;
+  }
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    try {
+      const stat = await fs.stat(path.join(dir, entry.name));
+      total += stat.size;
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+  }
+  return total;
+}
+
 // ── StorageAdapter interface (#389) ──────────────────────────────────────────
 // Custom adapters must export a default object implementing:
 //   read(id)           → Promise<object|null>
@@ -339,22 +470,15 @@ export async function createAndPersistCredential(config, credential) {
     const updated = createCredential(current, credential); // throws DuplicateCredentialError
     await writeCredentials(config, updated);
 
-    // Event Sourcing immutable audit log (#802)
-    try {
-      const eventStore = getEventStore(config);
-      const createdItem = updated[updated.length - 1];
-      await eventStore.append(
-        createEvent({
-          type: EventTypes.CREDENTIAL_ISSUED,
-          aggregateId: credential.id,
-          aggregateType: 'Credential',
-          tenantId: createdItem.tenant_id || config.tenantId || 'default',
-          payload: { ...credential },
-        })
-      );
-    } catch (e) {
-      logger.warn({ error: e.message }, 'Failed to append CredentialIssued event');
-    }
+    // Event Sourcing immutable audit log (#802, #1050)
+    const createdItem = updated[updated.length - 1];
+    await _appendLifecycleEvent(config, {
+      type: EventTypes.CREDENTIAL_ISSUED,
+      aggregateId: credential.id,
+      aggregateType: 'Credential',
+      tenantId: createdItem.tenant_id || config.tenantId || 'default',
+      payload: { ...credential },
+    });
 
     return updated;
   } finally {
@@ -406,22 +530,15 @@ export async function revokeAndPersistCredential(config, id) {
     const updated = current.map((c) => (c.id === id ? { ...c, revoked: true, revokedAt } : { ...c }));
     await writeCredentials(config, updated);
 
-    // Event Sourcing immutable audit log (#802)
-    try {
-      const eventStore = getEventStore(config);
-      const revokedItem = updated[index];
-      await eventStore.append(
-        createEvent({
-          type: EventTypes.CREDENTIAL_REVOKED,
-          aggregateId: id,
-          aggregateType: 'Credential',
-          tenantId: revokedItem.tenant_id || config.tenantId || 'default',
-          payload: { revokedAt },
-        })
-      );
-    } catch (e) {
-      logger.warn({ error: e.message }, 'Failed to append CredentialRevoked event');
-    }
+    // Event Sourcing immutable audit log (#802, #1050)
+    const revokedItem = updated[index];
+    await _appendLifecycleEvent(config, {
+      type: EventTypes.CREDENTIAL_REVOKED,
+      aggregateId: id,
+      aggregateType: 'Credential',
+      tenantId: revokedItem.tenant_id || config.tenantId || 'default',
+      payload: { revokedAt },
+    });
 
     return updated[index];
   } finally {
@@ -476,10 +593,137 @@ export async function updateAndPersistCredential(config, id, updates, expectedVe
     const nextList = [...current];
     nextList[index] = updated;
     await writeCredentials(config, nextList);
+
+    // Event Sourcing immutable audit log (#1050) — emit a lifecycle event
+    // matching the semantic change so the event stream stays authoritative.
+    const tenantId = updated.tenant_id || config.tenantId || 'default';
+    if (updates?.suspended === true && existing.suspended !== true) {
+      await _appendLifecycleEvent(config, {
+        type: EventTypes.CREDENTIAL_SUSPENDED,
+        aggregateId: id,
+        aggregateType: 'Credential',
+        tenantId,
+        payload: { suspendedAt: updatedAt },
+      });
+    } else if (updates?.suspended === false && existing.suspended === true) {
+      await _appendLifecycleEvent(config, {
+        type: EventTypes.CREDENTIAL_RENEWED,
+        aggregateId: id,
+        aggregateType: 'Credential',
+        tenantId,
+        payload: { resumedAt: updatedAt, ...updates },
+      });
+    } else if (updates?.renewed === true || updates?.renewedAt) {
+      await _appendLifecycleEvent(config, {
+        type: EventTypes.CREDENTIAL_RENEWED,
+        aggregateId: id,
+        aggregateType: 'Credential',
+        tenantId,
+        payload: { renewedAt: updates.renewedAt ?? updatedAt, ...updates },
+      });
+    } else if (updates?.verified === true || updates?.verifiedAt) {
+      await _appendLifecycleEvent(config, {
+        type: EventTypes.CREDENTIAL_VERIFIED,
+        aggregateId: id,
+        aggregateType: 'Credential',
+        tenantId,
+        payload: { verifiedAt: updates.verifiedAt ?? updatedAt },
+      });
+    }
+
     return updated;
   } finally {
     release();
   }
+}
+
+/**
+ * Atomically mark a credential as suspended under a per-file mutex and
+ * append a CredentialSuspended lifecycle event (#1050).
+ *
+ * @param {object} config
+ * @param {string} id
+ * @returns {Promise<object|null>} The suspended credential or null if not found
+ */
+export async function suspendAndPersistCredential(config, id) {
+  const storePath = path.resolve(config.credentialStorePath);
+  const release = await _acquireFileLock(storePath);
+  try {
+    const current = await readCredentials(config);
+    const index = current.findIndex((c) => c.id === id);
+    if (index === -1) return null;
+    const suspendedAt = new Date().toISOString();
+    const updated = current.map((c) => (c.id === id ? { ...c, suspended: true, suspendedAt } : { ...c }));
+    await writeCredentials(config, updated);
+
+    const suspendedItem = updated[index];
+    await _appendLifecycleEvent(config, {
+      type: EventTypes.CREDENTIAL_SUSPENDED,
+      aggregateId: id,
+      aggregateType: 'Credential',
+      tenantId: suspendedItem.tenant_id || config.tenantId || 'default',
+      payload: { suspendedAt },
+    });
+
+    return updated[index];
+  } finally {
+    release();
+  }
+}
+
+/**
+ * Atomically renew a credential under a per-file mutex and append a
+ * CredentialRenewed lifecycle event (#1050).
+ *
+ * @param {object} config
+ * @param {string} id
+ * @param {object} updates - Renewal fields (e.g. expiresAt)
+ * @returns {Promise<object|null>} The renewed credential or null if not found
+ */
+export async function renewAndPersistCredential(config, id, updates = {}) {
+  const storePath = path.resolve(config.credentialStorePath);
+  const release = await _acquireFileLock(storePath);
+  try {
+    const current = await readCredentials(config);
+    const index = current.findIndex((c) => c.id === id);
+    if (index === -1) return null;
+    const renewedAt = new Date().toISOString();
+    const updated = current.map((c) => (c.id === id ? { ...c, ...updates, renewedAt, suspended: false } : { ...c }));
+    await writeCredentials(config, updated);
+
+    const renewedItem = updated[index];
+    await _appendLifecycleEvent(config, {
+      type: EventTypes.CREDENTIAL_RENEWED,
+      aggregateId: id,
+      aggregateType: 'Credential',
+      tenantId: renewedItem.tenant_id || config.tenantId || 'default',
+      payload: { renewedAt, ...updates },
+    });
+
+    return updated[index];
+  } finally {
+    release();
+  }
+}
+
+/**
+ * Record a credential verification in the event stream (#1050). Verification
+ * does not mutate the credential store, so only the event is appended.
+ *
+ * @param {object} config
+ * @param {string} id
+ * @param {object} details
+ * @returns {Promise<object|null>} The appended event or null on failure
+ */
+export async function recordCredentialVerification(config, id, details = {}) {
+  const verifiedAt = new Date().toISOString();
+  return _appendLifecycleEvent(config, {
+    type: EventTypes.CREDENTIAL_VERIFIED,
+    aggregateId: id,
+    aggregateType: 'Credential',
+    tenantId: details.tenant_id || config.tenantId || 'default',
+    payload: { verifiedAt, ...details },
+  });
 }
 
 

@@ -25,6 +25,9 @@ tags:
     description: Reporter-submitted scores and anti-sybil checks
   - name: meta
     description: Spec discovery and health
+security:
+  - ApiKeyAuth: []
+  - BearerAuth: []
 paths:
   /openapi.yaml:
     get:
@@ -98,9 +101,16 @@ paths:
     post:
       tags: [identity]
       summary: Create a new DID.
+      description: |
+        Sensitive operation. Replay protection applies: clients must send a
+        unique `X-Nonce` header per request. The server echoes the accepted
+        nonce back in the `X-Nonce` response header and rejects duplicates
+        with `409 REPLAY_DETECTED`. Used nonces are retained for 5 minutes.
       x-soroban-contract:
         contract: identity-registry
         function: create_did
+      parameters:
+        - $ref: '#/components/parameters/XNonce'
       requestBody:
         required: true
         content:
@@ -118,6 +128,9 @@ paths:
       responses:
         '201':
           description: DID created.
+          headers:
+            X-Nonce:
+              $ref: '#/components/headers/XNonce'
           content:
             application/json:
               schema:
@@ -137,6 +150,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          $ref: '#/components/responses/ReplayDetected'
 
   /identity/dids/{controller}:
     parameters:
@@ -161,9 +176,15 @@ paths:
     patch:
       tags: [identity]
       summary: Update DID metadata.
+      description: |
+        Sensitive operation. Replay protection applies: clients must send a
+        unique `X-Nonce` header per request. Duplicate nonces are rejected
+        with `409 REPLAY_DETECTED`; used nonces are retained for 5 minutes.
       x-soroban-contract:
         contract: identity-registry
         function: update_did
+      parameters:
+        - $ref: '#/components/parameters/XNonce'
       requestBody:
         required: true
         content:
@@ -178,6 +199,9 @@ paths:
       responses:
         '200':
           description: Updated.
+          headers:
+            X-Nonce:
+              $ref: '#/components/headers/XNonce'
           content:
             application/json:
               schema:
@@ -196,15 +220,26 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          $ref: '#/components/responses/ReplayDetected'
     delete:
       tags: [identity]
       summary: Deactivate a DID.
+      description: |
+        Sensitive operation. Replay protection applies: clients must send a
+        unique `X-Nonce` header per request. Duplicate nonces are rejected
+        with `409 REPLAY_DETECTED`; used nonces are retained for 5 minutes.
       x-soroban-contract:
         contract: identity-registry
         function: deactivate_did
+      parameters:
+        - $ref: '#/components/parameters/XNonce'
       responses:
         '200':
           description: Deactivated.
+          headers:
+            X-Nonce:
+              $ref: '#/components/headers/XNonce'
           content:
             application/json:
               schema:
@@ -218,6 +253,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          $ref: '#/components/responses/ReplayDetected'
 
   /identity/dids/{controller}/active:
     get:
@@ -242,9 +279,15 @@ paths:
     post:
       tags: [credentials]
       summary: Issue a verifiable credential.
+      description: |
+        Sensitive operation. Replay protection applies: clients must send a
+        unique `X-Nonce` header per request. Duplicate nonces are rejected
+        with `409 REPLAY_DETECTED`; used nonces are retained for 5 minutes.
       x-soroban-contract:
         contract: credential-manager
         function: issue_credential
+      parameters:
+        - $ref: '#/components/parameters/XNonce'
       requestBody:
         required: true
         content:
@@ -285,6 +328,9 @@ paths:
       responses:
         '201':
           description: Credential issued.
+          headers:
+            X-Nonce:
+              $ref: '#/components/headers/XNonce'
           content:
             application/json:
               schema:
@@ -315,16 +361,27 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
         '409':
-          description: A credential with the given ID already exists.
+          description: |
+            A credential with the given ID already exists, or the request was
+            rejected as a replay (`REPLAY_DETECTED`).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
-              example:
-                code: CREDENTIAL_ALREADY_EXISTS
-                message: Credential with ID "abc123" already exists.
-                details:
-                  - field: id
-                    value: abc123
+              examples:
+                credentialAlreadyExists:
+                  value:
+                    code: CREDENTIAL_ALREADY_EXISTS
+                    message: Credential with ID "abc123" already exists.
+                    details:
+                      - field: id
+                        value: abc123
+                replayDetected:
+                  value:
+                    code: REPLAY_DETECTED
+                    message: Nonce has already been used.
+                    details:
+                      - field: nonce
+                        value: 9f8c1e2b4a
         '422':
           description: Credential data failed validation (e.g. claimsHash format is invalid).
           content:
@@ -354,12 +411,23 @@ paths:
     delete:
       tags: [credentials]
       summary: Revoke a credential.
+      description: |
+        Sensitive operation. Replay protection applies: clients must send a
+        unique `X-Nonce` header per request. Duplicate nonces are rejected
+        with `409 REPLAY_DETECTED`; used nonces are retained for 5 minutes.
       x-soroban-contract:
         contract: credential-manager
         function: revoke_credential
+      parameters:
+        - $ref: '#/components/parameters/XNonce'
       responses:
         '204':
           description: Revoked.
+          headers:
+            X-Nonce:
+              $ref: '#/components/headers/XNonce'
+        '409':
+          $ref: '#/components/responses/ReplayDetected'
 
   /credentials/{id}/verify:
     post:
@@ -816,9 +884,15 @@ paths:
     post:
       tags: [reputation]
       summary: Submit a score delta. Caller must be a registered reporter.
+      description: |
+        Sensitive operation. Replay protection applies: clients must send a
+        unique `X-Nonce` header per request. Duplicate nonces are rejected
+        with `409 REPLAY_DETECTED`; used nonces are retained for 5 minutes.
       x-soroban-contract:
         contract: reputation
         function: submit_score
+      parameters:
+        - $ref: '#/components/parameters/XNonce'
       requestBody:
         required: true
         content:
@@ -834,6 +908,9 @@ paths:
       responses:
         '201':
           description: Score submitted.
+          headers:
+            X-Nonce:
+              $ref: '#/components/headers/XNonce'
           content:
             application/json:
               schema:
@@ -852,6 +929,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          $ref: '#/components/responses/ReplayDetected'
         '429':
           description: Rate limit exceeded.
           content:
@@ -859,6 +938,43 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
 
 components:
+  parameters:
+    XNonce:
+      name: X-Nonce
+      in: header
+      required: true
+      description: |
+        Client-generated unique nonce for replay protection (#1052). Must be
+        unique per request; the server stores used nonces in Redis for 5
+        minutes and rejects duplicates with `409 REPLAY_DETECTED`. Recommended
+        format: a UUIDv4 or 128-bit random hex string.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+        example: 9f8c1e2b4a7d4f0e8c3b2a1d6e5f4c3b
+  headers:
+    XNonce:
+      description: |
+        The nonce accepted for this request, echoed back so clients can
+        correlate responses with the request that produced them (#1052).
+      schema:
+        type: string
+        example: 9f8c1e2b4a7d4f0e8c3b2a1d6e5f4c3b
+  responses:
+    ReplayDetected:
+      description: |
+        The supplied `X-Nonce` has already been used within the 5-minute
+        replay window. The request was rejected without side effects.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example:
+            code: REPLAY_DETECTED
+            message: Nonce has already been used.
+            details:
+              - field: nonce
+                value: 9f8c1e2b4a
   securitySchemes:
     ApiKeyAuth:
       type: apiKey
@@ -894,7 +1010,27 @@ components:
         error: { type: string }
         code:
           type: string
-          enum: [NOT_FOUND, UNAUTHORIZED, NETWORK_ERROR, VALIDATION_ERROR, CONTRACT_ERROR, INVALID_INPUT, UNKNOWN]
+          enum: [NOT_FOUND, UNAUTHORIZED, NETWORK_ERROR, VALIDATION_ERROR, CONTRACT_ERROR, INVALID_INPUT, UNKNOWN, REPLAY_DETECTED]
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      description: Standard error envelope returned by all failing endpoints.
+      properties:
+        code:
+          type: string
+          description: Machine-readable error code.
+          example: REPLAY_DETECTED
+        message:
+          type: string
+          description: Human-readable error description.
+        details:
+          type: array
+          description: Optional field-level error detail.
+          items:
+            type: object
+            properties:
+              field: { type: string }
+              value: {}
     ClaimsValidationError:
       type: object
       required: [error, code, fieldErrors]

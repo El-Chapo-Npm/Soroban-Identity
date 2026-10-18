@@ -5,6 +5,9 @@ import LoadingFallback from "./components/LoadingFallback";
 import KeyboardShortcutsModal from "./components/KeyboardShortcutsModal";
 import { useKeyboardShortcuts, useSequentialShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useKeyboardShortcutsContext } from "./context/KeyboardShortcutsContext";
+import ViewTransition from "./components/ViewTransition";
+import VoiceCommandButton from "./components/VoiceCommandButton";
+import { useVoiceCommands, type VoiceCommand } from "./hooks/useVoiceCommands";
 
 // Tab panels are route-like application surfaces. Keep the initial identity
 // route small and fetch the credentials route only when it is needed.
@@ -12,12 +15,16 @@ const IdentityPanel = lazy(() => import("./components/IdentityPanel"));
 const CredentialsPanel = lazy(() => import("./components/CredentialsPanel"));
 const IssuerDashboard = lazy(() => import("./pages/IssuerDashboard"));
 const CredentialRecipientVerify = lazy(() => import("./components/CredentialRecipientVerify"));
+const NetworkStatistics = lazy(() => import("./pages/NetworkStatistics"));
 
 const preloadCredentialsPanel = () => {
   void import("./components/CredentialsPanel");
 };
 const preloadCredentialRecipientVerify = () => {
   void import("./components/CredentialRecipientVerify");
+};
+const preloadNetworkStatistics = () => {
+  void import("./pages/NetworkStatistics");
 };
 import WalletButton from "./components/WalletButton";
 import ErrorBoundary from "./components/ErrorBoundary";
@@ -52,11 +59,12 @@ export enum Tab {
   Identity = "identity",
   Credentials = "credentials",
   IssuerAnalytics = "issuerAnalytics",
+  NetworkStatistics = "networkStatistics",
 }
 
-const TAB_ORDER: Tab[] = [Tab.Identity, Tab.Credentials, Tab.IssuerAnalytics];
+const TAB_ORDER: Tab[] = [Tab.Identity, Tab.Credentials, Tab.IssuerAnalytics, Tab.NetworkStatistics];
 
-export default function App() {
+function AppContent() {
   const [tab, setTab] = useState<Tab>(Tab.Identity);
   const tabRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({});
   const [activeNetwork, setActiveNetwork] = useState<NetworkName>(DEFAULT_NETWORK);
@@ -76,6 +84,44 @@ export default function App() {
   // Keyboard shortcuts
   const { enabled: shortcutsEnabled, toggleHelp: toggleShortcutsHelp, showHelp: showShortcutsHelp } = useKeyboardShortcutsContext();
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Voice commands (#1046): hands-free search, navigation and verification.
+  const voiceCommands = useMemo<VoiceCommand[]>(
+    () => [
+      {
+        phrases: ["search", "find", "buscar", "rechercher", "搜索"],
+        description: t("voice.commands.search"),
+        handler: () => {
+          searchInputRef.current?.focus();
+        },
+      },
+      {
+        phrases: ["navigate", "go to", "open", "navegar", "aller", "导航"],
+        description: t("voice.commands.navigate"),
+        handler: (transcript) => {
+          const target = transcript.toLowerCase();
+          if (target.includes("credential")) {
+            setTab(Tab.Credentials);
+          } else if (target.includes("issuer") || target.includes("analytics")) {
+            setTab(Tab.IssuerAnalytics);
+          } else {
+            setTab(Tab.Identity);
+          }
+        },
+      },
+      {
+        phrases: ["verify", "verificar", "vérifier", "验证"],
+        description: t("voice.commands.verify"),
+        handler: () => {
+          setTab(Tab.Credentials);
+          setScanning(true);
+        },
+      },
+    ],
+    [t],
+  );
+
+  const voice = useVoiceCommands({ commands: voiceCommands });
 
   // Mobile nav drawer (#882): while open, focus moves into the drawer and
   // Tab cycles inside it, the page behind does not scroll, and Escape closes
@@ -191,7 +237,7 @@ export default function App() {
     [],
   );
 
-  const { notification, dismiss } = useCredentialExpiryCheck(
+  const { notification, dismiss, markAllAsRead } = useCredentialExpiryCheck(
     wallet.publicKey,
     fetchCredentials,
   );
@@ -380,6 +426,26 @@ export default function App() {
           >
             {getThemeIcon(theme, isDarkMode)} {getThemeLabel(theme, isDarkMode, t)}
           </button>
+          {notification && !notification.dismissed && notification.count > 0 && (
+            <span
+              className="notification-badge-icon"
+              data-testid="notification-badge"
+              aria-label={`${notification.count} notification${notification.count > 1 ? "s" : ""}`}
+              style={{
+                position: "relative",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "0.25rem",
+                fontSize: "0.85rem",
+                fontWeight: 600,
+              }}
+            >
+              <span aria-hidden="true">🔔</span>
+              <span className="badge badge-yellow" data-testid="notification-badge-count">
+                {notification.count}
+              </span>
+            </span>
+          )}
           <WalletButton wallet={wallet} />
         </div>
         <div
@@ -438,7 +504,7 @@ export default function App() {
         </div>
       )}
 
-      {notification && !notification.dismissed && (
+      {notification && !notification.dismissed && notification.count > 0 && (
         <div
           role="alert"
           style={{
@@ -455,22 +521,43 @@ export default function App() {
           }}
         >
           <span>
-            <span aria-hidden="true">⚠</span> {notification.count} credential
+            <span aria-hidden="true">⚠</span>{" "}
+            <span className="notification-badge" data-testid="notification-badge-count">
+              {notification.count}
+            </span>{" "}
+            credential
             {notification.count > 1 ? "s" : ""} expiring within 7 days
           </span>
-          <button
-            onClick={dismiss}
-            aria-label={t("a11y.dismissNotification")}
-            style={{
-              background: "none",
-              border: "none",
-              cursor: "pointer",
-              fontSize: "1rem",
-              color: "inherit",
-            }}
-          >
-            ✕
-          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <button
+              type="button"
+              onClick={markAllAsRead}
+              style={{
+                background: "none",
+                border: "1px solid currentColor",
+                borderRadius: "0.25rem",
+                padding: "0.2rem 0.5rem",
+                cursor: "pointer",
+                fontSize: "0.8rem",
+                color: "inherit",
+              }}
+            >
+              Mark all as read
+            </button>
+            <button
+              onClick={dismiss}
+              aria-label={t("a11y.dismissNotification")}
+              style={{
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                fontSize: "1rem",
+                color: "inherit",
+              }}
+            >
+              ✕
+            </button>
+          </div>
         </div>
       )}
 
@@ -495,9 +582,22 @@ export default function App() {
             ref={(node) => {
               tabRefs.current[name] = node;
             }}
+            data-tour={`tab-${name}`}
             onClick={() => setTab(name)}
-            onMouseEnter={name === Tab.Credentials ? preloadCredentialsPanel : undefined}
-            onFocus={name === Tab.Credentials ? preloadCredentialsPanel : undefined}
+            onMouseEnter={
+              name === Tab.Credentials
+                ? preloadCredentialsPanel
+                : name === Tab.NetworkStatistics
+                  ? preloadNetworkStatistics
+                  : undefined
+            }
+            onFocus={
+              name === Tab.Credentials
+                ? preloadCredentialsPanel
+                : name === Tab.NetworkStatistics
+                  ? preloadNetworkStatistics
+                  : undefined
+            }
           >
             {t(`tabs.${name}`)}
           </button>
@@ -507,10 +607,12 @@ export default function App() {
       <main id="main-content" tabIndex={-1}>
         <ErrorBoundary>
           <Suspense fallback={<LoadingFallback />}>
+          <ViewTransition viewKey={tab}>
           <div
             id={`panel-${Tab.Identity}`}
             role="tabpanel"
             aria-labelledby={`tab-${Tab.Identity}`}
+            data-tour="panel-identity"
             hidden={tab !== Tab.Identity}
           >
             {tab === Tab.Identity && <IdentityPanel />}
@@ -519,6 +621,7 @@ export default function App() {
             id={`panel-${Tab.Credentials}`}
             role="tabpanel"
             aria-labelledby={`tab-${Tab.Credentials}`}
+            data-tour="panel-credentials"
             hidden={tab !== Tab.Credentials}
           >
             {tab === Tab.Credentials && (
@@ -550,14 +653,25 @@ export default function App() {
             id={`panel-${Tab.IssuerAnalytics}`}
             role="tabpanel"
             aria-labelledby={`tab-${Tab.IssuerAnalytics}`}
+            data-tour="panel-issuer"
             hidden={tab !== Tab.IssuerAnalytics}
           >
             {tab === Tab.IssuerAnalytics && <IssuerDashboard />}
           </div>
+          </ViewTransition>
           </Suspense>
         </ErrorBoundary>
       </main>
     </div>
     </ToastProvider>
+  );
+}
+
+export default function App() {
+  return (
+    <TourProvider>
+      <AppContent />
+      <TourOverlay />
+    </TourProvider>
   );
 }

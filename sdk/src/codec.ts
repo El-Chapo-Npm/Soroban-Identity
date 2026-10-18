@@ -76,9 +76,23 @@ export function decodeCredential(val: xdr.ScVal): Credential {
   }
 
   const credential = result as Record<string, unknown>;
+  const toSafeTimestamp = (v: unknown): number => {
+    if (typeof v === "bigint") {
+      if (v <= 0n) return 0;
+      return v > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(v);
+    }
+    if (typeof v === "number") {
+      return v < 0 ? v + 0x100000000 : v;
+    }
+    return Number(v ?? 0);
+  };
   return {
     ...credential,
-    credentialType: assertCredentialType(credential.credentialType),
+    issuedAt: toSafeTimestamp(credential.issuedAt ?? credential.issued_at),
+    expiresAt: toSafeTimestamp(credential.expiresAt ?? credential.expires_at),
+    activationTime: toSafeTimestamp(credential.activationTime ?? credential.activation_time),
+    lastModifiedAt: toSafeTimestamp(credential.lastModifiedAt ?? credential.last_modified_at),
+    credentialType: assertCredentialType(credential.credentialType ?? credential.credential_type),
   } as Credential;
 }
 

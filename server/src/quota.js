@@ -46,6 +46,11 @@ export class QuotaTracker {
    * @param {number} [options.maxBuckets] - Upper bound on tracked clients,
    *   mirroring TieredRateLimiter's bucket cap so an unbounded stream of
    *   distinct clients cannot grow memory without limit.
+   * @param {Record<string,{tier?:string,dailyLimit?:number,monthlyLimit?:number,overageMode?:'block'|'allow'}>}
+   *   [options.tenantOverrides] - Per-tenant budget overrides keyed by tenant
+   *   id. A tenant may be pinned to a different tier and/or given explicit
+   *   daily/monthly limits and overage mode, so each tenant's quotas are
+   *   enforced independently of the default per-key/IP behaviour.
    */
   constructor(options = {}) {
     this.tiers = options.tiers ?? QUOTA_TIERS;
@@ -53,10 +58,37 @@ export class QuotaTracker {
     this.overageMode = options.overageMode === 'allow' ? 'allow' : 'block';
     this.onThreshold = options.onThreshold ?? null;
     this.maxBuckets = options.maxBuckets ?? 10_000;
+    this.tenantOverrides = options.tenantOverrides ?? {};
     this.clients = new Map();
   }
 
+  /** Resolve the tenant id from the request context, if any. */
+  resolveTenant(req) {
+    const tenant =
+      req.tenantId ??
+      req.tenant?.id ??
+      req.auth?.tenantId ??
+      req.auth?.apiKey?.tenantId ??
+      req.headers?.['x-tenant-id'] ??
+      null;
+    return tenant ? String(tenant) : null;
+  }
+
+  /** Look up the per-tenant override record, if one is configured. */
+  getTenantOverride(tenantId) {
+    if (!tenantId) return null;
+    return this.tenantOverrides[tenantId] ?? null;
+  }
+
+  /**
+   * Resolve the effective tier for a request, applying any tenant override
+   * before falling back to the existing per-request/per-key resolution.
+   */
   resolveTier(req) {
+    const override = this.getTenantOverride(this.resolveTenant(req));
+    if (override?.tier && this.tiers[override.tier.toLowerCase()]) {
+      return override.tier.toLowerCase();
+    }
     if (req.userTier && this.tiers[req.userTier.toLowerCase()]) {
       return req.userTier.toLowerCase();
     }
@@ -68,7 +100,31 @@ export class QuotaTracker {
     return 'free';
   }
 
+  /**
+   * Resolve the effective limits for a request, layering any tenant override
+   * (explicit daily/monthly limits and overage mode) on top of the tier
+   * defaults. Without a tenant override this is exactly the tier record, so
+   * the default per-key/IP behaviour is unchanged.
+   */
+  resolveLimits(req, tierName) {
+    const tier = this.tiers[tierName] ?? this.tiers.free;
+    const override = this.getTenantOverride(this.resolveTenant(req));
+    if (!override) return { tier, overageMode: this.overageMode };
+    return {
+      tier: {
+        name: tier.name,
+        dailyLimit: override.dailyLimit ?? tier.dailyLimit,
+        monthlyLimit: override.monthlyLimit ?? tier.monthlyLimit,
+      },
+      overageMode: override.overageMode === 'allow' ? 'allow'
+        : override.overageMode === 'block' ? 'block'
+        : this.overageMode,
+    };
+  }
+
   getClientKey(req) {
+    const tenantId = this.resolveTenant(req);
+    if (tenantId) return `tenant:${tenantId}`;
     if (req.apiKeyId) return `key:${req.apiKeyId}`;
     if (req.auth?.apiKey?.id) return `key:${req.auth.apiKey.id}`;
     const forwarded = req.headers?.['x-forwarded-for'];
@@ -146,7 +202,7 @@ export class QuotaTracker {
   /** Read current usage without consuming a unit of quota. */
   peek(req) {
     const tierName = this.resolveTier(req);
-    const tier = this.tiers[tierName] ?? this.tiers.free;
+    const { tier } = this.resolveLimits(req, tierName);
     const key = this.getClientKey(req);
     const state = this.getOrInitState(key, tierName, this.now());
     return this.describe(state, tier);
@@ -159,7 +215,7 @@ export class QuotaTracker {
    */
   consume(req) {
     const tierName = this.resolveTier(req);
-    const tier = this.tiers[tierName] ?? this.tiers.free;
+    const { tier, overageMode } = this.resolveLimits(req, tierName);
     const key = this.getClientKey(req);
     const apiKeyId = req.apiKeyId ?? req.auth?.apiKey?.id ?? null;
     const now = this.now();
@@ -168,7 +224,7 @@ export class QuotaTracker {
     const wouldExceedDaily = state.dailyCount + 1 > tier.dailyLimit;
     const wouldExceedMonthly = state.monthlyCount + 1 > tier.monthlyLimit;
     const overage = wouldExceedDaily || wouldExceedMonthly;
-    const blocked = overage && this.overageMode === 'block';
+    const blocked = overage && overageMode === 'block';
 
     if (!blocked) {
       state.dailyCount += 1;
@@ -219,7 +275,11 @@ export class QuotaTracker {
   }
 
   getStats() {
-    return { buckets: this.clients.size, overageMode: this.overageMode };
+    return {
+      buckets: this.clients.size,
+      overageMode: this.overageMode,
+      tenants: Object.keys(this.tenantOverrides).length,
+    };
   }
 }
 

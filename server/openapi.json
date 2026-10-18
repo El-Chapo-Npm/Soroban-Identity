@@ -43,6 +43,10 @@
     {
       "name": "oauth",
       "description": "OAuth 2.0 client registration, authorization code grant, token introspection and revocation"
+    },
+    {
+      "name": "encryption",
+      "description": "Session key exchange and end-to-end encryption of sensitive credential data in transit (AES-256-GCM)"
     }
   ],
   "paths": {
@@ -395,21 +399,48 @@
             }
           },
           "409": {
-            "description": "Credential with the given ID already exists",
+            "description": "Conflict - the credential ID already exists, or the request nonce was already used (replay attack). Replay rejections return code `NONCE_REPLAYED` (alias `SIGNATURE_REPLAYED`).",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorResponse"
                 },
-                "example": {
-                  "code": "CREDENTIAL_ALREADY_EXISTS",
-                  "message": "Credential with ID \"cred-kyc-2026-001\" already exists",
-                  "details": [
-                    {
-                      "field": "id",
-                      "value": "cred-kyc-2026-001"
+                "examples": {
+                  "credentialExists": {
+                    "summary": "Credential already exists",
+                    "value": {
+                      "code": "CREDENTIAL_ALREADY_EXISTS",
+                      "message": "Credential with ID \"cred-kyc-2026-001\" already exists",
+                      "details": [
+                        {
+                          "field": "id",
+                          "value": "cred-kyc-2026-001"
+                        }
+                      ]
                     }
-                  ]
+                  },
+                  "nonceReplayed": {
+                    "summary": "Nonce already used (replay)",
+                    "value": {
+                      "code": "NONCE_REPLAYED",
+                      "error": "conflict",
+                      "message": "Nonce has already been used. Generate a fresh nonce for each request.",
+                      "details": [
+                        {
+                          "field": "X-Nonce",
+                          "value": "b7f3c1a2e9d84f6b8c0a1d2e3f4a5b6c"
+                        }
+                      ]
+                    }
+                  },
+                  "signatureReplayed": {
+                    "summary": "Signature replayed",
+                    "value": {
+                      "code": "SIGNATURE_REPLAYED",
+                      "error": "conflict",
+                      "message": "Request signature has already been used. Generate a fresh nonce for each request."
+                    }
+                  }
                 }
               }
             }
@@ -566,21 +597,48 @@
             }
           },
           "409": {
-            "description": "Credential with the given ID already exists",
+            "description": "Conflict - the credential ID already exists, or the request nonce was already used (replay attack). Replay rejections return code `NONCE_REPLAYED` (alias `SIGNATURE_REPLAYED`).",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorResponse"
                 },
-                "example": {
-                  "code": "CREDENTIAL_ALREADY_EXISTS",
-                  "message": "Credential with ID \"cred-kyc-2026-001\" already exists",
-                  "details": [
-                    {
-                      "field": "id",
-                      "value": "cred-kyc-2026-001"
+                "examples": {
+                  "credentialExists": {
+                    "summary": "Credential already exists",
+                    "value": {
+                      "code": "CREDENTIAL_ALREADY_EXISTS",
+                      "message": "Credential with ID \"cred-kyc-2026-001\" already exists",
+                      "details": [
+                        {
+                          "field": "id",
+                          "value": "cred-kyc-2026-001"
+                        }
+                      ]
                     }
-                  ]
+                  },
+                  "nonceReplayed": {
+                    "summary": "Nonce already used (replay)",
+                    "value": {
+                      "code": "NONCE_REPLAYED",
+                      "error": "conflict",
+                      "message": "Nonce has already been used. Generate a fresh nonce for each request.",
+                      "details": [
+                        {
+                          "field": "X-Nonce",
+                          "value": "b7f3c1a2e9d84f6b8c0a1d2e3f4a5b6c"
+                        }
+                      ]
+                    }
+                  },
+                  "signatureReplayed": {
+                    "summary": "Signature replayed",
+                    "value": {
+                      "code": "SIGNATURE_REPLAYED",
+                      "error": "conflict",
+                      "message": "Request signature has already been used. Generate a fresh nonce for each request."
+                    }
+                  }
                 }
               }
             }
@@ -763,6 +821,27 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Conflict - the request nonce was already used (replay attack). Returns code `NONCE_REPLAYED` (alias `SIGNATURE_REPLAYED`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "code": "NONCE_REPLAYED",
+                  "error": "conflict",
+                  "message": "Nonce has already been used. Generate a fresh nonce for each request.",
+                  "details": [
+                    {
+                      "field": "X-Nonce",
+                      "value": "b7f3c1a2e9d84f6b8c0a1d2e3f4a5b6c"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "operationId": "deleteCredential"
@@ -842,6 +921,27 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Conflict - the request nonce was already used (replay attack). Returns code `NONCE_REPLAYED` (alias `SIGNATURE_REPLAYED`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "code": "NONCE_REPLAYED",
+                  "error": "conflict",
+                  "message": "Nonce has already been used. Generate a fresh nonce for each request.",
+                  "details": [
+                    {
+                      "field": "X-Nonce",
+                      "value": "b7f3c1a2e9d84f6b8c0a1d2e3f4a5b6c"
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         "operationId": "revokeCredential"
@@ -916,6 +1016,27 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict - the request nonce was already used (replay attack). Returns code `NONCE_REPLAYED` (alias `SIGNATURE_REPLAYED`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "code": "NONCE_REPLAYED",
+                  "error": "conflict",
+                  "message": "Nonce has already been used. Generate a fresh nonce for each request.",
+                  "details": [
+                    {
+                      "field": "X-Nonce",
+                      "value": "b7f3c1a2e9d84f6b8c0a1d2e3f4a5b6c"
+                    }
+                  ]
                 }
               }
             }
@@ -1870,6 +1991,223 @@
         "operationId": "oauthIntrospect"
       }
     },
+    "/encryption/key-exchange": {
+      "post": {
+        "tags": [
+          "encryption"
+        ],
+        "summary": "Establish a session encryption key",
+        "description": "Performs the key-exchange handshake that establishes a per-session symmetric encryption key used to protect sensitive credential fields in transit.\n\nThe client generates an ephemeral X25519 key pair and sends its public key. The server generates its own ephemeral key pair for the session, derives a shared secret via X25519 ECDH, and derives the session key with HKDF-SHA256 (salt = the server-provided `salt`, info = `soroban-identity/session-key/v1`). The derived 32-byte key is used with AES-256-GCM.\n\nKey rotation: each session key has a bounded lifetime (`expiresAt`). The server also rotates the key material whenever `rotationIntervalSeconds` elapses; the client must call this endpoint again (or `POST /encryption/key-exchange/rotate` with the current `keyId`) to obtain a fresh key. During a rotation grace period both the previous and the current key are accepted for decryption, but only the current key is used for new responses. Responses always advertise the active key via the `X-Encryption-Key-Id` header so clients can detect rotation.\n\nAll key material is ephemeral and never persisted; the session key exists only for the lifetime of the session.",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "BearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KeyExchangeRequest"
+              },
+              "example": {
+                "clientPublicKey": "MCowBQYDK2VuAyEA9m1n2o3p4q5r6s7t8u9v0w1x2y3z4a5b6c7d8e9f0g1h2i",
+                "clientKeyId": "cli-7f3a9c21",
+                "requestedAlgorithm": "AES-256-GCM"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session key established. The client derives the same session key locally from its private key and the returned `serverPublicKey`.",
+            "headers": {
+              "X-Encryption-Key-Id": {
+                "description": "Identifier of the active session key. Echo this back on subsequent requests and use it to select the correct key when decrypting responses.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Encryption-Algorithm": {
+                "description": "Negotiated authenticated encryption algorithm.",
+                "schema": {
+                  "type": "string"
+                },
+                "example": "AES-256-GCM"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeyExchangeResponse"
+                },
+                "example": {
+                  "keyId": "sess-4b8e1d90",
+                  "serverPublicKey": "MCowBQYDK2VuAyEA1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u2v3w",
+                  "algorithm": "AES-256-GCM",
+                  "keyDerivation": "HKDF-SHA256",
+                  "salt": "3f9c1d7a5b2e8046",
+                  "nonceLength": 12,
+                  "tagLength": 16,
+                  "expiresAt": "2026-08-25T12:00:00.000Z",
+                  "rotationIntervalSeconds": 900,
+                  "previousKeyId": null
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed key-exchange request or unsupported algorithm",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "code": "INVALID_KEY_EXCHANGE",
+                  "message": "clientPublicKey must be a valid X25519 public key."
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A session key already exists for this session and has not yet expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "code": "SESSION_KEY_ACTIVE",
+                  "message": "A session key is already active; use /encryption/key-exchange/rotate to rotate it."
+                }
+              }
+            }
+          }
+        },
+        "operationId": "encryptionKeyExchange"
+      }
+    },
+    "/encryption/key-exchange/rotate": {
+      "post": {
+        "tags": [
+          "encryption"
+        ],
+        "summary": "Rotate the session encryption key",
+        "description": "Rotates the session key before or after its natural expiry. The client sends a new ephemeral public key together with the `keyId` currently in use. The server derives a new session key, marks the previous key as `previousKeyId`, and keeps it valid for decryption only during the rotation grace period (`gracePeriodSeconds`). New responses are always encrypted with the newly returned `keyId`.\n\nClients should treat a response whose `X-Encryption-Key-Id` differs from their cached key id as a rotation signal and re-run this endpoint.",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "BearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KeyRotationRequest"
+              },
+              "example": {
+                "currentKeyId": "sess-4b8e1d90",
+                "clientPublicKey": "MCowBQYDK2VuAyEA9m1n2o3p4q5r6s7t8u9v0w1x2y3z4a5b6c7d8e9f0g1h2i"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session key rotated. The previous key remains valid for decryption until `previousKeyExpiresAt`.",
+            "headers": {
+              "X-Encryption-Key-Id": {
+                "description": "Identifier of the newly active session key.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Encryption-Algorithm": {
+                "description": "Negotiated authenticated encryption algorithm.",
+                "schema": {
+                  "type": "string"
+                },
+                "example": "AES-256-GCM"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeyExchangeResponse"
+                },
+                "example": {
+                  "keyId": "sess-9c2f7a14",
+                  "serverPublicKey": "MCowBQYDK2VuAyEA7z8y9x0w1v2u3t4s5r6q7p8o9n0m1l2k3j4i5h6g7f8e9d",
+                  "algorithm": "AES-256-GCM",
+                  "keyDerivation": "HKDF-SHA256",
+                  "salt": "8a1b2c3d4e5f6071",
+                  "nonceLength": 12,
+                  "tagLength": 16,
+                  "expiresAt": "2026-08-25T12:15:00.000Z",
+                  "rotationIntervalSeconds": 900,
+                  "previousKeyId": "sess-4b8e1d90",
+                  "previousKeyExpiresAt": "2026-08-25T12:05:00.000Z",
+                  "gracePeriodSeconds": 300
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed rotation request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown or expired currentKeyId",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "code": "UNKNOWN_KEY_ID",
+                  "message": "No active session key matches the supplied currentKeyId."
+                }
+              }
+            }
+          }
+        },
+        "operationId": "encryptionKeyRotate"
+      }
+    },
     "/oauth/revoke": {
       "post": {
         "tags": [
@@ -1965,6 +2303,27 @@
       }
     },
     "headers": {
+      "X-Encryption-Key-Id": {
+        "description": "Identifier of the session key used to encrypt the response body. Present on every response that carries an encrypted envelope. When it differs from the key id the client last cached, the client must re-run the key-exchange/rotation handshake before decrypting.",
+        "schema": {
+          "type": "string"
+        },
+        "example": "sess-4b8e1d90"
+      },
+      "X-Encryption-Algorithm": {
+        "description": "Authenticated encryption algorithm used for the encrypted envelope.",
+        "schema": {
+          "type": "string"
+        },
+        "example": "AES-256-GCM"
+      },
+      "X-Encryption-Nonce": {
+        "description": "Base64url-encoded 96-bit (12-byte) AES-GCM nonce (IV) used for this response. Never reused with the same key.",
+        "schema": {
+          "type": "string"
+        },
+        "example": "3q2+7wAAAABx1y2z"
+      },
       "Link": {
         "description": "RFC 8288 links to adjacent pages: rel=\"next\", \"prev\", \"first\", and \"last\" (offset endpoints).",
         "schema": { "type": "string" },
@@ -1973,6 +2332,11 @@
       "X-Total-Count": {
         "description": "Same as pagination.total_count.",
         "schema": { "type": "integer" }
+      },
+      "X-Nonce": {
+        "description": "Nonce issued for the request/response pair. Clients must send a unique nonce (via the `X-Nonce` request header) on sensitive operations; the server echoes the accepted nonce back in this response header. Nonces are single-use and expire after 5 minutes (300 seconds).",
+        "schema": { "type": "string" },
+        "example": "b7f3c1a2e9d84f6b8c0a1d2e3f4a5b6c"
       }
     },
     "parameters": {
@@ -1985,6 +2349,199 @@
       }
     },
     "schemas": {
+      "EncryptedEnvelope": {
+        "type": "object",
+        "description": "Authenticated encryption envelope wrapping sensitive response fields (#1049). Sensitive fields (e.g. `claims`, `clientSecret`, `access_token`, `refresh_token`) are removed from the plaintext body and replaced by this envelope. The plaintext is the UTF-8 JSON serialization of the redacted object.\n\nDecryption (client side):\n1. Derive the 32-byte session key via X25519 ECDH + HKDF-SHA256 using the `salt` from the key-exchange response.\n2. Base64url-decode `iv`, `ciphertext` and `tag`.\n3. Run AES-256-GCM open with the session key, the 12-byte `iv`, the `ciphertext`, and the 16-byte `tag` as the authentication tag. The `aad` value (base64url) must be supplied as additional authenticated data.\n4. Parse the resulting UTF-8 bytes as JSON and merge the recovered fields back into the response object.\n\nA failed tag check means the ciphertext, key id, or AAD was tampered with; clients must reject the response rather than fall back to plaintext.",
+        "required": [
+          "alg",
+          "keyId",
+          "iv",
+          "ciphertext",
+          "tag"
+        ],
+        "properties": {
+          "alg": {
+            "type": "string",
+            "description": "Authenticated encryption algorithm. Only AES-256-GCM is supported.",
+            "enum": [
+              "AES-256-GCM"
+            ],
+            "example": "AES-256-GCM"
+          },
+          "keyId": {
+            "type": "string",
+            "description": "Identifier of the session key that encrypted this envelope. Must match the `X-Encryption-Key-Id` response header.",
+            "example": "sess-4b8e1d90"
+          },
+          "iv": {
+            "type": "string",
+            "description": "Base64url-encoded 96-bit (12-byte) AES-GCM nonce. Unique per encryption operation under a given key.",
+            "example": "3q2+7wAAAABx1y2z"
+          },
+          "ciphertext": {
+            "type": "string",
+            "description": "Base64url-encoded AES-256-GCM ciphertext of the UTF-8 JSON plaintext.",
+            "example": "8Qe2m5n0p1q2r3s4t5u6v7w8x9y0z1a2b3c4d5e6f7g8h9"
+          },
+          "tag": {
+            "type": "string",
+            "description": "Base64url-encoded 128-bit (16-byte) GCM authentication tag. Clients must verify this before trusting the plaintext.",
+            "example": "9f8e7d6c5b4a39281706f5e4d3c2b1a0"
+          },
+          "aad": {
+            "type": "string",
+            "description": "Base64url-encoded additional authenticated data bound to the ciphertext. Typically the request path plus the `keyId`, preventing an envelope from being replayed against a different resource.",
+            "example": "L2NyZWRlbnRpYWxzL2NyZWQta3ljLTIwMjYtMDAxOnNlc3MtNGI4ZTFkOTA"
+          },
+          "encryptedFields": {
+            "type": "array",
+            "description": "Names of the plaintext fields that were moved into `ciphertext` and redacted from the surrounding response object.",
+            "items": {
+              "type": "string"
+            },
+            "example": [
+              "claims"
+            ]
+          },
+          "keyRotation": {
+            "type": "boolean",
+            "description": "True when the server rotated the session key for this response. The client should re-run the key-exchange handshake and cache the new key id.",
+            "example": false
+          }
+        }
+      },
+      "KeyExchangeRequest": {
+        "type": "object",
+        "description": "Client half of the session key-exchange handshake.",
+        "required": [
+          "clientPublicKey"
+        ],
+        "properties": {
+          "clientPublicKey": {
+            "type": "string",
+            "description": "Base64-encoded ephemeral X25519 public key generated by the client for this session. Never reuse across sessions.",
+            "example": "MCowBQYDK2VuAyEA9m1n2o3p4q5r6s7t8u9v0w1x2y3z4a5b6c7d8e9f0g1h2i"
+          },
+          "clientKeyId": {
+            "type": "string",
+            "description": "Optional client-generated identifier for its ephemeral key pair, echoed back for correlation.",
+            "example": "cli-7f3a9c21"
+          },
+          "requestedAlgorithm": {
+            "type": "string",
+            "description": "Requested authenticated encryption algorithm. Defaults to AES-256-GCM.",
+            "enum": [
+              "AES-256-GCM"
+            ],
+            "default": "AES-256-GCM"
+          }
+        }
+      },
+      "KeyExchangeResponse": {
+        "type": "object",
+        "description": "Server half of the session key-exchange handshake. The client combines `serverPublicKey` with its own ephemeral private key to derive the same session key.",
+        "required": [
+          "keyId",
+          "serverPublicKey",
+          "algorithm",
+          "salt",
+          "nonceLength",
+          "tagLength",
+          "expiresAt"
+        ],
+        "properties": {
+          "keyId": {
+            "type": "string",
+            "description": "Identifier of the established session key. Send it back as `X-Encryption-Key-Id` and use it to select the key when decrypting.",
+            "example": "sess-4b8e1d90"
+          },
+          "serverPublicKey": {
+            "type": "string",
+            "description": "Base64-encoded ephemeral X25519 public key generated by the server for this session.",
+            "example": "MCowBQYDK2VuAyEA1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u2v3w"
+          },
+          "algorithm": {
+            "type": "string",
+            "description": "Negotiated authenticated encryption algorithm.",
+            "enum": [
+              "AES-256-GCM"
+            ],
+            "example": "AES-256-GCM"
+          },
+          "keyDerivation": {
+            "type": "string",
+            "description": "Key derivation function applied to the ECDH shared secret.",
+            "enum": [
+              "HKDF-SHA256"
+            ],
+            "example": "HKDF-SHA256"
+          },
+          "salt": {
+            "type": "string",
+            "description": "Base64url-encoded HKDF salt. Must be supplied when deriving the session key.",
+            "example": "3f9c1d7a5b2e8046"
+          },
+          "nonceLength": {
+            "type": "integer",
+            "description": "Length in bytes of the AES-GCM nonce (IV).",
+            "example": 12
+          },
+          "tagLength": {
+            "type": "integer",
+            "description": "Length in bytes of the AES-GCM authentication tag.",
+            "example": 16
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Absolute expiry of the session key. After this instant the client must re-run the handshake.",
+            "example": "2026-08-25T12:00:00.000Z"
+          },
+          "rotationIntervalSeconds": {
+            "type": "integer",
+            "description": "Maximum age of the session key before the server rotates it, in seconds.",
+            "example": 900
+          },
+          "previousKeyId": {
+            "type": "string",
+            "nullable": true,
+            "description": "Identifier of the previous session key, still accepted for decryption during the grace period. Null when no rotation has occurred.",
+            "example": null
+          },
+          "previousKeyExpiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Instant after which the previous key is rejected for decryption.",
+            "example": "2026-08-25T12:05:00.000Z"
+          },
+          "gracePeriodSeconds": {
+            "type": "integer",
+            "description": "Length of the rotation grace period during which both the previous and the current key are accepted for decryption.",
+            "example": 300
+          }
+        }
+      },
+      "KeyRotationRequest": {
+        "type": "object",
+        "description": "Request to rotate the session key before its natural expiry.",
+        "required": [
+          "currentKeyId",
+          "clientPublicKey"
+        ],
+        "properties": {
+          "currentKeyId": {
+            "type": "string",
+            "description": "The session key id currently in use by the client.",
+            "example": "sess-4b8e1d90"
+          },
+          "clientPublicKey": {
+            "type": "string",
+            "description": "Base64-encoded fresh ephemeral X25519 public key for the rotated session.",
+            "example": "MCowBQYDK2VuAyEA9m1n2o3p4q5r6s7t8u9v0w1x2y3z4a5b6c7d8e9f0g1h2i"
+          }
+        }
+      },
       "PaginationMeta": {
         "type": "object",
         "description": "Standard pagination metadata on every paginated list response (#958).",
@@ -2009,9 +2566,10 @@
           "revoked": { "type": "boolean", "example": false },
           "revokedAt": { "type": "string", "format": "date-time" },
           "schema": { "type": "string", "example": "https://schema.org/KYCCredential" },
-          "claims": { "type": "object" },
+          "claims": { "type": "object", "description": "Sensitive claim dictionary. When a session key is established, this field is redacted from the plaintext body and delivered inside `encrypted`." },
           "source": { "type": "string", "example": "http" },
-          "expiry_notified_at": { "type": "string", "format": "date-time" }
+          "expiry_notified_at": { "type": "string", "format": "date-time" },
+          "encrypted": { "$ref": "#/components/schemas/EncryptedEnvelope" }
         }
       },
       "IssueCredentialRequest": {
@@ -2141,7 +2699,7 @@
       "ErrorResponse": {
         "type": "object",
         "properties": {
-          "code": { "type": "string", "example": "INVALID_REQUEST" },
+          "code": { "type": "string", "example": "INVALID_REQUEST", "description": "Machine-readable error code. Replay rejections use `NONCE_REPLAYED` (alias `SIGNATURE_REPLAYED`)." },
           "error": { "type": "string", "example": "unauthorized" },
           "message": { "type": "string", "example": "Request body must include a credential id." },
           "requiredScopes": { "type": "array", "items": { "type": "string" } },
@@ -2153,6 +2711,53 @@
               "properties": {
                 "field": { "type": "string" },
                 "value": { "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "NonceReplayError": {
+        "type": "object",
+        "description": "Returned with HTTP 409 when a request nonce has already been consumed within the 5-minute nonce window (#1052).",
+        "required": ["code", "message"],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": ["NONCE_REPLAYED", "SIGNATURE_REPLAYED"],
+            "example": "NONCE_REPLAYED"
+          },
+          "error": { "type": "string", "example": "conflict" },
+          "message": {
+            "type": "string",
+            "example": "Nonce has already been used. Generate a fresh nonce for each request."
+          },
+          "details": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "field": { "type": "string", "example": "X-Nonce" },
+                "value": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "responses": {
+      "EncryptedResponse": {
+        "description": "Response whose sensitive fields have been replaced by an `encrypted` AES-256-GCM envelope. The `X-Encryption-Key-Id`, `X-Encryption-Algorithm` and `X-Encryption-Nonce` headers describe how to decrypt it.",
+        "headers": {
+          "X-Encryption-Key-Id": { "$ref": "#/components/headers/X-Encryption-Key-Id" },
+          "X-Encryption-Algorithm": { "$ref": "#/components/headers/X-Encryption-Algorithm" },
+          "X-Encryption-Nonce": { "$ref": "#/components/headers/X-Encryption-Nonce" }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "encrypted": { "$ref": "#/components/schemas/EncryptedEnvelope" }
               }
             }
           }
@@ -2983,7 +3588,8 @@
         "properties": {
           "code": {
             "type": "string",
-            "example": "INVALID_REQUEST"
+            "example": "INVALID_REQUEST",
+            "description": "Machine-readable error code. Replay rejections use `NONCE_REPLAYED` (alias `SIGNATURE_REPLAYED`)."
           },
           "error": {
             "type": "string",
@@ -3012,6 +3618,47 @@
               "properties": {
                 "field": {
                   "type": "string"
+                },
+                "value": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "NonceReplayError": {
+        "type": "object",
+        "description": "Returned with HTTP 409 when a request nonce has already been consumed within the 5-minute nonce window (#1052).",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "NONCE_REPLAYED",
+              "SIGNATURE_REPLAYED"
+            ],
+            "example": "NONCE_REPLAYED"
+          },
+          "error": {
+            "type": "string",
+            "example": "conflict"
+          },
+          "message": {
+            "type": "string",
+            "example": "Nonce has already been used. Generate a fresh nonce for each request."
+          },
+          "details": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "field": {
+                  "type": "string",
+                  "example": "X-Nonce"
                 },
                 "value": {
                   "type": "string"

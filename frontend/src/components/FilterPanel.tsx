@@ -318,10 +318,26 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
   };
 
   const handleReset = () => {
+    const resetRules: FilterRule[] = [
+      {
+        id: `rule-${Date.now()}`,
+        field: "credentialType",
+        operator: "equals",
+        value: "All",
+      },
+    ];
+    const resetState: FilterState = {
+      logic: "AND",
+      rules: resetRules,
+      quickFilter: undefined,
+    };
     setLogic("AND");
-    setRules([{ ...DEFAULT_RULE, id: `rule-${Date.now()}` }]);
+    setRules(resetRules);
     setActiveChip(null);
+    setSelectedPresetId("");
     setValidationErrors([]);
+    onFilterChange(resetState);
+    onApply?.(resetState);
     setStatusMessage("Filters reset to default");
     setTimeout(() => setStatusMessage(null), 2000);
   };

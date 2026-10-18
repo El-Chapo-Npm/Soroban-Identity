@@ -17,8 +17,19 @@ if (missing.length > 0) {
   );
 }
 
+// Feature flag for the guided onboarding tour. Enabled by default unless
+// explicitly disabled via VITE_TOUR_ENABLED ("false"/"0"/"off").
+export const TOUR_ENABLED: boolean = (() => {
+  const raw = import.meta.env.VITE_TOUR_ENABLED;
+  if (raw === undefined || raw === '') return true;
+  return !['false', '0', 'off', 'no'].includes(String(raw).toLowerCase());
+})();
+
 // Returns config for the active network, resolved from VITE_NETWORK / VITE_*_RPC_URL
 // / VITE_*_IDENTITY_REGISTRY_ID env vars defined in .env.example.
 export function getAppConfig() {
-  return getNetworkConfig();
+  return {
+    ...getNetworkConfig(),
+    tourEnabled: TOUR_ENABLED,
+  };
 }

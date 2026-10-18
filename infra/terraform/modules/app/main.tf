@@ -4,6 +4,16 @@ variable "security_group_id" { type = string }
 variable "image" { type = string }
 variable "desired_count" { type = number }
 variable "redis_endpoint" { type = string }
+variable "read_replica_endpoints" {
+  type        = map(string)
+  description = "Map of region name to read replica endpoint for geo-distributed read replicas"
+  default     = {}
+}
+variable "primary_region" {
+  type        = string
+  description = "Primary region name used for read/write splitting and failover"
+  default     = "us"
+}
 
 data "aws_region" "current" {}
 resource "aws_ecs_cluster" "this" { name = var.name }
@@ -34,10 +44,21 @@ resource "aws_ecs_task_definition" "this" {
     image = var.image
     essential = true
     portMappings = [{ containerPort = 3001 }]
-    environment = [
+    environment = concat([
       { name = "NODE_ENV", value = var.name },
-      { name = "REDIS_URL", value = "rediss://${var.redis_endpoint}:6379" }
-    ]
+      { name = "REDIS_URL", value = "rediss://${var.redis_endpoint}:6379" },
+      # Read/write splitting (#1051): writes go to the primary, reads are
+      # routed to the nearest healthy replica with failover to the primary.
+      { name = "REDIS_PRIMARY_REGION", value = var.primary_region },
+      { name = "REDIS_READ_REPLICAS", value = jsonencode(var.read_replica_endpoints) },
+      { name = "REDIS_REPLICA_LAG_THRESHOLD_MS", value = "5000" },
+      { name = "REDIS_READ_PREFERENCE", value = "nearest" }
+      ], [
+      for region, endpoint in var.read_replica_endpoints : {
+        name  = "REDIS_REPLICA_${upper(region)}_URL"
+        value = "rediss://${endpoint}:6379"
+      }
+    ])
     # Liveness only (#883): the image has no curl, and /health fails on a
     # dependency outage, which would make ECS replace healthy tasks.
     healthCheck = { command = ["CMD", "node", "scripts/healthcheck.mjs", "/live"], interval = 30, timeout = 5, retries = 3, startPeriod = 30 }

@@ -28,6 +28,35 @@ export type { AccountInfo, RevocationRecord } from './types';
 // ── Presentation ──────────────────────────────────────────────────────────────
 export { PresentationClient } from './presentation';
 
+// ── Merkle proofs (batch credential verification, closes #1056) ───────────────
+//
+// Merkle tree structure:
+//   - Leaves are credential IDs (or hashed credential payloads) ordered as
+//     inserted into the batch.
+//   - Each internal node is the hash of its two children; odd nodes are
+//     promoted unchanged to the next level.
+//   - The root is stored on-chain and used to verify inclusion proofs without
+//     revealing the full batch.
+//
+// Usage:
+//   const tree = buildMerkleTree(credentialIds);
+//   const proof = generateMerkleProof(tree, credentialId);
+//   const valid = verifyMerkleProof(proof, tree.root);
+export {
+  buildMerkleTree,
+  generateMerkleProof,
+  verifyMerkleProof,
+  updateMerkleTree,
+  hashLeaf,
+  hashNodes,
+} from './merkle';
+export type {
+  MerkleProof,
+  MerkleBatchRoot,
+  MerkleTree,
+  MerkleProofStep,
+} from './merkle';
+
 // ── Errors ────────────────────────────────────────────────────────────────────
 export {
   SorobanIdentityError,

@@ -23,6 +23,92 @@ use crate::{ReputationRecord, SCORE_CNT, SUBJECT_CNT};
 /// Basis-point denominator used by the percentile helpers (100.00%).
 pub const PERCENTILE_SCALE: u32 = 10_000;
 
+/// Maximum reputation boost (in score points) a stake can grant.
+pub const MAX_STAKE_BOOST: i64 = 1_000;
+
+/// Stake amount (in token base units) that yields the full [`MAX_STAKE_BOOST`].
+pub const STAKE_BOOST_FULL_AMOUNT: i64 = 1_000_000;
+
+/// Computes the reputation boost granted by `stake_amount`.
+///
+/// The boost scales linearly with the staked amount, saturating at
+/// [`MAX_STAKE_BOOST`] once `stake_amount` reaches [`STAKE_BOOST_FULL_AMOUNT`].
+/// Non-positive stakes yield no boost.
+pub fn compute_stake_boost(stake_amount: i64) -> i64 {
+    if stake_amount <= 0 {
+        return 0;
+    }
+    if stake_amount >= STAKE_BOOST_FULL_AMOUNT {
+        return MAX_STAKE_BOOST;
+    }
+    ((stake_amount as i128 * MAX_STAKE_BOOST as i128) / STAKE_BOOST_FULL_AMOUNT as i128) as i64
+}
+
+/// Applies the stake boost to `score`, clamped to the configured score bounds.
+pub fn apply_stake_boost(score: i64, stake_amount: i64) -> i64 {
+    let boosted = score.saturating_add(compute_stake_boost(stake_amount));
+    if boosted > MAX_STAKE_BOOST {
+        MAX_STAKE_BOOST
+    } else {
+        boosted
+    }
+}
+
+/// Aggregate staking statistics over a slice of `(stake_amount, score)` pairs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StakeStats {
+    /// Number of staked entries considered.
+    pub count: u32,
+    /// Sum of all stake amounts.
+    pub total_staked: i64,
+    /// Mean stake amount (0 when `count` is 0).
+    pub average_stake: i64,
+    /// Sum of stake-weighted reputation scores.
+    pub weighted_score: i64,
+}
+
+/// Computes [`StakeStats`] over `stakes` in a single pass.
+pub fn get_stake_stats(stakes: &[(i64, i64)]) -> StakeStats {
+    let mut count: u32 = 0;
+    let mut total_staked: i64 = 0;
+    let mut weighted_score: i64 = 0;
+
+    for (amount, score) in stakes.iter() {
+        if *amount <= 0 {
+            continue;
+        }
+        count += 1;
+        total_staked = total_staked.saturating_add(*amount);
+        weighted_score = weighted_score.saturating_add(amount.saturating_mul(*score));
+    }
+
+    let average_stake = if count == 0 {
+        0
+    } else {
+        total_staked / count as i64
+    };
+
+    StakeStats {
+        count,
+        total_staked,
+        average_stake,
+        weighted_score,
+    }
+}
+
+/// Returns the stake-weighted average reputation over `stakes`.
+///
+/// Each entry's score is weighted by its stake amount. Returns `None` when no
+/// positive stake is present so callers can distinguish "no data" from zero.
+pub fn get_stake_weighted_reputation(stakes: &[(i64, i64)]) -> Option<i64> {
+    let stats = get_stake_stats(stakes);
+    if stats.count == 0 || stats.total_staked == 0 {
+        None
+    } else {
+        Some(stats.weighted_score / stats.total_staked)
+    }
+}
+
 /// Returns the average score attributed to `subject` by `issuer`.
 ///
 /// The average is computed over every record in `records` whose subject matches
@@ -315,5 +401,39 @@ mod tests {
         let records: [ReputationRecord; 0] = [];
         assert_eq!(get_reputation_percentile(&records, 10), 0);
         assert_eq!(get_percentile_threshold(&records, 5_000), None);
+    }
+
+    #[test]
+    fn stake_boost_scales_and_saturates() {
+        assert_eq!(compute_stake_boost(0), 0);
+        assert_eq!(compute_stake_boost(-5), 0);
+        assert_eq!(compute_stake_boost(STAKE_BOOST_FULL_AMOUNT / 2), MAX_STAKE_BOOST / 2);
+        assert_eq!(compute_stake_boost(STAKE_BOOST_FULL_AMOUNT), MAX_STAKE_BOOST);
+        assert_eq!(compute_stake_boost(STAKE_BOOST_FULL_AMOUNT * 2), MAX_STAKE_BOOST);
+    }
+
+    #[test]
+    fn apply_stake_boost_clamps_to_max() {
+        assert_eq!(apply_stake_boost(10, 0), 10);
+        assert_eq!(apply_stake_boost(10, STAKE_BOOST_FULL_AMOUNT), MAX_STAKE_BOOST);
+    }
+
+    #[test]
+    fn stake_stats_aggregate_and_weight() {
+        let stakes = [(100i64, 10i64), (300, 20), (0, 99)];
+        let stats = get_stake_stats(&stakes);
+        assert_eq!(stats.count, 2);
+        assert_eq!(stats.total_staked, 400);
+        assert_eq!(stats.average_stake, 200);
+        assert_eq!(stats.weighted_score, 100 * 10 + 300 * 20);
+        assert_eq!(get_stake_weighted_reputation(&stakes), Some((100 * 10 + 300 * 20) / 400));
+    }
+
+    #[test]
+    fn stake_weighted_reputation_none_without_stake() {
+        let stakes: [(i64, i64); 0] = [];
+        assert_eq!(get_stake_weighted_reputation(&stakes), None);
+        let zero = [(0i64, 50i64)];
+        assert_eq!(get_stake_weighted_reputation(&zero), None);
     }
 }

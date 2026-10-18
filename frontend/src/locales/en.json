@@ -11,7 +11,50 @@
     "identity": "Identity (DID)",
     "credentials": "Credentials",
     "issuerAnalytics": "Issuer Analytics",
+    "networkStatistics": "Network Statistics",
     "label": "Sections"
+  },
+  "networkStatistics": {
+    "title": "Network Statistics",
+    "totalDids": "Total DIDs",
+    "totalCredentials": "Total Credentials",
+    "overTime": "DIDs & Credentials Over Time",
+    "topIssuers": "Top Issuers",
+    "topIssuersByVolume": "Top Issuers by Volume",
+    "geographicDistribution": "Geographic Distribution",
+    "verificationSuccessRate": "Verification Success Rate",
+    "credentialTypeDistribution": "Credential Type Distribution",
+    "interactiveExploration": "Interactive Data Exploration",
+    "exportChartAsImage": "Export chart as image",
+    "exportedChart": "Exported {{filename}}",
+    "exportFailed": "Export failed — nothing was downloaded",
+    "noData": "No data available",
+    "loading": "Loading statistics…",
+    "volume": "Volume",
+    "issuer": "Issuer",
+    "region": "Region",
+    "count": "Count",
+    "percentage": "Percentage",
+    "successRate": "Success Rate",
+    "credentialType": "Credential Type"
+  },
+  "comparison": {
+    "compareCredentials": "Compare credentials",
+    "selectCredentials": "Select 2-4 credentials to compare",
+    "selectCredentialsHint": "Select 2-4 credentials to compare",
+    "copyComparisonLink": "Copy comparison link",
+    "comparisonLinkCopied": "Comparison link copied",
+    "exportComparisonAsImage": "Export comparison as image",
+    "exportComparisonAsPdf": "Export comparison as PDF",
+    "attributes": "Attributes",
+    "differences": "Differences",
+    "highlightDifferences": "Highlight differences",
+    "issuerReputation": "Issuer reputation",
+    "expiryDate": "Expiry date",
+    "verificationStatus": "Verification status",
+    "noDifferences": "No differences found",
+    "tooManyCredentials": "You can compare at most 4 credentials",
+    "tooFewCredentials": "Select at least 2 credentials to compare"
   },
   "wallet": {
     "connect": "Connect Wallet",
@@ -87,6 +130,80 @@
     "switchLanguage": "Switch language",
     "dismissNotification": "Dismiss notification"
   },
+  "tour": {
+    "helpLabel": "Help & Tour",
+    "startTour": "Start tour",
+    "restartTour": "Restart tour",
+    "next": "Next",
+    "back": "Back",
+    "skip": "Skip",
+    "finish": "Finish",
+    "stepOf": "Step {{current}} of {{total}}",
+    "choosePath": "Choose your tour",
+    "choosePathDescription": "Pick the walkthrough that matches how you'll use Soroban Identity.",
+    "paths": {
+      "issuer": {
+        "title": "Issuer tour",
+        "description": "Learn how to create a DID and issue verifiable credentials."
+      },
+      "holder": {
+        "title": "Holder tour",
+        "description": "Learn how to create a DID and manage your credentials."
+      }
+    },
+    "issuer": {
+      "welcome": {
+        "title": "Welcome, issuer",
+        "description": "This short tour shows how to set up your identity and issue credentials."
+      },
+      "createDid": {
+        "title": "Create your DID",
+        "description": "Start by creating an on-chain decentralized identifier for your organization."
+      },
+      "connectWallet": {
+        "title": "Connect your wallet",
+        "description": "Connect Freighter to sign the transaction that creates your DID."
+      },
+      "issueCredential": {
+        "title": "Issue a credential",
+        "description": "Issue KYC or other verifiable credentials to subject addresses."
+      },
+      "verifyCredential": {
+        "title": "Verify credentials",
+        "description": "Check that a credential is valid, unrevoked and unexpired."
+      },
+      "analytics": {
+        "title": "Track issuance",
+        "description": "Use Issuer Analytics to monitor the credentials you've issued."
+      }
+    },
+    "holder": {
+      "welcome": {
+        "title": "Welcome, holder",
+        "description": "This short tour shows how to set up your identity and manage your credentials."
+      },
+      "createDid": {
+        "title": "Create your DID",
+        "description": "Create an on-chain decentralized identifier that represents you."
+      },
+      "connectWallet": {
+        "title": "Connect your wallet",
+        "description": "Connect Freighter to sign the transaction that creates your DID."
+      },
+      "viewCredentials": {
+        "title": "View your credentials",
+        "description": "Browse the credentials issued to your address in the Credentials tab."
+      },
+      "verifyCredential": {
+        "title": "Verify a credential",
+        "description": "Confirm a credential is valid before relying on it."
+      },
+      "exportCredential": {
+        "title": "Export credentials",
+        "description": "Download your credentials as JSON, XML or PDF."
+      }
+    }
+  },
   "shortcuts": {
     "title": "Keyboard Shortcuts",
     "description": "Use keyboard shortcuts to navigate and interact with the application more efficiently.",
@@ -109,5 +226,74 @@
     "toggleTheme": "Toggle theme",
     "showHelp": "Show keyboard shortcuts",
     "closeDialog": "Close dialog or modal"
+  },
+  "biometric": {
+    "title": "Biometric Authentication",
+    "description": "Use your fingerprint or Face ID to sign in securely.",
+    "registerDevice": "Register this device",
+    "registering": "Registering…",
+    "removeDevice": "Remove device",
+    "removing": "Removing…",
+    "deviceName": "Device name",
+    "deviceNamePlaceholder": "e.g. My iPhone",
+    "registeredDevices": "Registered devices",
+    "noDevices": "No biometric devices registered yet.",
+    "lastUsed": "Last used",
+    "neverUsed": "Never used",
+    "registeredOn": "Registered on",
+    "authenticate": "Authenticate with biometrics",
+    "authenticating": "Authenticating…",
+    "authenticated": "Authentication successful",
+    "authenticationFailed": "Authentication failed. Please try again.",
+    "registrationSuccess": "Device registered successfully.",
+    "registrationFailed": "Could not register this device.",
+    "removeSuccess": "Device removed.",
+    "removeFailed": "Could not remove the device.",
+    "removeConfirm": "Remove this device? You will need to register it again to use biometrics.",
+    "promptTitle": "Biometric verification",
+    "promptMessage": "Confirm your identity using your device's biometric sensor.",
+    "promptCancelled": "Biometric prompt was cancelled.",
+    "fallbackToPassword": "Use password instead",
+    "fallbackHint": "You can always sign in with your password if biometrics are unavailable.",
+    "unsupportedBrowser": "Biometric authentication is not supported in this browser.",
+    "unsupportedBrowserHint": "Please use a supported browser or continue with your password.",
+    "notAvailable": "Biometrics are not available on this device.",
+    "notEnrolled": "No biometric credentials are enrolled on this device.",
+    "enableBiometric": "Enable biometric sign-in",
+    "disableBiometric": "Disable biometric sign-in"
+  },
+  "voice": {
+    "title": "Voice Commands",
+    "description": "Control the app hands-free using your voice.",
+    "enable": "Enable voice commands",
+    "disable": "Disable voice commands",
+    "listening": "Listening…",
+    "stopListening": "Stop listening",
+    "startListening": "Start listening",
+    "processing": "Processing…",
+    "commandNotRecognized": "Sorry, I didn't catch that. Please try again.",
+    "commandSearch": "Search",
+    "commandNavigate": "Navigate",
+    "commandVerify": "Verify",
+    "searchExample": "Say \"search for credentials\"",
+    "navigateExample": "Say \"go to credentials\"",
+    "verifyExample": "Say \"verify credential\"",
+    "confirmSearch": "Searching for {{query}}.",
+    "confirmNavigate": "Navigating to {{destination}}.",
+    "confirmVerify": "Verifying credential.",
+    "feedbackSuccess": "Done.",
+    "feedbackError": "Something went wrong. Please try again.",
+    "language": "Voice language",
+    "selectLanguage": "Select a language",
+    "permissionTitle": "Microphone access",
+    "permissionMessage": "Voice commands need access to your microphone.",
+    "permissionRequest": "Allow microphone",
+    "permissionGranted": "Microphone access granted.",
+    "permissionDenied": "Microphone access was denied. Enable it in your browser settings to use voice commands.",
+    "permissionPrompt": "Please allow microphone access to use voice commands.",
+    "unavailable": "Voice commands are not available in this browser.",
+    "unavailableHint": "Please use a supported browser to use voice commands.",
+    "noSpeechDetected": "No speech was detected. Please try again.",
+    "visualFeedback": "Voice input active"
   }
 }

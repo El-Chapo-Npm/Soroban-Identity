@@ -333,11 +333,45 @@ function parseAddressList(raw) {
 
 export { runCommand };
 
+function sanitizeMetadataUnicode(value, depth = 0) {
+  if (depth > 20) return null;
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string') {
+    const wellFormed =
+      typeof value.toWellFormed === 'function'
+        ? value.toWellFormed()
+        : value.replace(
+            /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
+            '\uFFFD',
+          );
+    try {
+      return wellFormed.normalize('NFC');
+    } catch {
+      return wellFormed;
+    }
+  }
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'boolean') return value;
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeMetadataUnicode(item, depth + 1));
+  }
+  if (typeof value === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      const safeKey = sanitizeMetadataUnicode(String(k), depth + 1);
+      if (safeKey) out[safeKey] = sanitizeMetadataUnicode(v, depth + 1);
+    }
+    return out;
+  }
+  return String(value);
+}
+
 /**
  * Parse a `get_did` contract response into a DID document.
  *
  * The CLI returns JSON on stdout; anything unparseable, empty, or explicitly
- * null means the DID does not exist.
+ * null means the DID does not exist. Special Unicode characters and lone
+ * surrogates in metadata are safely normalized (#1067).
  */
 export function parseDidDocument(raw, address) {
   if (raw === null || raw === undefined || raw === '') return null;
@@ -349,18 +383,39 @@ export function parseDidDocument(raw, address) {
     try {
       parsed = JSON.parse(trimmed);
     } catch {
-      return null;
+      try {
+        // Fallback: replace unescaped control chars inside JSON strings before parsing (#1067)
+        // eslint-disable-next-line no-control-regex
+        const cleaned = trimmed.replace(/[\u0000-\u001f]/g, (ch) =>
+          `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`,
+        );
+        parsed = JSON.parse(cleaned);
+      } catch {
+        return null;
+      }
     }
   }
 
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
 
+  let metadata = parsed.metadata ?? {};
+  if (typeof metadata === 'string') {
+    try {
+      metadata = JSON.parse(metadata);
+    } catch {
+      metadata = { value: metadata };
+    }
+  }
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    metadata = {};
+  }
+
   return {
     id: `did:stellar:${address}`,
-    controller: parsed.controller ?? `did:stellar:${address}`,
+    controller: sanitizeMetadataUnicode(parsed.controller ?? `did:stellar:${address}`),
     createdAt: Number(parsed.created_at ?? parsed.createdAt ?? 0),
     updatedAt: Number(parsed.updated_at ?? parsed.updatedAt ?? 0),
-    metadata: parsed.metadata ?? {},
+    metadata: sanitizeMetadataUnicode(metadata) ?? {},
     active: parsed.active !== false,
   };
 }

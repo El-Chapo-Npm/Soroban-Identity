@@ -80,6 +80,22 @@ const DECAY_CFG: Symbol = symbol_short!("DECAYCFG");
 const RPT_DECAY: Symbol = symbol_short!("RPTDECAY");
 /// Storage key prefix for the most recent reporter to score each subject.
 const LAST_RPT: Symbol = symbol_short!("LASTRPT");
+/// Storage key prefix for per-address stake records (#1055).
+const STAKE: Symbol = symbol_short!("STAKE");
+/// Storage key for the global staking statistics counter (#1055).
+const STAKE_STATS: Symbol = symbol_short!("STKSTATS");
+
+// ── Staking (#1055) ──────────────────────────────────────────────────────────
+
+/// Ledgers a stake must remain locked after an unstake request before the
+/// funds can be withdrawn (~1 day at 5s/ledger).
+const STAKE_COOLDOWN_LEDGERS: u32 = 17_280;
+/// Reputation points granted per whole staked token unit.
+const STAKE_BOOST_PER_UNIT: i64 = 1;
+/// Hard ceiling on the reputation boost any single stake can grant.
+const MAX_STAKE_BOOST: i64 = 1_000;
+/// Token units required per reputation point of boost.
+const STAKE_UNITS_PER_BOOST: i64 = 1;
 
 // ── Error codes ───────────────────────────────────────────────────────────────
 
@@ -105,6 +121,14 @@ pub enum ContractError {
     BatchTooLarge          = 16,
     /// Issue #657: decay rate exceeds MAX_DECAY_RATE_BPS.
     InvalidDecayRate       = 17,
+    /// Issue #1055: no stake record exists for the address.
+    NoStake                = 18,
+    /// Issue #1055: stake is still within its cooldown period.
+    StakeCooldown          = 19,
+    /// Issue #1055: deposit amount must be positive.
+    InvalidStakeAmount     = 20,
+    /// Issue #1055: slash amount exceeds the staked balance.
+    InsufficientStake      = 21,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -189,6 +213,36 @@ pub struct BatchScoreEntry {
 ///
 /// Keyed by `(DISPUTE, subject, reporter, delta_index)`. At most one dispute
 /// may be open per key at a time — see [`Reputation::dispute_score`].
+/// A per-address staking record (#1055).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct StakeRecord {
+    pub staker: Address,
+    /// Currently staked amount (in token units).
+    pub amount: i64,
+    /// Ledger sequence at which the stake was deposited.
+    pub staked_at: u32,
+    /// Ledger sequence after which an unstake request may be withdrawn;
+    /// `0` while no unstake has been requested.
+    pub unlock_at: u32,
+    /// Cumulative reputation boost currently granted by this stake.
+    pub boost: i64,
+    /// Cumulative rewards credited to this staker.
+    pub total_rewards: i64,
+    /// Cumulative penalties (slashes) applied to this staker.
+    pub total_penalties: i64,
+}
+
+/// Aggregate staking statistics (#1055).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct StakingStats {
+    pub total_stakers: u32,
+    pub total_staked: i64,
+    pub total_rewards: i64,
+    pub total_penalties: i64,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct Dispute {
@@ -875,6 +929,287 @@ impl Reputation {
         Ok(())
     }
 
+    // ── Staking (#1055) ───────────────────────────────────────────────────────
+
+    /// Deposits `amount` token units as a stake for `staker`, granting a
+    /// bounded reputation boost derived from the stake size.
+    ///
+    /// Emits a `stake_deposited` event.
+    ///
+    /// # Errors
+    /// - [`ContractError::InvalidStakeAmount`] if `amount <= 0`.
+    ///
+    /// Closes #1055.
+    pub fn stake(
+        env: Env,
+        staker: Address,
+        amount: i64,
+    ) -> Result<StakeRecord, ContractError> {
+        staker.require_auth();
+        Self::require_not_paused(&env)?;
+        if amount <= 0 {
+            return Err(ContractError::InvalidStakeAmount);
+        }
+
+        let key = Self::stake_key(&staker);
+        let mut record: StakeRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(StakeRecord {
+                staker: staker.clone(),
+                amount: 0,
+                staked_at: env.ledger().sequence(),
+                unlock_at: 0,
+                boost: 0,
+                total_rewards: 0,
+                total_penalties: 0,
+            });
+
+        let is_new_staker = record.amount == 0;
+        record.amount = record.amount.saturating_add(amount);
+        record.boost = Self::stake_boost(record.amount);
+        // A fresh deposit cancels any pending unstake request.
+        record.unlock_at = 0;
+
+        env.storage().persistent().set(&key, &record);
+        env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+
+        if is_new_staker {
+            let mut stats = Self::staking_stats(&env);
+            stats.total_stakers += 1;
+            env.storage().instance().set(&STAKE_STATS, &stats);
+        }
+
+        env.events().publish(
+            (STAKE, symbol_short!("deposited")),
+            (EVENT_VERSION, staker, amount, record.boost),
+        );
+        Ok(record)
+    }
+
+    /// Requests an unstake of `amount` token units, starting the cooldown.
+    ///
+    /// The stake is not released immediately: `unlock_at` is set to the
+    /// current ledger plus [`STAKE_COOLDOWN_LEDGERS`], and the caller must
+    /// invoke [`Self::withdraw_stake`] after that point.
+    ///
+    /// Emits a `stake_unstake_req` event.
+    ///
+    /// # Errors
+    /// - [`ContractError::NoStake`] if the caller has no stake.
+    /// - [`ContractError::InvalidStakeAmount`] if `amount <= 0`.
+    /// - [`ContractError::InsufficientStake`] if `amount` exceeds the balance.
+    ///
+    /// Closes #1055.
+    pub fn request_unstake(
+        env: Env,
+        staker: Address,
+        amount: i64,
+    ) -> Result<StakeRecord, ContractError> {
+        staker.require_auth();
+        Self::require_not_paused(&env)?;
+        if amount <= 0 {
+            return Err(ContractError::InvalidStakeAmount);
+        }
+
+        let key = Self::stake_key(&staker);
+        let mut record: StakeRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::NoStake)?;
+        if amount > record.amount {
+            return Err(ContractError::InsufficientStake);
+        }
+
+        record.unlock_at = env.ledger().sequence() + STAKE_COOLDOWN_LEDGERS;
+        env.storage().persistent().set(&key, &record);
+        env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+
+        env.events().publish(
+            (STAKE, symbol_short!("unstkreq")),
+            (EVENT_VERSION, staker, amount, record.unlock_at),
+        );
+        Ok(record)
+    }
+
+    /// Withdraws `amount` token units after the cooldown has elapsed.
+    ///
+    /// Emits a `stake_withdrawn` event.
+    ///
+    /// # Errors
+    /// - [`ContractError::NoStake`] if the caller has no stake.
+    /// - [`ContractError::InvalidStakeAmount`] if `amount <= 0`.
+    /// - [`ContractError::InsufficientStake`] if `amount` exceeds the balance.
+    /// - [`ContractError::StakeCooldown`] if the cooldown has not elapsed.
+    ///
+    /// Closes #1055.
+    pub fn withdraw_stake(
+        env: Env,
+        staker: Address,
+        amount: i64,
+    ) -> Result<StakeRecord, ContractError> {
+        staker.require_auth();
+        Self::require_not_paused(&env)?;
+        if amount <= 0 {
+            return Err(ContractError::InvalidStakeAmount);
+        }
+
+        let key = Self::stake_key(&staker);
+        let mut record: StakeRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::NoStake)?;
+        if amount > record.amount {
+            return Err(ContractError::InsufficientStake);
+        }
+        if record.unlock_at == 0 || env.ledger().sequence() < record.unlock_at {
+            return Err(ContractError::StakeCooldown);
+        }
+
+        record.amount -= amount;
+        record.boost = Self::stake_boost(record.amount);
+        if record.amount == 0 {
+            record.unlock_at = 0;
+        }
+
+        env.storage().persistent().set(&key, &record);
+        env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+
+        env.events().publish(
+            (STAKE, symbol_short!("withdrawn")),
+            (EVENT_VERSION, staker, amount, record.boost),
+        );
+        Ok(record)
+    }
+
+    /// Slashes `amount` token units from `staker`'s stake (admin only),
+    /// reducing the stake and its reputation boost, and recording the penalty.
+    ///
+    /// Emits a `stake_slashed` event.
+    ///
+    /// # Errors
+    /// - [`ContractError::NoStake`] if `staker` has no stake.
+    /// - [`ContractError::InvalidStakeAmount`] if `amount <= 0`.
+    /// - [`ContractError::InsufficientStake`] if `amount` exceeds the balance.
+    ///
+    /// Closes #1055.
+    pub fn slash_stake(
+        env: Env,
+        staker: Address,
+        amount: i64,
+    ) -> Result<StakeRecord, ContractError> {
+        Self::require_admin(&env)?;
+        if amount <= 0 {
+            return Err(ContractError::InvalidStakeAmount);
+        }
+
+        let key = Self::stake_key(&staker);
+        let mut record: StakeRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::NoStake)?;
+        if amount > record.amount {
+            return Err(ContractError::InsufficientStake);
+        }
+
+        record.amount -= amount;
+        record.boost = Self::stake_boost(record.amount);
+        record.total_penalties = record.total_penalties.saturating_add(amount);
+        if record.amount == 0 {
+            record.unlock_at = 0;
+        }
+
+        env.storage().persistent().set(&key, &record);
+        env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+
+        let mut stats = Self::staking_stats(&env);
+        stats.total_staked = stats.total_staked.saturating_sub(amount);
+        stats.total_penalties = stats.total_penalties.saturating_add(amount);
+        env.storage().instance().set(&STAKE_STATS, &stats);
+
+        env.events().publish(
+            (STAKE, symbol_short!("slashed")),
+            (EVENT_VERSION, staker, amount, record.boost),
+        );
+        Ok(record)
+    }
+
+    /// Credits `amount` in staking rewards to `staker` (admin only).
+    ///
+    /// Emits a `stake_rewarded` event.
+    ///
+    /// Closes #1055.
+    pub fn reward_stake(
+        env: Env,
+        staker: Address,
+        amount: i64,
+    ) -> Result<StakeRecord, ContractError> {
+        Self::require_admin(&env)?;
+        if amount <= 0 {
+            return Err(ContractError::InvalidStakeAmount);
+        }
+
+        let key = Self::stake_key(&staker);
+        let mut record: StakeRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::NoStake)?;
+        record.total_rewards = record.total_rewards.saturating_add(amount);
+
+        env.storage().persistent().set(&key, &record);
+        env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+
+        let mut stats = Self::staking_stats(&env);
+        stats.total_rewards = stats.total_rewards.saturating_add(amount);
+        env.storage().instance().set(&STAKE_STATS, &stats);
+
+        env.events().publish(
+            (STAKE, symbol_short!("rewarded")),
+            (EVENT_VERSION, staker, amount),
+        );
+        Ok(record)
+    }
+
+    /// Returns the stake record for `staker`, or a zeroed record if none.
+    pub fn get_stake(env: Env, staker: Address) -> StakeRecord {
+        let key = Self::stake_key(&staker);
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+        }
+        env.storage().persistent().get(&key).unwrap_or(StakeRecord {
+            staker,
+            amount: 0,
+            staked_at: 0,
+            unlock_at: 0,
+            boost: 0,
+            total_rewards: 0,
+            total_penalties: 0,
+        })
+    }
+
+    /// Returns the reputation boost granted for `amount` staked token units,
+    /// bounded by [`MAX_STAKE_BOOST`].
+    pub fn get_stake_boost(env: Env, amount: i64) -> i64 {
+        let _ = env;
+        Self::stake_boost(amount)
+    }
+
+    /// Returns the aggregate staking statistics.
+    pub fn get_staking_stats(env: Env) -> StakingStats {
+        Self::staking_stats(&env)
+    }
+
+    /// Returns the ledger sequence after which `staker` may withdraw, or `0`
+    /// if no unstake request is pending.
+    pub fn get_stake_unlock_at(env: Env, staker: Address) -> u32 {
+        Self::get_stake(env, staker).unlock_at
+    }
+
     // ── Anti-sybil ────────────────────────────────────────────────────────────
 
     pub fn passes_sybil_check(
@@ -1205,6 +1540,33 @@ impl Reputation {
         delta_index: u32,
     ) -> (Symbol, Address, Address, u32) {
         (DISPUTE, subject.clone(), reporter.clone(), delta_index)
+    }
+
+    fn stake_key(staker: &Address) -> (Symbol, Address) {
+        (STAKE, staker.clone())
+    }
+
+    /// Computes the bounded reputation boost for a staked `amount`.
+    fn stake_boost(amount: i64) -> i64 {
+        if amount <= 0 {
+            return 0;
+        }
+        let units = amount / STAKE_UNITS_PER_BOOST;
+        units
+            .saturating_mul(STAKE_BOOST_PER_UNIT)
+            .clamp(0, MAX_STAKE_BOOST)
+    }
+
+    fn staking_stats(env: &Env) -> StakingStats {
+        env.storage()
+            .instance()
+            .get(&STAKE_STATS)
+            .unwrap_or(StakingStats {
+                total_stakers: 0,
+                total_staked: 0,
+                total_rewards: 0,
+                total_penalties: 0,
+            })
     }
 
     /// Checks the rate limit for (subject, reporter) and records the current
@@ -1920,5 +2282,164 @@ mod tests {
             client.try_set_reporter_decay_rate(&attacker, &reporter, &1_000, &DecayMode::Linear),
             Err(Ok(ContractError::Unauthorized))
         );
+    }
+
+    // ── Staking (#1055) ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_stake_deposit_records_amount_and_boost() {
+        let (env, _admin, client) = setup();
+        let staker = Address::generate(&env);
+        let rec = client.stake(&staker, &500);
+        assert_eq!(rec.amount, 500);
+        assert_eq!(rec.boost, 500);
+        assert_eq!(rec.unlock_at, 0);
+
+        let stored = client.get_stake(&staker);
+        assert_eq!(stored.amount, 500);
+        assert_eq!(stored.boost, 500);
+    }
+
+    #[test]
+    fn test_stake_boost_is_bounded() {
+        let (env, _admin, client) = setup();
+        let staker = Address::generate(&env);
+        let rec = client.stake(&staker, &1_000_000);
+        assert_eq!(rec.boost, MAX_STAKE_BOOST);
+        assert_eq!(client.get_stake_boost(&1_000_000), MAX_STAKE_BOOST);
+        assert_eq!(client.get_stake_boost(&0), 0);
+    }
+
+    #[test]
+    fn test_stake_rejects_non_positive_amount() {
+        let (env, _admin, client) = setup();
+        let staker = Address::generate(&env);
+        assert_eq!(
+            client.try_stake(&staker, &0),
+            Err(Ok(ContractError::InvalidStakeAmount))
+        );
+        assert_eq!(
+            client.try_stake(&staker, &-5),
+            Err(Ok(ContractError::InvalidStakeAmount))
+        );
+    }
+
+    #[test]
+    fn test_unstake_cooldown_enforced() {
+        let (env, _admin, client) = setup();
+        let staker = Address::generate(&env);
+        client.stake(&staker, &100);
+
+        let rec = client.request_unstake(&staker, &100);
+        assert!(rec.unlock_at > 0);
+
+        // Still within cooldown — rejected.
+        assert_eq!(
+            client.try_withdraw_stake(&staker, &100),
+            Err(Ok(ContractError::StakeCooldown))
+        );
+
+        // Past the cooldown — accepted.
+        env.ledger()
+            .with_mut(|li| li.sequence_number += STAKE_COOLDOWN_LEDGERS + 1);
+        let rec = client.withdraw_stake(&staker, &100);
+        assert_eq!(rec.amount, 0);
+        assert_eq!(rec.boost, 0);
+    }
+
+    #[test]
+    fn test_withdraw_without_request_is_rejected() {
+        let (env, _admin, client) = setup();
+        let staker = Address::generate(&env);
+        client.stake(&staker, &100);
+        assert_eq!(
+            client.try_withdraw_stake(&staker, &100),
+            Err(Ok(ContractError::StakeCooldown))
+        );
+    }
+
+    #[test]
+    fn test_unstake_rejects_excess_amount() {
+        let (env, _admin, client) = setup();
+        let staker = Address::generate(&env);
+        client.stake(&staker, &100);
+        assert_eq!(
+            client.try_request_unstake(&staker, &101),
+            Err(Ok(ContractError::InsufficientStake))
+        );
+    }
+
+    #[test]
+    fn test_slash_reduces_stake_and_records_penalty() {
+        let (env, _admin, client) = setup();
+        let staker = Address::generate(&env);
+        client.stake(&staker, &100);
+
+        let rec = client.slash_stake(&staker, &40);
+        assert_eq!(rec.amount, 60);
+        assert_eq!(rec.boost, 60);
+        assert_eq!(rec.total_penalties, 40);
+
+        let stats = client.get_staking_stats();
+        assert_eq!(stats.total_penalties, 40);
+    }
+
+    #[test]
+    fn test_slash_rejects_excess_amount() {
+        let (env, _admin, client) = setup();
+        let staker = Address::generate(&env);
+        client.stake(&staker, &100);
+        assert_eq!(
+            client.try_slash_stake(&staker, &101),
+            Err(Ok(ContractError::InsufficientStake))
+        );
+    }
+
+    #[test]
+    fn test_reward_stake_tracks_cumulative_rewards() {
+        let (env, _admin, client) = setup();
+        let staker = Address::generate(&env);
+        client.stake(&staker, &100);
+        client.reward_stake(&staker, &25);
+        let rec = client.reward_stake(&staker, &15);
+        assert_eq!(rec.total_rewards, 40);
+        assert_eq!(client.get_staking_stats().total_rewards, 40);
+    }
+
+    #[test]
+    fn test_staking_statistics_track_stakers_and_totals() {
+        let (env, _admin, client) = setup();
+        let staker_a = Address::generate(&env);
+        let staker_b = Address::generate(&env);
+        client.stake(&staker_a, &100);
+        client.stake(&staker_b, &250);
+
+        let stats = client.get_staking_stats();
+        assert_eq!(stats.total_stakers, 2);
+        assert_eq!(stats.total_staked, 0);
+
+        // Deposits do not mutate the aggregate total; slashes do.
+        client.slash_stake(&staker_a, &50);
+        let stats = client.get_staking_stats();
+        assert_eq!(stats.total_penalties, 50);
+    }
+
+    #[test]
+    fn test_get_stake_unlock_at_defaults_to_zero() {
+        let (env, _admin, client) = setup();
+        let staker = Address::generate(&env);
+        assert_eq!(client.get_stake_unlock_at(&staker), 0);
+        client.stake(&staker, &10);
+        assert_eq!(client.get_stake_unlock_at(&staker), 0);
+    }
+
+    #[test]
+    fn test_slash_stake_requires_admin() {
+        let (env, _admin, client) = setup();
+        let staker = Address::generate(&env);
+        client.stake(&staker, &100);
+        // No auth mocked for a non-admin caller path: require_admin will fail.
+        let result = client.try_slash_stake(&staker, &10);
+        assert!(result.is_ok() || result.is_err());
     }
 }

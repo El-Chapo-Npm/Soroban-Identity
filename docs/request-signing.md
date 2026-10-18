@@ -241,7 +241,13 @@ client can tell a clock problem apart from a bad secret.
 | `SIGNATURE_TIMESTAMP_INVALID` | 400 | Timestamp is not an integer |
 | `SIGNATURE_EXPIRED` | 401 | Timestamp is outside the permitted window |
 | `SIGNATURE_INVALID` | 401 | Digest does not match |
-| `SIGNATURE_REPLAYED` | 409 | Nonce has already been used |
+| `SIGNATURE_REPLAYED` | 409 | Nonce has already been used within the freshness window |
+
+A `SIGNATURE_REPLAYED` response means the server has already seen that exact
+`X-Signature-Nonce` for that signing key. It is not a clock problem and not a
+secret problem: re-signing the same request with a new timestamp does not help,
+because the nonce — not the timestamp — is what was refused. Generate a new
+nonce and sign again.
 
 ### Debugging a mismatch
 
@@ -260,13 +266,55 @@ table at the top of this document.
 
 ## Replay protection
 
-The server remembers each nonce for the length of the freshness window,
-namespaced per key so two clients choosing the same nonce do not collide.
-Within the window a repeated nonce is refused with `SIGNATURE_REPLAYED`; past
-it the timestamp check alone rejects the request, so the nonce no longer needs
-remembering. That keeps the store bounded by request rate rather than uptime.
+Every signed request carries a client-supplied `X-Signature-Nonce` header. The
+server records each nonce it accepts, keyed by the signing key, and refuses any
+nonce it has already seen. This is what stops a captured request from being
+replayed: even if an attacker resends the exact bytes, the nonce is no longer
+fresh.
 
-Two properties are worth knowing:
+### The nonce
+
+- **Client-supplied.** You generate the nonce and send it in
+  `X-Signature-Nonce`. The server never invents one for you.
+- **Unique per request.** 128 bits of randomness (16 random bytes, hex-encoded)
+  is the recommended shape. Do not derive it from a counter, a timestamp, or
+  anything else predictable, and do not reuse a nonce across keys.
+- **Covered by the signature.** The nonce is part of the canonical string, so
+  it cannot be altered in flight without invalidating the HMAC.
+- **Fresh per attempt, including retries.** A retry is a new request and needs
+  a new nonce. Re-sending the same nonce — even with a corrected body or a
+  newer timestamp — is refused as a replay. The SDK's `createSignedFetch` and
+  `signRequest` helpers generate a fresh nonce on every call, so retry logic
+  built on them is safe by default.
+
+### Expiry window
+
+Nonces are remembered for **300 seconds (5 minutes)**, matching the default
+`REQUEST_SIGNING_MAX_AGE_SECONDS`. The window is what bounds the store: a
+nonce only has to be remembered while a request bearing it could still pass the
+timestamp check. Past the window the timestamp check alone rejects the request,
+so the nonce is dropped and the store stays bounded by request rate rather than
+uptime.
+
+Because the two windows are the same length, a nonce is never forgotten while
+its request could still be accepted. If you widen
+`REQUEST_SIGNING_MAX_AGE_SECONDS`, the nonce window widens with it.
+
+### Server-issued nonce header
+
+Every response to a signed request carries an `X-Nonce` header:
+
+```http
+X-Nonce: 8b1f4d2a9c3e5f60
+```
+
+This is a **server-issued** value, distinct from the `X-Signature-Nonce` you
+send. It is informational: it lets a client correlate a response with the
+request that produced it and gives you a value to log alongside the request
+nonce when debugging. It is **not** a nonce to reuse on your next request —
+always generate a fresh `X-Signature-Nonce` yourself.
+
+### Two properties worth knowing
 
 - A **failed** signature does not consume its nonce. Otherwise an attacker
   could burn a client's nonces with garbage signatures and lock out the
@@ -275,7 +323,32 @@ Two properties are worth knowing:
   refused rather than evicting a live nonce — evicting one would reopen the
   replay window it exists to close.
 
-Clients must therefore use a fresh nonce per attempt, including retries.
+### Monitoring nonce collisions
+
+A nonce collision is a request whose nonce was already recorded for that key.
+Collisions are expected to be vanishingly rare with random 128-bit nonces, so a
+rising rate is a signal, not noise. Watch the nonce metrics exposed on
+`/metrics`:
+
+| Metric | Meaning |
+| --- | --- |
+| `signature_nonce_rejections_total` | Requests refused with `SIGNATURE_REPLAYED` |
+| `signature_nonce_collisions_total` | Nonces seen more than once for the same key |
+| `signature_nonce_store_size` | Live nonces currently held in the store |
+
+Interpret them like this:
+
+- **A steady trickle from one key** usually means a client is retrying without
+  regenerating its nonce, or caching a signed request. Fix the client.
+- **A spike across many keys** suggests a shared nonce source — a seeded RNG, a
+  copied container image, or a proxy replaying requests. Check the clients.
+- **A sustained high rate** is worth alerting on: it either indicates a replay
+  attempt in progress or a broken client fleet, and both deserve attention.
+- **`signature_nonce_store_size` climbing without bound** means the store is
+  not expiring entries; check that the TTL is being applied.
+
+Alert on the collision rate rather than the raw count, so a busy but healthy
+deployment does not page anyone.
 
 ## Rollout
 

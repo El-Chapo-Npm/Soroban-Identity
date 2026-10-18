@@ -14,16 +14,20 @@ import { sendJson } from '../http-utils.js';
 export function createTenancyMiddleware(tenantRegistry, baseConfig) {
   return async function tenancyMiddleware(req, res, next) {
     await tenantRegistry.init();
-    const tenantId = resolveTenantId(req);
-    let tenant = tenantRegistry.getTenant(tenantId);
 
-    // If tenant does not exist and isn't default, resolve by subdomain check
+    // Resolve the tenant identifier from subdomain, X-Tenant-Id header,
+    // JWT claim, or query param (in that precedence order).
+    const tenantId = resolveTenantId(req);
+
+    // Resolve the tenant record by id first, then by subdomain.
+    let tenant = tenantRegistry.getTenant(tenantId);
     if (!tenant) {
       tenant = tenantRegistry.getTenantBySubdomain(tenantId);
     }
 
+    // Reject unknown tenants with 404 unless the request targets the
+    // default tenant, which is always permitted.
     if (!tenant && tenantId !== DEFAULT_TENANT_ID) {
-      // Unknown tenant
       sendJson(res, 404, {
         error: 'TenantNotFound',
         message: `Tenant "${tenantId}" not recognized`,
@@ -31,25 +35,29 @@ export function createTenancyMiddleware(tenantRegistry, baseConfig) {
       return;
     }
 
-    // Fall back to default tenant if not found
+    // Fall back to the default tenant when no explicit tenant matched.
     if (!tenant) {
       tenant = tenantRegistry.getTenant(DEFAULT_TENANT_ID);
     }
 
-    // Attach to request
-    req.tenantId = tenant ? tenant.id : DEFAULT_TENANT_ID;
+    const resolvedTenantId = tenant ? tenant.id : DEFAULT_TENANT_ID;
+
+    // Bind the resolved tenant to the request so downstream handlers and
+    // storage layers operate within the correct tenant scope.
+    req.tenantId = resolvedTenantId;
     req.tenant = tenant;
-    req.tenantConfig = getTenantScopedConfig(baseConfig, req.tenantId);
+    req.tenantConfig = getTenantScopedConfig(baseConfig, resolvedTenantId);
 
-    // Set response header for tracking
-    res.setHeader('X-Tenant-Id', req.tenantId);
+    // Echo the resolved tenant back to the client for tracking/debugging.
+    res.setHeader('X-Tenant-Id', resolvedTenantId);
 
-    // Run inside requestContextStore with tenant context
+    // Run the remainder of the request inside the tenant-scoped
+    // AsyncLocalStorage context so cross-tenant data access is prevented.
     const currentContext = requestContextStore.getStore() || {};
     requestContextStore.run(
       {
         ...currentContext,
-        tenantId: req.tenantId,
+        tenantId: resolvedTenantId,
         tenant,
       },
       () => {

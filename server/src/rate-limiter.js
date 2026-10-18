@@ -129,7 +129,88 @@ export class TieredRateLimiter {
     this.whitelist = options.whitelist ?? [];
     this.trustProxy = options.trustProxy ?? false;
     this.maxBuckets = options.maxBuckets ?? 10_000;
+    // Tenant registry (#1053). May be a Map, a plain object keyed by tenant id,
+    // or an object exposing getTenant(id). When absent, behaviour is unchanged.
+    this.tenantRegistry = options.tenantRegistry ?? null;
     this.violations = 0;
+  }
+
+  /**
+   * Look up a tenant record from the configured registry.
+   *
+   * Returns null when no registry is configured or the tenant is unknown, so
+   * callers can fall back to tier defaults.
+   */
+  getTenant(tenantId) {
+    if (!tenantId || !this.tenantRegistry) return null;
+    const registry = this.tenantRegistry;
+    if (typeof registry.getTenant === 'function') {
+      return registry.getTenant(tenantId) ?? null;
+    }
+    if (registry instanceof Map) {
+      return registry.get(tenantId) ?? null;
+    }
+    if (typeof registry === 'object') {
+      return registry[tenantId] ?? null;
+    }
+    return null;
+  }
+
+  /**
+   * Resolve the tenant id for a request, if any.
+   *
+   * Prefers an explicit request property (set by tenant-routing middleware),
+   * then the auth context, then the `x-tenant-id` header.
+   */
+  resolveTenantId(req) {
+    const candidates = [
+      req.tenantId,
+      req.tenant?.id,
+      req.auth?.tenantId,
+      req.auth?.apiKey?.tenantId,
+      req.headers?.['x-tenant-id'],
+    ];
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+    }
+    return null;
+  }
+
+  /**
+   * Resolve the effective limits for a request.
+   *
+   * Tenant-specific read/write limits (and window) override the tier defaults;
+   * anything the tenant does not specify falls back to the tier.
+   */
+  resolveLimits(req, tierName, tier) {
+    const tenantId = this.resolveTenantId(req);
+    const tenant = this.getTenant(tenantId);
+    const limits = {
+      tenantId,
+      tenant,
+      windowMs: tier.windowMs,
+      readLimit: tier.readLimit,
+      writeLimit: tier.writeLimit,
+      maxRequests: tier.maxRequests,
+    };
+
+    if (tenant) {
+      const overrides = tenant.rateLimits ?? tenant.limits ?? tenant;
+      if (Number.isFinite(overrides.windowMs) && overrides.windowMs > 0) {
+        limits.windowMs = overrides.windowMs;
+      }
+      if (Number.isFinite(overrides.readLimit) && overrides.readLimit >= 0) {
+        limits.readLimit = overrides.readLimit;
+      }
+      if (Number.isFinite(overrides.writeLimit) && overrides.writeLimit >= 0) {
+        limits.writeLimit = overrides.writeLimit;
+      }
+      if (Number.isFinite(overrides.maxRequests) && overrides.maxRequests >= 0) {
+        limits.maxRequests = overrides.maxRequests;
+      }
+    }
+
+    return limits;
   }
 
   /**
@@ -160,7 +241,9 @@ export class TieredRateLimiter {
     if (!rule) return { allowed: true, rule: null };
 
     const clientKey = this.getClientKey(req);
-    const bucketKey = `${clientKey}:endpoint:${rule.name}`;
+    const tenantId = this.resolveTenantId(req);
+    const tenantKey = tenantId ? `tenant:${tenantId}` : 'tenant:none';
+    const bucketKey = `${tenantKey}:${clientKey}:endpoint:${rule.name}`;
     const now = this.now();
 
     let state = this.clients.get(bucketKey);
@@ -234,6 +317,7 @@ export class TieredRateLimiter {
         path: pathname,
         limit: result.limit,
         retryAfter: result.retryAfter,
+        tenantId: result.tenantId ?? this.resolveTenantId(req),
         apiKeyId: req.apiKeyId ?? null,
         userAgent: req.headers?.['user-agent'] ?? null,
       },
@@ -270,22 +354,29 @@ export class TieredRateLimiter {
     const now = this.now();
 
     const isWrite = req.method && !['GET', 'HEAD', 'OPTIONS'].includes(req.method.toUpperCase());
-    const limit = isWrite ? tier.writeLimit : tier.readLimit;
-    const bucketKey = `${clientKey}:${tierName}:${isWrite ? 'write' : 'read'}`;
+    const limits = this.resolveLimits(req, tierName, tier);
+    const limit = isWrite ? limits.writeLimit : limits.readLimit;
+
+    // Buckets are keyed by tenant as well as client, so one tenant can never
+    // consume another tenant's budget even if client keys collide.
+    const tenantKey = limits.tenantId ? `tenant:${limits.tenantId}` : 'tenant:none';
+    const bucketKey = `${tenantKey}:${clientKey}:${tierName}:${isWrite ? 'write' : 'read'}`;
 
     let state = this.clients.get(bucketKey);
     if (!state || now >= state.resetTime) {
       if (this.clients.size >= this.maxBuckets) this.evictExpired(now);
       state = {
         count: 1,
-        resetTime: now + tier.windowMs,
+        resetTime: now + limits.windowMs,
         limit,
         tier: tierName,
+        tenantId: limits.tenantId,
       };
       this.clients.set(bucketKey, state);
       return {
         allowed: true,
         tier: tierName,
+        tenantId: limits.tenantId,
         limit,
         remaining: Math.max(0, limit - 1),
         resetAt: Math.ceil(state.resetTime / 1000),
@@ -302,6 +393,7 @@ export class TieredRateLimiter {
     return {
       allowed,
       tier: tierName,
+      tenantId: limits.tenantId,
       limit,
       remaining,
       resetAt,
@@ -318,10 +410,15 @@ export class TieredRateLimiter {
    * Bucket and violation counts, for the metrics endpoint.
    */
   getStats() {
+    const tenants = new Set();
+    for (const state of this.clients.values()) {
+      if (state.tenantId) tenants.add(state.tenantId);
+    }
     return {
       buckets: this.clients.size,
       violations: this.violations,
       whitelistEntries: this.whitelist.length,
+      tenants: tenants.size,
     };
   }
 }

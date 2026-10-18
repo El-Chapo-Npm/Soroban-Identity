@@ -125,3 +125,91 @@ pub struct RevocationRecord {
     pub reason: RevocationReason,
     pub revoked_at: u64,
 }
+
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum TransferStatus {
+    Pending = 0,
+    Accepted = 1,
+    Rejected = 2,
+    Cancelled = 3,
+    Expired = 4,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CredentialTransferRequest {
+    pub credential_id: BytesN<32>,
+    pub from: Address,
+    pub to: Address,
+    pub initiated_at: u64,
+    pub expires_at: u64,
+    pub fee_paid: i128,
+    pub status: TransferStatus,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CredentialTransferRecord {
+    pub credential_id: BytesN<32>,
+    pub from: Address,
+    pub to: Address,
+    pub initiated_at: u64,
+    pub completed_at: u64,
+    pub fee_paid: i128,
+    pub status: TransferStatus,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct TransferFeeConfig {
+    pub enabled: bool,
+    pub fee: i128,
+    pub fee_recipient: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct TransferPolicy {
+    pub credential_type: CredentialType,
+    pub transferable: bool,
+    pub requires_issuer_consent: bool,
+    pub requires_subject_consent: bool,
+    pub max_transfers: u32,
+}
+
+impl TransferPolicy {
+    pub fn default_for(credential_type: CredentialType) -> Self {
+        let transferable = matches!(
+            credential_type,
+            CredentialType::Reputation | CredentialType::Achievement | CredentialType::Custom
+        );
+        TransferPolicy {
+            credential_type,
+            transferable,
+            requires_issuer_consent: false,
+            requires_subject_consent: true,
+            max_transfers: 0,
+        }
+    }
+
+    pub fn is_transferable(&self) -> bool {
+        self.transferable
+    }
+}
+
+pub const TRANSFER_REQUEST_TTL: u64 = 7 * 24 * 60 * 60;
+
+pub mod transfer_keys {
+    use soroban_sdk::{contracttype, BytesN};
+
+    #[contracttype]
+    #[derive(Clone, Debug, PartialEq)]
+    pub enum TransferKey {
+        Request(BytesN<32>),
+        History(BytesN<32>),
+        FeeConfig,
+        Policy(u32),
+    }
+}

@@ -6,6 +6,114 @@ import { logger } from '../logger.js';
 export const DEFAULT_TENANT_ID = 'default';
 
 /**
+ * Default per-tier resource limits. Used when a tenant does not specify
+ * explicit quotas/rate limits.
+ */
+export const TIER_LIMITS = {
+  free: {
+    rateLimits: { readsPerMinute: 60, writesPerMinute: 20 },
+    quotas: { maxCredentials: 500, maxDids: 200 },
+  },
+  pro: {
+    rateLimits: { readsPerMinute: 300, writesPerMinute: 100 },
+    quotas: { maxCredentials: 10000, maxDids: 5000 },
+  },
+  enterprise: {
+    rateLimits: { readsPerMinute: 1200, writesPerMinute: 500 },
+    quotas: { maxCredentials: 100000, maxDids: 50000 },
+  },
+};
+
+/**
+ * Validate a numeric limit value. Must be a finite, non-negative integer.
+ */
+function validateLimit(value, field) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || !Number.isInteger(value)) {
+    throw new Error(`Invalid ${field}: must be a non-negative integer`);
+  }
+  return value;
+}
+
+/**
+ * Validate and normalize a rate limits object, merging with a base.
+ */
+export function validateRateLimits(rateLimits, base = {}) {
+  if (rateLimits === undefined || rateLimits === null) return { ...base };
+  if (typeof rateLimits !== 'object' || Array.isArray(rateLimits)) {
+    throw new Error('Invalid rateLimits: must be an object');
+  }
+  const merged = { ...base, ...rateLimits };
+  const result = {};
+  for (const key of ['readsPerMinute', 'writesPerMinute']) {
+    if (merged[key] !== undefined) {
+      result[key] = validateLimit(merged[key], `rateLimits.${key}`);
+    }
+  }
+  return result;
+}
+
+/**
+ * Validate and normalize a quotas object, merging with a base.
+ */
+export function validateQuotas(quotas, base = {}) {
+  if (quotas === undefined || quotas === null) return { ...base };
+  if (typeof quotas !== 'object' || Array.isArray(quotas)) {
+    throw new Error('Invalid quotas: must be an object');
+  }
+  const merged = { ...base, ...quotas };
+  const result = {};
+  for (const key of ['maxCredentials', 'maxDids']) {
+    if (merged[key] !== undefined) {
+      result[key] = validateLimit(merged[key], `quotas.${key}`);
+    }
+  }
+  return result;
+}
+
+/**
+ * Validate and normalize tenant customization (branding, contracts, feature flags).
+ */
+export function validateCustomization(customization, base = {}) {
+  if (customization === undefined || customization === null) {
+    return {
+      branding: { ...(base.branding || {}) },
+      contracts: { ...(base.contracts || {}) },
+      featureFlags: { ...(base.featureFlags || {}) },
+    };
+  }
+  if (typeof customization !== 'object' || Array.isArray(customization)) {
+    throw new Error('Invalid customization: must be an object');
+  }
+
+  const branding = { ...(base.branding || {}), ...(customization.branding || {}) };
+  if (branding.primaryColor !== undefined && typeof branding.primaryColor !== 'string') {
+    throw new Error('Invalid branding.primaryColor: must be a string');
+  }
+  if (branding.appName !== undefined && typeof branding.appName !== 'string') {
+    throw new Error('Invalid branding.appName: must be a string');
+  }
+  if (branding.logoUrl !== undefined && typeof branding.logoUrl !== 'string') {
+    throw new Error('Invalid branding.logoUrl: must be a string');
+  }
+
+  const contracts = { ...(base.contracts || {}), ...(customization.contracts || {}) };
+  for (const [key, value] of Object.entries(contracts)) {
+    if (value !== undefined && typeof value !== 'string') {
+      throw new Error(`Invalid contracts.${key}: must be a string`);
+    }
+  }
+
+  const featureFlags = { ...(base.featureFlags || {}), ...(customization.featureFlags || {}) };
+  for (const [key, value] of Object.entries(featureFlags)) {
+    if (typeof value !== 'boolean') {
+      throw new Error(`Invalid featureFlags.${key}: must be a boolean`);
+    }
+  }
+
+  return { branding, contracts, featureFlags };
+}
+
+/**
  * Tenant Registry Store
  * Manages tenant organizations, branding, contract addresses, quotas, rate limits, and admins.
  */
@@ -60,6 +168,7 @@ export class TenantRegistry {
           maxCredentials: 100000,
           maxDids: 50000,
         },
+        featureFlags: {},
         admins: ['admin@default.org'],
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
@@ -113,26 +222,30 @@ export class TenantRegistry {
       }
     }
 
-    const tenant = {
-      id,
-      name: tenantData.name || 'Untitled Tenant',
-      subdomain: tenantData.subdomain ? tenantData.subdomain.toLowerCase() : id,
-      tier: tenantData.tier || 'free',
-      status: 'active',
+    const tier = tenantData.tier || 'free';
+    const tierDefaults = TIER_LIMITS[tier] || TIER_LIMITS.free;
+
+    const customization = validateCustomization(tenantData.customization, {
       branding: tenantData.branding || {},
       contracts: tenantData.contracts || {
         identityRegistry: '',
         credentialManager: '',
         reputation: '',
       },
-      rateLimits: tenantData.rateLimits || {
-        readsPerMinute: tenantData.tier === 'pro' ? 300 : tenantData.tier === 'enterprise' ? 1200 : 60,
-        writesPerMinute: tenantData.tier === 'pro' ? 100 : tenantData.tier === 'enterprise' ? 500 : 20,
-      },
-      quotas: tenantData.quotas || {
-        maxCredentials: tenantData.tier === 'pro' ? 10000 : tenantData.tier === 'enterprise' ? 100000 : 500,
-        maxDids: tenantData.tier === 'pro' ? 5000 : tenantData.tier === 'enterprise' ? 50000 : 200,
-      },
+      featureFlags: tenantData.featureFlags || {},
+    });
+
+    const tenant = {
+      id,
+      name: tenantData.name || 'Untitled Tenant',
+      subdomain: tenantData.subdomain ? tenantData.subdomain.toLowerCase() : id,
+      tier,
+      status: 'active',
+      branding: customization.branding,
+      contracts: customization.contracts,
+      featureFlags: customization.featureFlags,
+      rateLimits: validateRateLimits(tenantData.rateLimits, tierDefaults.rateLimits),
+      quotas: validateQuotas(tenantData.quotas, tierDefaults.quotas),
       admins: Array.isArray(tenantData.admins) ? tenantData.admins : [tenantData.adminEmail || 'admin@tenant.local'],
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -157,20 +270,102 @@ export class TenantRegistry {
       }
     }
 
+    const customization = validateCustomization(updates.customization, {
+      branding: { ...tenant.branding, ...(updates.branding || {}) },
+      contracts: { ...tenant.contracts, ...(updates.contracts || {}) },
+      featureFlags: { ...(tenant.featureFlags || {}), ...(updates.featureFlags || {}) },
+    });
+
     const updated = {
       ...tenant,
       ...updates,
       id: tenant.id, // Immutable ID
-      branding: { ...tenant.branding, ...updates.branding },
-      contracts: { ...tenant.contracts, ...updates.contracts },
-      rateLimits: { ...tenant.rateLimits, ...updates.rateLimits },
-      quotas: { ...tenant.quotas, ...updates.quotas },
+      branding: customization.branding,
+      contracts: customization.contracts,
+      featureFlags: customization.featureFlags,
+      rateLimits: validateRateLimits(updates.rateLimits, tenant.rateLimits),
+      quotas: validateQuotas(updates.quotas, tenant.quotas),
       updatedAt: new Date().toISOString(),
     };
 
     this.tenants.set(id, updated);
     await this._save();
     return updated;
+  }
+
+  /**
+   * Read the resource limits (quotas + rate limits) for a tenant.
+   */
+  getTenantLimits(id) {
+    const tenant = this.tenants.get(id);
+    if (!tenant) return null;
+    return {
+      quotas: { ...tenant.quotas },
+      rateLimits: { ...tenant.rateLimits },
+    };
+  }
+
+  /**
+   * Update the resource limits (quotas and/or rate limits) for a tenant.
+   */
+  async updateTenantLimits(id, { quotas, rateLimits } = {}) {
+    await this.init();
+    const tenant = this.tenants.get(id);
+    if (!tenant) {
+      throw new Error(`Tenant not found: ${id}`);
+    }
+    const updated = {
+      ...tenant,
+      quotas: validateQuotas(quotas, tenant.quotas),
+      rateLimits: validateRateLimits(rateLimits, tenant.rateLimits),
+      updatedAt: new Date().toISOString(),
+    };
+    this.tenants.set(id, updated);
+    await this._save();
+    return { quotas: { ...updated.quotas }, rateLimits: { ...updated.rateLimits } };
+  }
+
+  /**
+   * Read the customization (branding, contracts, feature flags) for a tenant.
+   */
+  getTenantCustomization(id) {
+    const tenant = this.tenants.get(id);
+    if (!tenant) return null;
+    return {
+      branding: { ...tenant.branding },
+      contracts: { ...tenant.contracts },
+      featureFlags: { ...(tenant.featureFlags || {}) },
+    };
+  }
+
+  /**
+   * Update the customization (branding, contracts, feature flags) for a tenant.
+   */
+  async updateTenantCustomization(id, customization = {}) {
+    await this.init();
+    const tenant = this.tenants.get(id);
+    if (!tenant) {
+      throw new Error(`Tenant not found: ${id}`);
+    }
+    const validated = validateCustomization(customization, {
+      branding: tenant.branding,
+      contracts: tenant.contracts,
+      featureFlags: tenant.featureFlags || {},
+    });
+    const updated = {
+      ...tenant,
+      branding: validated.branding,
+      contracts: validated.contracts,
+      featureFlags: validated.featureFlags,
+      updatedAt: new Date().toISOString(),
+    };
+    this.tenants.set(id, updated);
+    await this._save();
+    return {
+      branding: { ...updated.branding },
+      contracts: { ...updated.contracts },
+      featureFlags: { ...updated.featureFlags },
+    };
   }
 
   async addAdmin(tenantId, adminEmail) {

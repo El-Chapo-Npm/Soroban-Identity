@@ -585,6 +585,7 @@ export default function IdentityPanel() {
         </label>
         <input
           id="resolve-address"
+          data-tour="resolve-did-input"
           placeholder="Stellar address (G…)"
           value={resolveAddress}
           onChange={(e) => setResolveAddress(e.target.value)}
@@ -988,7 +989,7 @@ export default function IdentityPanel() {
                 {wallet.publicKey.slice(0, 6)}…{wallet.publicKey.slice(-4)}
               </span>
             </p>
-            <button onClick={handleCreate} disabled={creating}>
+            <button onClick={handleCreate} disabled={creating} data-tour="create-did-button">
               {creating ? 'Creating…' : 'Create DID'}
             </button>
             {creating && <SkeletonCard variant="identity" />}

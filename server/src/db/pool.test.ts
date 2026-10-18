@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { ConnectionPool, type PoolClient, type PoolConfig } from './pool';
+import {
+  ConnectionPool,
+  type PoolClient,
+  type PoolConfig,
+  type ReplicaConfig,
+  type ReplicaRegion,
+} from './pool';
 
 /**
  * Minimal in-memory fake client used to exercise the pool without a real
@@ -63,6 +69,17 @@ const baseConfig = (overrides: Partial<PoolConfig> = {}): PoolConfig => ({
   healthCheckIntervalMs: 0,
   maxRetries: 2,
   retryDelayMs: 1,
+  ...overrides,
+});
+
+const replicaConfig = (
+  region: ReplicaRegion,
+  overrides: Partial<ReplicaConfig> = {},
+): ReplicaConfig => ({
+  region,
+  host: `${region}.replica.internal`,
+  max: 5,
+  lagThresholdMs: 5000,
   ...overrides,
 });
 
@@ -181,5 +198,122 @@ describe('ConnectionPool', () => {
 
     expect(created.every((c) => c.released)).toBe(true);
     await expect(pool.acquire()).rejects.toThrow(/shut ?down|closed/i);
+  });
+});
+
+describe('ConnectionPool read/write splitting', () => {
+  let pool: ConnectionPool;
+
+  afterEach(async () => {
+    if (pool) {
+      await pool.shutdown();
+    }
+  });
+
+  it('routes writes to the primary and reads to a replica', async () => {
+    const { factory, created } = makeFactory();
+    const replicas = [
+      replicaConfig('us-east-1'),
+      replicaConfig('eu-west-1'),
+      replicaConfig('ap-southeast-1'),
+    ];
+    pool = new ConnectionPool(factory, baseConfig({ replicas }));
+
+    await pool.query('INSERT INTO users (id) VALUES (1)');
+    await pool.query('SELECT * FROM users');
+
+    const primary = created[0];
+    expect(primary.queries).toContain('INSERT INTO users (id) VALUES (1)');
+    expect(primary.queries).not.toContain('SELECT * FROM users');
+  });
+
+  it('routes reads to the nearest healthy replica', async () => {
+    const { factory } = makeFactory();
+    const replicas = [
+      replicaConfig('us-east-1'),
+      replicaConfig('eu-west-1'),
+      replicaConfig('ap-southeast-1'),
+    ];
+    pool = new ConnectionPool(factory, baseConfig({ replicas }));
+
+    const target = pool.nearestReplica({ latitude: 51.5, longitude: -0.12 });
+    expect(target?.region).toBe('eu-west-1');
+  });
+
+  it('falls back to the primary when a replica fails', async () => {
+    const { factory, created } = makeFactory();
+    const replicas = [replicaConfig('us-east-1')];
+    pool = new ConnectionPool(factory, baseConfig({ replicas }));
+
+    pool.markReplicaUnhealthy('us-east-1');
+    await pool.query('SELECT * FROM users');
+
+    const primary = created[0];
+    expect(primary.queries).toContain('SELECT * FROM users');
+  });
+
+  it('fails over to the primary when all replicas are unhealthy', async () => {
+    const { factory, created } = makeFactory();
+    const replicas = [
+      replicaConfig('us-east-1'),
+      replicaConfig('eu-west-1'),
+      replicaConfig('ap-southeast-1'),
+    ];
+    pool = new ConnectionPool(factory, baseConfig({ replicas }));
+
+    for (const replica of replicas) {
+      pool.markReplicaUnhealthy(replica.region);
+    }
+
+    await pool.query('SELECT * FROM users');
+    expect(created[0].queries).toContain('SELECT * FROM users');
+  });
+
+  it('skips replicas whose lag exceeds the threshold', async () => {
+    const { factory, created } = makeFactory();
+    const replicas = [
+      replicaConfig('us-east-1', { lagThresholdMs: 1000 }),
+      replicaConfig('eu-west-1', { lagThresholdMs: 1000 }),
+    ];
+    pool = new ConnectionPool(factory, baseConfig({ replicas }));
+
+    pool.recordReplicaLag('us-east-1', 5000);
+    pool.recordReplicaLag('eu-west-1', 100);
+
+    const target = pool.nearestReplica({ latitude: 38.9, longitude: -77.0 });
+    expect(target?.region).toBe('eu-west-1');
+
+    await pool.query('SELECT * FROM users');
+    expect(created[0].queries).toContain('SELECT * FROM users');
+  });
+
+  it('exposes replica lag metrics for monitoring', async () => {
+    const { factory } = makeFactory();
+    const replicas = [
+      replicaConfig('us-east-1'),
+      replicaConfig('eu-west-1'),
+      replicaConfig('ap-southeast-1'),
+    ];
+    pool = new ConnectionPool(factory, baseConfig({ replicas }));
+
+    pool.recordReplicaLag('us-east-1', 120);
+    pool.recordReplicaLag('eu-west-1', 340);
+
+    const metrics = pool.replicaMetrics();
+    expect(metrics).toHaveLength(3);
+    expect(metrics.find((m) => m.region === 'us-east-1')?.lagMs).toBe(120);
+    expect(metrics.find((m) => m.region === 'eu-west-1')?.lagMs).toBe(340);
+  });
+
+  it('supports read-your-writes by pinning reads to the primary after a write', async () => {
+    const { factory, created } = makeFactory();
+    const replicas = [replicaConfig('us-east-1')];
+    pool = new ConnectionPool(factory, baseConfig({ replicas }));
+
+    await pool.query('INSERT INTO users (id) VALUES (1)');
+    await pool.query('SELECT * FROM users', { consistency: 'strong' });
+
+    const primary = created[0];
+    expect(primary.queries).toContain('SELECT * FROM users');
   });
 });

@@ -39,6 +39,10 @@ Manages DID documents on-chain.
 
 Issues and verifies verifiable credentials. A maximum of **100 issuers** (`MAX_ISSUERS`) can be registered at any time by default; `add_issuer` returns `MaxIssuersReached` if the cap is hit. The admin can raise or lower this cap via `set_max_issuers`, up to a hard ceiling of **500 issuers** (`ABSOLUTE_MAX_ISSUERS`).
 
+It also hosts the **credential escrow service**, which holds credentials (or the
+assets backing them) in a conditional-hold state until a release condition is
+satisfied, a dispute is resolved, or the escrow is refunded.
+
 | Function | Description |
 |---|---|
 | `initialize(admin)` | One-time setup |
@@ -51,6 +55,50 @@ Issues and verifies verifiable credentials. A maximum of **100 issuers** (`MAX_I
 | `verify_credential(id)` | Check validity |
 | `verify_claims_hash(id, hash)` | Verify off-chain claims hash matches stored hash |
 | `get_credential(id)` | Fetch full credential |
+
+### credential-escrow
+
+Conditional release of credentials between a depositor and a beneficiary. The
+depositor locks a credential (identified by its `credential_id`) together with a
+release condition; funds or the credential are only released once the condition
+verifies, or are refunded to the depositor if the condition fails or expires.
+
+| Function | Description |
+|---|---|
+| `initialize(admin)` | One-time setup |
+| `deposit(depositor, beneficiary, credential_id, condition, expires_at)` | Lock a credential in escrow and return the new `escrow_id` |
+| `verify_condition(escrow_id)` | Evaluate the escrow's release condition against current state |
+| `release(escrow_id)` | Release the escrowed credential to the beneficiary (only if the condition verifies) |
+| `refund(escrow_id)` | Return the escrowed credential to the depositor (failed/expired condition) |
+| `open_dispute(escrow_id, reason)` | Flag an escrow as disputed (depositor or beneficiary) |
+| `resolve_dispute(escrow_id, resolution)` | Arbitrator/admin resolves a dispute, releasing or refunding |
+| `get_escrow(escrow_id)` | Fetch full escrow record |
+| `get_escrow_status(escrow_id)` | Fetch only the current escrow status |
+
+#### Release conditions
+
+An escrow's release condition is one of three variants, evaluated by
+`verify_condition`:
+
+| Condition | Description |
+|---|---|
+| `Time(deadline)` | Releases once the ledger timestamp is at or past `deadline` |
+| `Payment(amount, asset, payer)` | Releases once the required payment from `payer` has been observed |
+| `Approval(approver)` | Releases once `approver` has explicitly approved the release |
+
+Conditions are evaluated on-chain by `verify_condition`; `release` re-runs the
+same check and fails closed with `ConditionNotMet` if it does not hold. A
+condition that can never be satisfied (e.g. a `Time` deadline that has passed
+without release, or an approval that is rejected) makes the escrow eligible for
+`refund`.
+
+#### Dispute resolution
+
+Either party may call `open_dispute` while an escrow is `FUNDED` or `DISPUTED`,
+moving it to `DISPUTED` and freezing automatic release/refund. Only the
+configured arbitrator (or the contract admin) may call `resolve_dispute`, which
+either releases the credential to the beneficiary or refunds the depositor and
+moves the escrow to its terminal state.
 
 ## DID Format
 
@@ -103,6 +151,32 @@ stateDiagram-v2
 - `expire_credential` is a permissionless sweep — any address can call it once the ledger timestamp exceeds `expires_at`.
 - Re-issuance after revocation creates a new credential with a fresh `issued_at`; the revoked record remains in storage.
 - `verify_credential` is read-only but bumps the persistent-storage TTL to keep the record alive.
+
+## Escrow Lifecycle
+
+Every escrow moves through these states. `RELEASED` and `REFUNDED` are terminal.
+
+```mermaid
+stateDiagram-v2
+    [*] --> FUNDED : deposit(depositor, beneficiary, credential_id, condition, expires_at)\n[actor: depositor]
+
+    FUNDED --> RELEASED : release(escrow_id)\n[actor: any caller — condition verified]
+    FUNDED --> REFUNDED : refund(escrow_id)\n[actor: depositor — condition failed or expired]
+    FUNDED --> DISPUTED : open_dispute(escrow_id, reason)\n[actor: depositor or beneficiary]
+
+    DISPUTED --> RELEASED : resolve_dispute(escrow_id, Release)\n[actor: arbitrator/admin]
+    DISPUTED --> REFUNDED : resolve_dispute(escrow_id, Refund)\n[actor: arbitrator/admin]
+
+    RELEASED --> [*] : terminal — credential transferred to beneficiary
+    REFUNDED --> [*] : terminal — credential returned to depositor
+```
+
+**Notes:**
+- `verify_condition` and `get_escrow_status` are read-only; they never mutate escrow state.
+- `release` re-verifies the condition on-chain and fails closed with `ConditionNotMet` if it no longer holds.
+- `refund` is only permitted when the condition has failed or `expires_at` has passed; otherwise it returns `ConditionStillMet`.
+- `open_dispute` freezes automatic transitions until `resolve_dispute` is called by the arbitrator or admin.
+- Escrow records are stored in `persistent` storage and their TTL is bumped on every read/write, mirroring credentials.
 
 ## DID Lifecycle
 
@@ -180,11 +254,119 @@ should be applied to any new function that performs a cross-contract call.
 | `(CRED, "issued")` | `(id: BytesN<32>, subject: Address, issuer: Address, type: CredentialType)` | `issue_credential` |
 | `(CRED, "revoked")` | `(id: BytesN<32>, issuer: Address)` | `revoke_credential` |
 
+### credential-escrow
+
+| Event topic | Payload | Emitted by |
+|---|---|---|
+| `(ESCROW, "deposited")` | `(escrow_id: BytesN<32>, depositor: Address, beneficiary: Address, credential_id: BytesN<32>)` | `deposit` |
+| `(ESCROW, "condition_verified")` | `(escrow_id: BytesN<32>, condition: Condition)` | `verify_condition` |
+| `(ESCROW, "released")` | `(escrow_id: BytesN<32>, beneficiary: Address)` | `release` / `resolve_dispute` |
+| `(ESCROW, "refunded")` | `(escrow_id: BytesN<32>, depositor: Address)` | `refund` / `resolve_dispute` |
+| `(ESCROW, "disputed")` | `(escrow_id: BytesN<32>, reason: Symbol)` | `open_dispute` |
+| `(ESCROW, "dispute_resolved")` | `(escrow_id: BytesN<32>, resolution: Resolution)` | `resolve_dispute` |
+
 ## Storage
 
-- `persistent` storage is used for DID documents and credentials (survives ledger expiry with TTL bumps)
-- `instance` storage is used for admin and issuer registry
+- `persistent` storage is used for DID documents, credentials, and escrow records (survives ledger expiry with TTL bumps)
+- `instance` storage is used for admin, issuer registry, and escrow configuration (arbitrator address)
 
+## Geo-Distributed Read Replicas
+
+To serve global read traffic with low latency, the backend runs read
+replicas in three regions alongside a single authoritative primary.
+
+### Replication Topology
+
+```
+                    ┌──────────────────────────┐
+                    │   Primary (write node)   │
+                    │        us-east-1         │
+                    └────────────┬─────────────┘
+                                 │  async WAL / logical replication
+        ┌────────────────────────┼────────────────────────┐
+        │                        │                        │
+        ▼                        ▼                        ▼
+┌───────────────┐        ┌───────────────┐        ┌───────────────┐
+│  Replica US   │        │  Replica EU   │        │ Replica Asia  │
+│   us-west-2   │        │  eu-central-1 │        │ ap-southeast-1│
+└───────────────┘        └───────────────┘        └───────────────┘
+        ▲                        ▲                        ▲
+        └──────────── nearest-replica routing ───────────┘
+```
+
+- **Primary** (`us-east-1`): the only node that accepts writes. All
+  `create_did`, `update_did`, `deactivate_did`, `issue_credential`,
+  `revoke_credential`, and admin operations are routed here.
+- **Replicas** (`us-west-2`, `eu-central-1`, `ap-southeast-1`): read-only
+  followers that stream changes from the primary asynchronously. They serve
+  `resolve_did`, `has_active_did`, `get_credential`, `verify_credential`,
+  and `verify_claims_hash`.
+- Replication is **asynchronous**, so replicas may lag the primary by a small
+  amount (typically tens to low hundreds of milliseconds).
+
+### Read/Write Splitting
+
+The backend exposes a single logical connection and splits traffic based on
+the operation:
+
+| Operation type | Target | Rationale |
+|---|---|---|
+| Writes (contract invocations that mutate state) | Primary | Only the primary can accept writes |
+| Reads after a write in the same request/session | Primary | Read-your-writes consistency |
+| Independent reads | Nearest healthy replica | Low latency, offloads the primary |
+
+Rules:
+
+1. Any request that performs a write is pinned to the primary for the
+   remainder of that request/session, guaranteeing read-your-writes.
+2. Read-only requests are routed to the nearest healthy replica based on the
+   client's region.
+3. If no replica is healthy, reads fall back to the primary.
+
+### Replica Lag Monitoring
+
+Each replica reports its replication lag (the difference between the
+primary's last applied ledger/sequence and the replica's). The backend:
+
+- Exposes lag per replica as a metric (`replica_lag_seconds{region=...}`).
+- Marks a replica **unhealthy** when lag exceeds the configured threshold
+  (`REPLICA_MAX_LAG_SECONDS`, default 5s) and stops routing reads to it.
+- Alerts when any replica exceeds the threshold for a sustained period.
+
+### Failover
+
+- **Replica failure**: the replica is removed from the routing pool and its
+  traffic is redistributed to the remaining healthy replicas, or to the
+  primary if none remain. No writes are affected.
+- **Primary failure**: writes fail over to the promoted primary; reads
+  continue to be served by replicas (subject to lag) until promotion
+  completes.
+- Failover is automatic and health-check driven; a recovered replica is
+  re-added to the pool only after it has caught up below the lag threshold.
+
+### Eventual Consistency
+
+Because replication is asynchronous, reads from a replica may not reflect a
+just-committed write. The backend handles this as follows:
+
+- **Read-your-writes**: after a write, the session is pinned to the primary
+  (see Read/Write Splitting), so a client always observes its own writes.
+- **Monotonic reads**: a session that has read from a replica is not moved
+  to a replica that is further behind, avoiding time-travel on subsequent
+  reads.
+- **Lag-bounded reads**: replicas lagging beyond `REPLICA_MAX_LAG_SECONDS`
+  are excluded from routing, bounding staleness for independent reads.
+- **Consistency-sensitive reads**: callers that require the latest state can
+  pass a `consistency: 'strong'` hint, which routes the read to the primary.
+
+### Nearest-Replica Routing
+
+The router selects a replica using, in order:
+
+1. The client's region (from geo-IP or an explicit region hint).
+2. The lowest-latency healthy replica within that region.
+3. The nearest healthy replica in an adjacent region.
+4. The primary, if no replica is healthy.
 
 ## Deployment
 

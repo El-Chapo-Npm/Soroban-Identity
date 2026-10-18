@@ -27,6 +27,17 @@
   background: var(--bg-subtle);
 }
 
+/* Micro-interaction: the button dips slightly while pressed. */
+.hamburger-btn:active {
+  transform: scale(0.94);
+}
+
+.hamburger-btn {
+  transition:
+    background 0.2s ease,
+    transform 0.15s ease;
+}
+
 .hamburger-icon,
 .hamburger-icon::before,
 .hamburger-icon::after {
@@ -105,6 +116,12 @@
     visibility 0s;
 }
 
+/* Drawer entry/exit uses a transform (compositor-friendly) rather than
+   animating layout properties. */
+.header-actions {
+  will-change: transform;
+}
+
 .header-actions > * {
   width: 100%;
 }
@@ -137,6 +154,16 @@
   inset: 0;
   z-index: 30;
   background: rgba(0, 0, 0, 0.4);
+  animation: drawer-backdrop-in 0.25s ease both;
+}
+
+@keyframes drawer-backdrop-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 /* The page behind an open drawer must not scroll. */
@@ -209,12 +236,120 @@ html.nav-open body {
   padding: 0.5rem 1rem;
   border-radius: 8px;
   font-size: 0.9rem;
+  transition:
+    background 0.2s ease,
+    border-color 0.2s ease,
+    color 0.2s ease,
+    transform 0.15s ease;
+}
+
+.tab:hover {
+  background: var(--bg-subtle);
+}
+
+/* Micro-interaction: the tab dips slightly while pressed. */
+.tab:active {
+  transform: scale(0.96);
 }
 
 .tab.active {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--btn-text);
+}
+
+/* ── Page / view transitions ─────────────────────────────────────────────── */
+
+/* Hook applied to the panel that holds the active view's content. The
+   keyframe is replayed whenever the view changes (e.g. via a keyed
+   remount), so switching tabs animates the content in. */
+.view-panel {
+  animation: view-enter 0.25s ease both;
+}
+
+@keyframes view-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Exit hook: applied while a view is being swapped out. */
+.view-panel--exiting {
+  animation: view-exit 0.2s ease both;
+}
+
+@keyframes view-exit {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+}
+
+/* List item entry/exit hooks. */
+.list-item {
+  animation: list-item-enter 0.2s ease both;
+}
+
+@keyframes list-item-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.list-item--exiting {
+  animation: list-item-exit 0.15s ease both;
+}
+
+@keyframes list-item-exit {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+
+/* Skeleton screen cross-fade hook. */
+.skeleton {
+  animation: skeleton-fade-in 0.2s ease both;
+}
+
+@keyframes skeleton-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.skeleton--hiding {
+  animation: skeleton-fade-out 0.2s ease both;
+}
+
+@keyframes skeleton-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
 }
 
 /* ── ≥ 600px ─────────────────────────────────────────────────────────────── */
@@ -291,6 +426,37 @@ html.nav-open body {
   .header-actions.open {
     flex: 0 1 auto;
     flex-wrap: nowrap;
+  }
+}
+
+/* ── Reduced motion ──────────────────────────────────────────────────────── */
+
+/* Users who ask for reduced motion get no drawer, tab, page or list
+   animations; state changes apply instantly. */
+@media (prefers-reduced-motion: reduce) {
+  .hamburger-btn,
+  .hamburger-icon,
+  .hamburger-icon::before,
+  .hamburger-icon::after,
+  .header-actions,
+  .header-actions.open,
+  .tab {
+    transition: none;
+  }
+
+  .hamburger-btn:active,
+  .tab:active {
+    transform: none;
+  }
+
+  .mobile-drawer-backdrop.open,
+  .view-panel,
+  .view-panel--exiting,
+  .list-item,
+  .list-item--exiting,
+  .skeleton,
+  .skeleton--hiding {
+    animation: none;
   }
 }
 

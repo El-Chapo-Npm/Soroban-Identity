@@ -29,6 +29,36 @@ import "./styles/index.css";
   html.setAttribute('data-theme', storedTheme || 'system');
 })();
 
+// Initialize the animation system before React renders so CSS can gate
+// animations and the transition wrapper is ready before the first paint.
+(function initializeAnimations() {
+  const html = document.documentElement;
+  const reducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+  const applyMotionPreference = (prefersReducedMotion: boolean) => {
+    html.setAttribute('data-reduced-motion', prefersReducedMotion ? 'true' : 'false');
+    html.classList.toggle('reduced-motion', prefersReducedMotion);
+  };
+
+  applyMotionPreference(reducedMotionQuery.matches);
+
+  // Keep the attribute in sync if the user changes the OS setting at runtime
+  const handleChange = (event: MediaQueryListEvent) => {
+    applyMotionPreference(event.matches);
+  };
+
+  if (typeof reducedMotionQuery.addEventListener === 'function') {
+    reducedMotionQuery.addEventListener('change', handleChange);
+  } else if (typeof reducedMotionQuery.addListener === 'function') {
+    // Fallback for older browsers
+    reducedMotionQuery.addListener(handleChange);
+  }
+
+  // Mark the document as animation-ready so the transition wrapper can be
+  // mounted/activated before the first render.
+  html.setAttribute('data-animations-ready', 'true');
+})();
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <ErrorBoundary>
