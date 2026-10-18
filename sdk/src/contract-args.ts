@@ -584,3 +584,35 @@ export function buildListHistoryArgs(params: {
     nativeToScVal(params.limit, { type: 'u32' }),
   ];
 }
+
+export function buildGetMerkleRootArgs(params: { batchId: string }): xdr.ScVal[] {
+  return [nativeToScVal(params.batchId, { type: 'string' })];
+}
+
+export function buildUpdateMerkleRootArgs(params: {
+  issuer: string;
+  batchId: string;
+  newRoot: Buffer;
+  proof?: any;
+}): xdr.ScVal[] {
+  const args = [
+    nativeToScVal(params.issuer, { type: 'address' }),
+    nativeToScVal(params.batchId, { type: 'string' }),
+    nativeToScVal(params.newRoot, { type: 'bytes' }),
+  ];
+  if (params.proof) {
+    args.push(nativeToScVal(params.proof));
+  }
+  return args;
+}
+
+export function buildVerifyMerkleProofArgs(params: {
+  batchId: string;
+  proof: any;
+}): xdr.ScVal[] {
+  return [
+    nativeToScVal(params.batchId, { type: 'string' }),
+    nativeToScVal(params.proof),
+  ];
+}
+

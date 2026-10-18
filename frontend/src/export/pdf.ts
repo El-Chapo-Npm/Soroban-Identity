@@ -372,3 +372,12 @@ export function downloadComparisonImage(
 ): void {
   downloadFile(comparisonToImage(input, template), filename);
 }
+
+export function exportToPdf(input: any, filename = "credential-comparison.pdf"): void {
+  downloadComparisonPdf(input, filename);
+}
+
+export function exportToPng(input: any, filename = "credential-comparison.png"): void {
+  downloadComparisonImage(input, filename);
+}
+

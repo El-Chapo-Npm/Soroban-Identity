@@ -15,7 +15,8 @@ const IdentityPanel = lazy(() => import("./components/IdentityPanel"));
 const CredentialsPanel = lazy(() => import("./components/CredentialsPanel"));
 const IssuerDashboard = lazy(() => import("./pages/IssuerDashboard"));
 const CredentialRecipientVerify = lazy(() => import("./components/CredentialRecipientVerify"));
-const NetworkStatistics = lazy(() => import("./pages/NetworkStatistics"));
+const NetworkStatistics = lazy(() => import("./components/NetworkStatistics"));
+const ActivityFeed = lazy(() => import("./components/ActivityFeed"));
 
 const preloadCredentialsPanel = () => {
   void import("./components/CredentialsPanel");
@@ -24,7 +25,10 @@ const preloadCredentialRecipientVerify = () => {
   void import("./components/CredentialRecipientVerify");
 };
 const preloadNetworkStatistics = () => {
-  void import("./pages/NetworkStatistics");
+  void import("./components/NetworkStatistics");
+};
+const preloadActivityFeed = () => {
+  void import("./components/ActivityFeed");
 };
 import WalletButton from "./components/WalletButton";
 import ErrorBoundary from "./components/ErrorBoundary";
@@ -60,9 +64,16 @@ export enum Tab {
   Credentials = "credentials",
   IssuerAnalytics = "issuerAnalytics",
   NetworkStatistics = "networkStatistics",
+  ActivityFeed = "activityFeed",
 }
 
-const TAB_ORDER: Tab[] = [Tab.Identity, Tab.Credentials, Tab.IssuerAnalytics, Tab.NetworkStatistics];
+const TAB_ORDER: Tab[] = [
+  Tab.Identity,
+  Tab.Credentials,
+  Tab.IssuerAnalytics,
+  Tab.NetworkStatistics,
+  Tab.ActivityFeed,
+];
 
 function AppContent() {
   const [tab, setTab] = useState<Tab>(Tab.Identity);
@@ -589,14 +600,18 @@ function AppContent() {
                 ? preloadCredentialsPanel
                 : name === Tab.NetworkStatistics
                   ? preloadNetworkStatistics
-                  : undefined
+                  : name === Tab.ActivityFeed
+                    ? preloadActivityFeed
+                    : undefined
             }
             onFocus={
               name === Tab.Credentials
                 ? preloadCredentialsPanel
                 : name === Tab.NetworkStatistics
                   ? preloadNetworkStatistics
-                  : undefined
+                  : name === Tab.ActivityFeed
+                    ? preloadActivityFeed
+                    : undefined
             }
           >
             {t(`tabs.${name}`)}
@@ -657,6 +672,24 @@ function AppContent() {
             hidden={tab !== Tab.IssuerAnalytics}
           >
             {tab === Tab.IssuerAnalytics && <IssuerDashboard />}
+          </div>
+          <div
+            id={`panel-${Tab.NetworkStatistics}`}
+            role="tabpanel"
+            aria-labelledby={`tab-${Tab.NetworkStatistics}`}
+            data-tour="panel-network"
+            hidden={tab !== Tab.NetworkStatistics}
+          >
+            {tab === Tab.NetworkStatistics && <NetworkStatistics />}
+          </div>
+          <div
+            id={`panel-${Tab.ActivityFeed}`}
+            role="tabpanel"
+            aria-labelledby={`tab-${Tab.ActivityFeed}`}
+            data-tour="panel-activity"
+            hidden={tab !== Tab.ActivityFeed}
+          >
+            {tab === Tab.ActivityFeed && <ActivityFeed />}
           </div>
           </ViewTransition>
           </Suspense>

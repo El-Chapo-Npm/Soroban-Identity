@@ -5,7 +5,9 @@
 //! revoked in the credential-manager contract, the reputation contract
 //! can automatically update reputation scores.
 
-use shared_events::{CredentialEvent, EventPayload, EventRegistry, EventType};
+extern crate alloc;
+use alloc::format;
+use shared_events::EventType;
 use soroban_sdk::{Address, BytesN, Env, String};
 
 use crate::{ContractError, Reputation};
@@ -81,13 +83,7 @@ pub fn handle_credential_issued(
     };
 
     // Build reason string for audit trail
-    let reason = String::from_str(
-        &env,
-        &format!(
-            "Auto: Credential {} issued",
-            credential_type.to_string()
-        ),
-    );
+    let reason = String::from_str(&env, "Auto: Credential issued");
 
     // Submit score automatically
     // Note: In production, you might want additional authorization checks
@@ -96,7 +92,7 @@ pub fn handle_credential_issued(
         env.clone(),
         reporter,
         subject.clone(),
-        config.credential_issued_score,
+        config.credential_issued_score as i64,
         reason,
     )?;
 
@@ -135,30 +131,27 @@ pub fn handle_credential_revoked(
     reporter: Address,
     credential_id: BytesN<32>,
     subject: Address,
-    reason_code: u32,
-    revoked_at: u64,
+    _reason_code: u32,
+    _revoked_at: u64,
 ) -> Result<(), ContractError> {
     let config = ReputationEventConfig::default();
 
     // Build reason string including revocation reason
-    let reason = String::from_str(
-        &env,
-        &format!("Auto: Credential revoked (reason: {})", reason_code),
-    );
+    let reason = String::from_str(&env, "Auto: Credential revoked");
 
     // Submit negative score
     Reputation::submit_score(
         env.clone(),
         reporter,
         subject.clone(),
-        config.credential_revoked_penalty,
+        config.credential_revoked_penalty as i64,
         reason,
     )?;
 
     // Emit event for this reputation penalty
     env.events().publish(
         (
-            soroban_sdk::symbol_short!("rep_penalty"),
+            soroban_sdk::symbol_short!("rep_pen"),
             subject,
             credential_id,
         ),
@@ -344,7 +337,7 @@ pub fn unsubscribe_from_credential_events(
     );
 
     env.events().publish(
-        (soroban_sdk::symbol_short!("unsub_cred"),),
+        (soroban_sdk::symbol_short!("uns_cred"),),
         (reputation_contract,),
     );
 
@@ -379,13 +372,16 @@ mod tests {
     #[test]
     fn test_emit_staking_events() {
         let env = Env::default();
+        let contract_id = env.register_contract(None, Reputation);
         let staker = Address::generate(&env);
 
-        emit_staked(&env, staker.clone(), 1_000, 10, 100);
-        emit_unstaked(&env, staker.clone(), 1_000, 10, 200);
-        emit_slashed(&env, staker.clone(), 500, 1, 300);
-        emit_reward_applied(&env, staker.clone(), 50, 5, 400);
-        emit_penalty_applied(&env, staker.clone(), 25, -3, 500);
+        env.as_contract(&contract_id, || {
+            emit_staked(&env, staker.clone(), 1_000, 10, 100);
+            emit_unstaked(&env, staker.clone(), 1_000, 10, 200);
+            emit_slashed(&env, staker.clone(), 500, 1, 300);
+            emit_reward_applied(&env, staker.clone(), 50, 5, 400);
+            emit_penalty_applied(&env, staker.clone(), 25, -3, 500);
+        });
 
         let events = env.events().all();
         assert_eq!(events.len(), 5);

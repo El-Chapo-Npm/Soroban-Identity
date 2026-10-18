@@ -123,7 +123,6 @@ pub enum EventType {
 }
 
 /// Credential-related events emitted by credential-manager contract.
-#[contracttype]
 #[derive(Clone, Debug)]
 pub enum CredentialEvent {
     Issued {
@@ -151,7 +150,6 @@ pub enum CredentialEvent {
 }
 
 /// DID-related events emitted by identity-registry contract.
-#[contracttype]
 #[derive(Clone, Debug)]
 pub enum DidEvent {
     Registered {
@@ -173,7 +171,6 @@ pub enum DidEvent {
 }
 
 /// Reputation-related events emitted by reputation contract.
-#[contracttype]
 #[derive(Clone, Debug)]
 pub enum ReputationEvent {
     ScoreSubmitted {
@@ -185,7 +182,6 @@ pub enum ReputationEvent {
 }
 
 /// Escrow-related events emitted by the credential escrow contract.
-#[contracttype]
 #[derive(Clone, Debug)]
 pub enum EscrowEvent {
     /// Funds were deposited into escrow.
@@ -233,7 +229,6 @@ pub enum EscrowEvent {
 }
 
 /// Top-level event payload that wraps all event types.
-#[contracttype]
 #[derive(Clone, Debug)]
 pub enum EventPayload {
     Credential(CredentialEvent),
@@ -344,7 +339,7 @@ impl EventRegistry {
         listener.require_auth();
 
         let key = (SUBSCRIPTIONS.clone(), event_type.clone());
-        let mut subs: Vec<EventSubscription> = env
+        let subs: Vec<EventSubscription> = env
             .storage()
             .persistent()
             .get(&key)
@@ -443,25 +438,25 @@ impl EventEmitter {
         match &payload {
             EventPayload::Credential(cred_event) => {
                 let topic = match cred_event {
-                    CredentialEvent::Issued { .. } => symbol_short!("cred_issue"),
-                    CredentialEvent::Revoked { .. } => symbol_short!("cred_revok"),
-                    CredentialEvent::Renewed { .. } => symbol_short!("cred_renew"),
+                    CredentialEvent::Issued { .. } => symbol_short!("cred_iss"),
+                    CredentialEvent::Revoked { .. } => symbol_short!("cred_rev"),
+                    CredentialEvent::Renewed { .. } => symbol_short!("cred_ren"),
                 };
-                env.events().publish((topic, emitter, timestamp), payload);
+                env.events().publish((topic.clone(), emitter, timestamp), topic);
             }
             EventPayload::Did(did_event) => {
                 let topic = match did_event {
                     DidEvent::Registered { .. } => symbol_short!("did_reg"),
-                    DidEvent::Updated { .. } => symbol_short!("did_update"),
+                    DidEvent::Updated { .. } => symbol_short!("did_upd"),
                     DidEvent::Deactivated { .. } => symbol_short!("did_deact"),
                 };
-                env.events().publish((topic, emitter, timestamp), payload);
+                env.events().publish((topic.clone(), emitter, timestamp), topic);
             }
             EventPayload::Reputation(rep_event) => {
                 let topic = match rep_event {
                     ReputationEvent::ScoreSubmitted { .. } => symbol_short!("rep_score"),
                 };
-                env.events().publish((topic, emitter, timestamp), payload);
+                env.events().publish((topic.clone(), emitter, timestamp), topic);
             }
             EventPayload::Escrow(escrow_event) => {
                 let topic = match escrow_event {
@@ -471,7 +466,7 @@ impl EventEmitter {
                     EscrowEvent::Resolved { .. } => symbol_short!("esc_res"),
                     EscrowEvent::Refunded { .. } => symbol_short!("esc_ref"),
                 };
-                env.events().publish((topic, emitter, timestamp), payload);
+                env.events().publish((topic.clone(), emitter, timestamp), topic);
             }
             EventPayload::Custom(msg) => {
                 env.events()
