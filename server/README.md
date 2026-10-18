@@ -38,6 +38,54 @@ The server configuration can be customized using the following environment varia
 | `RATE_LIMIT_PREMIUM_KEYS` | Comma-separated API key ids that bypass all rate limits. | unset |
 | `TRUST_PROXY` | Trust `X-Forwarded-For` when resolving the client IP. | `false` |
 
+## Credential payload encryption
+
+Set `PAYLOAD_ENCRYPTION_ENABLED=true` to require application-layer encryption
+for credential routes. This is an additional layer; it does not replace HTTPS.
+Terminate TLS only at a trusted proxy and use TLS between that proxy and this
+server as well.
+
+The client generates an ephemeral X25519 key pair and sends its SPKI public key
+to `POST /encryption/sessions` as `{"clientPublicKey":"<base64-DER>"}` with its
+normal API authentication. The response contains a random `sessionId`, an
+independent server X25519 public key, a random salt, `keyId`, generation,
+algorithm (`A256GCM`) and expiry. Client and server compute the X25519 shared
+secret and derive the same 256-bit AES key using HKDF-SHA-256 with the returned
+salt and the context `soroban-identity/payload-encryption/v1\n<sessionId>\n<keyId>`.
+Session IDs are bound to the authenticating API key or OAuth client and expire
+after `PAYLOAD_ENCRYPTION_SESSION_TTL_SECONDS`.
+
+Supply `X-Encryption-Session: <sessionId>` on credential reads and writes.
+JSON mutation bodies use this envelope shape:
+
+```json
+{
+  "algorithm": "A256GCM",
+  "keyId": "key-1-...",
+  "iv": "<base64 12-byte nonce>",
+  "ciphertext": "<base64 encrypted JSON bytes>",
+  "tag": "<base64 16-byte GCM tag>"
+}
+```
+
+The request AAD is UTF-8 `request\n<METHOD>\n<exact request target>\n<sessionId>\n<keyId>`.
+Responses keep the normal JSON shape but replace configured sensitive fields
+with objects containing `algorithm`, `keyId`, `iv`, `ciphertext`, and `tag`.
+For each field, its AAD is UTF-8
+`response\n<METHOD>\n<exact request target>\n<status>\n<sessionId>\n<keyId>\n<JSON pointer>`.
+Fields are selected case-insensitively by `PAYLOAD_ENCRYPTION_SENSITIVE_FIELDS`
+(default: `credentialSubject,claims,subject`). Encrypted responses set
+`Cache-Control: no-store`. Rotating requires authenticated
+`POST /encryption/sessions/:sessionId/rotate` with a new client public key;
+the prior key remains valid for inbound requests for the configured grace
+period (`PAYLOAD_ENCRYPTION_ROTATION_GRACE_SECONDS`). Close a session with
+authenticated `DELETE /encryption/sessions/:sessionId`.
+
+Keep the client private key and derived AES key in memory only. Never log
+plaintext bodies or keys. HMAC request signing, when enabled, signs the exact
+encrypted envelope bytes. This protocol is opt-in because it changes credential
+routes to require a session and encrypted request envelopes.
+
 ## Container image and health checks
 
 Build the image from the repository root with `docker build -f server/Dockerfile -t soroban-identity .`. The image reports its health through `HEALTHCHECK` using `scripts/healthcheck.mjs` against `/live`. `/ready` and `/health` are available for readiness and detailed status. See [docs/container-health-checks.md](../docs/container-health-checks.md) for probe semantics, the Docker, compose, Kubernetes and ECS settings, and how to verify restarts.

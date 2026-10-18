@@ -126,6 +126,7 @@ export const DEFAULT_CORS_ALLOWED_HEADERS = [
   "X-Actor",
   "X-User-Tier",
   "X-API-Version",
+  "X-Encryption-Session",
 ];
 
 export const DEFAULT_CORS_EXPOSED_HEADERS = [
@@ -292,6 +293,16 @@ export function loadConfig(env = process.env) {
     requestSigningEnforce:
       (env.REQUEST_SIGNING_ENFORCE ?? "mutations").toLowerCase() === "all" ? "all" : "mutations",
     requestSigningMaxAgeSeconds: parseInteger(env.REQUEST_SIGNING_MAX_AGE_SECONDS, 300),
+    // AES-GCM application payload encryption. When enabled, credential routes
+    // require an authenticated X25519 session before accepting or returning
+    // credential payloads.
+    payloadEncryptionEnabled: parseBoolean(env.PAYLOAD_ENCRYPTION_ENABLED, false),
+    payloadEncryptionSessionTtlSeconds: parseInteger(env.PAYLOAD_ENCRYPTION_SESSION_TTL_SECONDS, 900),
+    payloadEncryptionRotationGraceSeconds: parseInteger(env.PAYLOAD_ENCRYPTION_ROTATION_GRACE_SECONDS, 60, true),
+    payloadEncryptionSensitiveFields: parseList(
+      env.PAYLOAD_ENCRYPTION_SENSITIVE_FIELDS,
+      ["credentialSubject", "claims", "subject"],
+    ),
     // Nonce-based replay prevention (#1052). Off by default for the same
     // reason as request signing: enabling it rejects requests from clients
     // that do not yet send a nonce.
@@ -580,6 +591,8 @@ export function validateConfig(env = process.env) {
     { key: "ACCESS_LOG_MAX_BYTES", desc: "must be a valid integer" },
     { key: "ACCESS_LOG_MAX_FILES", desc: "must be a valid integer" },
     { key: "LOG_PAYLOAD_MAX_BYTES", desc: "must be a valid integer" },
+    { key: "PAYLOAD_ENCRYPTION_SESSION_TTL_SECONDS", desc: "must be a valid integer" },
+    { key: "PAYLOAD_ENCRYPTION_ROTATION_GRACE_SECONDS", desc: "must be a valid integer" },
     { key: "OAUTH_AUTH_CODE_TTL_MS", desc: "must be a valid integer" },
     { key: "OAUTH_ACCESS_TOKEN_TTL_MS", desc: "must be a valid integer" },
     { key: "OAUTH_REFRESH_TOKEN_TTL_MS", desc: "must be a valid integer" },

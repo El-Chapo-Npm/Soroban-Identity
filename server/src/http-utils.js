@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { logger } from './logger.js';
+import { decryptRequestJson, encryptSensitiveFields } from './payload-encryption.js';
 
 /**
  * Constant-time string comparison using crypto.timingSafeEqual.
@@ -96,6 +97,17 @@ export async function readJson(req, config) {
   const { tooLarge, buffer } = await readRawBody(req, config);
   if (tooLarge) return { __payloadTooLarge: true };
 
+  if (req.payloadEncryption) {
+    const parsed = await decryptRequestJson(
+      req,
+      req.payloadEncryption.sessionStore,
+      req.payloadEncryption.sessionId,
+      req.payloadEncryption.ownerId,
+      buffer,
+    );
+    req.loggedBody = { encrypted: true };
+    return parsed;
+  }
   if (buffer.length === 0) return {};
   const raw = buffer.toString("utf8");
   if (!raw.trim()) return {};
@@ -124,11 +136,21 @@ export async function readJson(req, config) {
 }
 
 export function sendJson(res, statusCode, body, headers = {}) {
+  const encryption = res.payloadEncryption;
+  const responseBody = encryption
+    ? encryptSensitiveFields(body, {
+        ...encryption,
+        method: encryption.method,
+        path: encryption.path,
+        statusCode,
+      })
+    : body;
   res.writeHead(statusCode, {
     "content-type": "application/json; charset=utf-8",
+    ...(encryption ? { "cache-control": "no-store" } : {}),
     ...headers,
   });
-  res.end(JSON.stringify(body));
+  res.end(JSON.stringify(responseBody));
 }
 
 export function sendText(res, statusCode, body, headers = {}) {
@@ -336,6 +358,9 @@ export function negotiateContentType(acceptHeader) {
  * Returns 406 Not Acceptable if client requested an unsupported format.
  */
 export function sendFormatted(req, res, statusCode, body, headers = {}) {
+  if (res.payloadEncryption) {
+    return sendJson(res, statusCode, body, headers);
+  }
   const accept = req?.headers ? req.headers["accept"] : undefined;
   const matchedFormat = negotiateContentType(accept);
 
