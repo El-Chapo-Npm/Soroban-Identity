@@ -47,7 +47,7 @@ schema-registry = { path = "schema-registry" }
 revocation-registry = { path = "revocation-registry" }
 selective-disclosure = { path = "selective-disclosure" }
 did-bridge = { path = "bridge", features = ["testutils"] }
-soroban-sdk = { version = "21.0.0", features = ["testutils"] }
+soroban-sdk = { version = "29.0.1", features = ["testutils"] }
 
 [[test]]
 name = "integration"
