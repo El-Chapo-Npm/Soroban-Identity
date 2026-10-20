@@ -4,6 +4,7 @@ import { ReputationClient } from "../../../sdk/src/reputation";
 import { getNetworkConfig } from "../network";
 import { formatTimestamp } from "../utils/formatDate";
 import { exportToPdf, exportToPng } from "../export/pdf";
+import { copyComparisonLink } from "../export/comparison";
 
 export interface CredentialComparisonProps {
   credentials: Credential[];
@@ -263,18 +264,7 @@ export const CredentialComparison: React.FC<CredentialComparisonProps> = ({
   const handleCopyLink = useCallback(async () => {
     const link = buildComparisonLink(visibleCredentials.map((c) => c.id));
     try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(link);
-      } else {
-        const textarea = document.createElement("textarea");
-        textarea.value = link;
-        textarea.style.position = "fixed";
-        textarea.style.opacity = "0";
-        document.body.appendChild(textarea);
-        textarea.select();
-        document.execCommand("copy");
-        document.body.removeChild(textarea);
-      }
+      await copyComparisonLink(link);
       setToast("Comparison link copied to clipboard");
     } catch {
       setToast("Failed to copy comparison link");

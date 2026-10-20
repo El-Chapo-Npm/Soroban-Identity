@@ -16,6 +16,10 @@ const CredentialsPanel = lazy(() => import("./components/CredentialsPanel"));
 const IssuerDashboard = lazy(() => import("./pages/IssuerDashboard"));
 const CredentialRecipientVerify = lazy(() => import("./components/CredentialRecipientVerify"));
 const NetworkStatistics = lazy(() => import("./components/NetworkStatistics"));
+const ActivityFeed = lazy(() => import("./components/ActivityFeed"));
+const CredentialComparison = lazy(() => import("./components/CredentialComparison"));
+const SharedCredentialVerify = lazy(() => import("./components/SharedCredentialVerify"));
+const BiometricDeviceManager = lazy(() => import("./components/BiometricDeviceManager"));
 
 const preloadCredentialsPanel = () => {
   void import("./components/CredentialsPanel");
@@ -25,6 +29,18 @@ const preloadCredentialRecipientVerify = () => {
 };
 const preloadNetworkStatistics = () => {
   void import("./components/NetworkStatistics");
+};
+const preloadActivityFeed = () => {
+  void import("./components/ActivityFeed");
+};
+const preloadCredentialComparison = () => {
+  void import("./components/CredentialComparison");
+};
+const preloadSharedCredentialVerify = () => {
+  void import("./components/SharedCredentialVerify");
+};
+const preloadBiometricDeviceManager = () => {
+  void import("./components/BiometricDeviceManager");
 };
 import WalletButton from "./components/WalletButton";
 import QRScanner from "./components/QRScanner";
@@ -64,9 +80,16 @@ export enum Tab {
   Credentials = "credentials",
   IssuerAnalytics = "issuerAnalytics",
   NetworkStatistics = "networkStatistics",
+  Activity = "activity",
 }
 
-const TAB_ORDER: Tab[] = [Tab.Identity, Tab.Credentials, Tab.IssuerAnalytics, Tab.NetworkStatistics];
+const TAB_ORDER: Tab[] = [
+  Tab.Identity,
+  Tab.Credentials,
+  Tab.IssuerAnalytics,
+  Tab.NetworkStatistics,
+  Tab.Activity,
+];
 
 function AppContent() {
   const [tab, setTab] = useState<Tab>(Tab.Identity);
@@ -75,6 +98,11 @@ function AppContent() {
   const [verifyId, setVerifyId] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
   const [deepLinkEncrypted, setDeepLinkEncrypted] = useState<{ c: string; k: string } | null>(null);
+  // #1032: `?compare=id1,id2,id3` opens the side-by-side comparison view.
+  const [compareIds, setCompareIds] = useState<string[] | null>(null);
+  // #1030: `?share=<shortId>` opens the public shared-credential verification view.
+  const [shareId, setShareId] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const networkConfig = NETWORK_CONFIGS[activeNetwork];
   const wallet = useWallet(networkConfig);
   useIdleSessionTimeout(wallet.connected, wallet.disconnect);
@@ -182,6 +210,21 @@ function AppContent() {
     const verifyParam = urlParams.get("verify");
     const cParam = urlParams.get("c");
     const kParam = urlParams.get("k");
+
+    const compareParam = urlParams.get("compare");
+    const shareParam = urlParams.get("share");
+
+    if (compareParam) {
+      const ids = compareParam
+        .split(",")
+        .map((id) => id.trim())
+        .filter(Boolean);
+      if (ids.length > 0) setCompareIds(ids);
+    }
+
+    if (shareParam) {
+      setShareId(shareParam.trim());
+    }
 
     if (cParam && kParam) {
       setDeepLinkEncrypted({ c: cParam, k: kParam });
@@ -452,6 +495,18 @@ function AppContent() {
             </span>
           )}
           <VoiceCommandButton voice={voice} />
+          <button
+            type="button"
+            className="settings-toggle"
+            aria-label={t("a11y.settings", "Settings")}
+            aria-expanded={settingsOpen}
+            aria-controls="settings-panel"
+            onClick={() => setSettingsOpen((v) => !v)}
+            onMouseEnter={preloadBiometricDeviceManager}
+            onFocus={preloadBiometricDeviceManager}
+          >
+            <span aria-hidden="true">⚙</span>
+          </button>
           <WalletButton />
         </div>
         <div
@@ -462,6 +517,38 @@ function AppContent() {
       </header>
 
       <OfflineIndicator />
+
+      {settingsOpen && (
+        <section
+          id="settings-panel"
+          aria-label={t("a11y.settings", "Settings")}
+          className="settings-panel"
+        >
+          <Suspense fallback={<LoadingFallback />}>
+            <BiometricDeviceManager />
+          </Suspense>
+        </section>
+      )}
+
+      {shareId && (
+        <Suspense fallback={<LoadingFallback />}>
+          <SharedCredentialVerify
+            shortId={shareId}
+            network={activeNetwork}
+            onClose={() => setShareId(null)}
+          />
+        </Suspense>
+      )}
+
+      {compareIds && (
+        <Suspense fallback={<LoadingFallback />}>
+          <CredentialComparison
+            credentialIds={compareIds}
+            network={activeNetwork}
+            onClose={() => setCompareIds(null)}
+          />
+        </Suspense>
+      )}
 
       {uninitializedContracts.length > 0 && (
         <div
@@ -595,14 +682,18 @@ function AppContent() {
                 ? preloadCredentialsPanel
                 : name === Tab.NetworkStatistics
                   ? preloadNetworkStatistics
-                  : undefined
+                  : name === Tab.Activity
+                    ? preloadActivityFeed
+                    : undefined
             }
             onFocus={
               name === Tab.Credentials
                 ? preloadCredentialsPanel
                 : name === Tab.NetworkStatistics
                   ? preloadNetworkStatistics
-                  : undefined
+                  : name === Tab.Activity
+                    ? preloadActivityFeed
+                    : undefined
             }
           >
             {t(`tabs.${name}`)}
@@ -663,6 +754,17 @@ function AppContent() {
             hidden={tab !== Tab.IssuerAnalytics}
           >
             {tab === Tab.IssuerAnalytics && <IssuerDashboard />}
+          </div>
+          <div
+            id={`panel-${Tab.Activity}`}
+            role="tabpanel"
+            aria-labelledby={`tab-${Tab.Activity}`}
+            data-tour="panel-activity"
+            hidden={tab !== Tab.Activity}
+          >
+            {tab === Tab.Activity && (
+              <ActivityFeed network={activeNetwork} publicKey={wallet.publicKey} />
+            )}
           </div>
           </ViewTransition>
           </Suspense>

@@ -51,6 +51,8 @@ export const V1_ROUTES = {
   health:              { method: "GET",    path: "/health" },
   info:                { method: "GET",    path: "/info" },
   metrics:             { method: "GET",    path: "/metrics" },
+  shortenShareLink:    { method: "POST",   path: "/share/shorten" },
+  resolveShareLink:    { method: "GET",    path: "/share/:id" },
 };
 
 /**
@@ -243,4 +245,142 @@ export function networkStatisticsRoute({ analyticsService } = {}) {
       return getNetworkStatistics({ analyticsService, query: req?.query });
     },
   };
+}
+
+/**
+ * Privacy options supported for credential sharing (#1030).
+ */
+export const SHARE_PRIVACY_OPTIONS = ["public", "private", "selective"];
+
+/**
+ * Normalise a requested share privacy setting, defaulting to "private".
+ *
+ * @param {string} [privacy]
+ * @returns {"public"|"private"|"selective"}
+ */
+export function normalizeSharePrivacy(privacy) {
+  const value = String(privacy || "").toLowerCase();
+  return SHARE_PRIVACY_OPTIONS.includes(value) ? value : "private";
+}
+
+/**
+ * Generate a short, URL-safe share id.
+ *
+ * @param {() => number} [random]  injectable RNG for deterministic tests
+ * @returns {string}
+ */
+export function generateShareId(random = Math.random) {
+  const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
+  let id = "";
+  for (let i = 0; i < 8; i += 1) {
+    id += alphabet[Math.floor(random() * alphabet.length)];
+  }
+  return id;
+}
+
+/**
+ * POST /share/shorten handler.
+ *
+ * Creates a short id for a share URL and records a `share_created`
+ * analytics event. The target URL is validated to be an absolute http(s)
+ * URL so that shared links cannot be used to redirect to arbitrary schemes.
+ *
+ * @param {object} deps
+ * @param {{ createShortLink: Function }} [deps.shareService]
+ * @param {{ track: Function }} [deps.analyticsService]
+ * @param {object} [deps.body]  request body ({ url, privacy, credentialId })
+ * @returns {Promise<{ id: string, url: string, privacy: string }>}
+ */
+export async function shortenShareLink({ shareService, analyticsService, body = {} } = {}) {
+  const targetUrl = body?.url;
+  if (typeof targetUrl !== "string" || !/^https?:\/\//i.test(targetUrl)) {
+    const err = new Error("A valid http(s) url is required");
+    err.status = 400;
+    throw err;
+  }
+
+  const privacy = normalizeSharePrivacy(body?.privacy);
+  const id = shareService && typeof shareService.createShortLink === "function"
+    ? await shareService.createShortLink({ url: targetUrl, privacy, credentialId: body?.credentialId })
+    : generateShareId();
+
+  if (analyticsService && typeof analyticsService.track === "function") {
+    await analyticsService.track("share_created", {
+      shareId: id,
+      privacy,
+      credentialId: body?.credentialId,
+    });
+  }
+
+  return { id, url: withV1Prefix(`/share/${id}`), privacy };
+}
+
+/**
+ * GET /share/:id handler.
+ *
+ * Resolves a short id to its target URL, records a `share_opened` analytics
+ * event, and returns the target so the caller can redirect. Shared links
+ * carry the credential id (when present) so the recipient can verify the
+ * credential from the shared link.
+ *
+ * @param {object} deps
+ * @param {{ resolveShortLink: Function }} [deps.shareService]
+ * @param {{ track: Function }} [deps.analyticsService]
+ * @param {object} [deps.params]  route params ({ id })
+ * @returns {Promise<{ url: string, privacy: string, credentialId?: string }>}
+ */
+export async function resolveShareLink({ shareService, analyticsService, params = {} } = {}) {
+  const id = params?.id;
+  if (!id) {
+    const err = new Error("Share id is required");
+    err.status = 400;
+    throw err;
+  }
+
+  const resolved = shareService && typeof shareService.resolveShortLink === "function"
+    ? await shareService.resolveShortLink(id)
+    : null;
+  if (!resolved || typeof resolved.url !== "string") {
+    const err = new Error("Share link not found");
+    err.status = 404;
+    throw err;
+  }
+
+  if (analyticsService && typeof analyticsService.track === "function") {
+    await analyticsService.track("share_opened", {
+      shareId: id,
+      privacy: resolved.privacy,
+      credentialId: resolved.credentialId,
+    });
+  }
+
+  return {
+    url: resolved.url,
+    privacy: normalizeSharePrivacy(resolved.privacy),
+    ...(resolved.credentialId ? { credentialId: resolved.credentialId } : {}),
+  };
+}
+
+/**
+ * Build the v1 route map entries for credential sharing (#1030), so app.js
+ * can register them consistently with networkStatisticsRoute.
+ *
+ * @param {object} deps
+ * @param {{ createShortLink: Function, resolveShortLink: Function }} [deps.shareService]
+ * @param {{ track: Function }} [deps.analyticsService]
+ * @returns {Array<{ method: string, path: string, handler: Function }>}
+ */
+export function shareRoutes({ shareService, analyticsService } = {}) {
+  return [
+    {
+      method: V1_ROUTES.shortenShareLink.method,
+      path: withV1Prefix(V1_ROUTES.shortenShareLink.path),
+      handler: (req) => shortenShareLink({ shareService, analyticsService, body: req?.body }),
+    },
+    {
+      method: V1_ROUTES.resolveShareLink.method,
+      path: withV1Prefix(V1_ROUTES.resolveShareLink.path),
+      handler: (req) => resolveShareLink({ shareService, analyticsService, params: req?.params }),
+    },
+  ];
 }
