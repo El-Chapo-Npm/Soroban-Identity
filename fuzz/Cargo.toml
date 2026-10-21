@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+# Required by cargo-fuzz when the fuzz manifest is selected explicitly or via
+# the current working directory.
+[package.metadata]
+cargo-fuzz = true
+
 # cargo-fuzz requires the workspace to be declared here so it is isolated
 [workspace]
 members = ["."]
