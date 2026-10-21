@@ -95,6 +95,17 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
   </React.StrictMode>
 );
 
+// Dev-only runtime accessibility auditing (axe-core) and dev tools panel
+if (import.meta.env.DEV) {
+  void import("./a11y").then(({ startRuntimeA11y, A11yDevPanel }) => {
+    startRuntimeA11y();
+    const host = document.createElement("div");
+    host.id = "a11y-devtools";
+    document.body.appendChild(host);
+    ReactDOM.createRoot(host).render(<A11yDevPanel />);
+  });
+}
+
 // Register service worker for offline support and PWA caching
 import("./serviceWorker").then((sw) => {
   sw.register();
