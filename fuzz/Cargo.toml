@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+# Keep cargo-fuzz from treating this as a regular Cargo manifest. Without this
+# marker, the nightly crash job exits before running the target and uploads a
+# misleading crash artifact (issue #999).
+[package.metadata]
+cargo-fuzz = true
+
 # cargo-fuzz requires the workspace to be declared here so it is isolated
 [workspace]
 members = ["."]
