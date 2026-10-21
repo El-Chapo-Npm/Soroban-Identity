@@ -19,6 +19,7 @@ const CredentialsPanel = lazy(() => import("./components/CredentialsPanel"));
 const IssuerDashboard = lazy(() => import("./pages/IssuerDashboard"));
 const CredentialRecipientVerify = lazy(() => import("./components/CredentialRecipientVerify"));
 const NetworkStatistics = lazy(() => import("./components/NetworkStatistics"));
+const CustomizableDashboard = lazy(() => import("./components/CustomizableDashboard"));
 
 const preloadCredentialsPanel = () => {
   void import("./components/CredentialsPanel");
@@ -28,6 +29,9 @@ const preloadCredentialRecipientVerify = () => {
 };
 const preloadNetworkStatistics = () => {
   void import("./components/NetworkStatistics");
+};
+const preloadCustomizableDashboard = () => {
+  void import("./components/CustomizableDashboard");
 };
 import WalletButton from "./components/WalletButton";
 import QRScanner from "./components/QRScanner";
@@ -67,9 +71,16 @@ export enum Tab {
   Credentials = "credentials",
   IssuerAnalytics = "issuerAnalytics",
   NetworkStatistics = "networkStatistics",
+  Dashboard = "dashboard",
 }
 
-const TAB_ORDER: Tab[] = [Tab.Identity, Tab.Credentials, Tab.IssuerAnalytics, Tab.NetworkStatistics];
+const TAB_ORDER: Tab[] = [
+  Tab.Identity,
+  Tab.Credentials,
+  Tab.IssuerAnalytics,
+  Tab.NetworkStatistics,
+  Tab.Dashboard,
+];
 
 function AppContent() {
   const [tab, setTab] = useState<Tab>(Tab.Identity);
@@ -114,6 +125,8 @@ function AppContent() {
             setTab(Tab.Credentials);
           } else if (target.includes("issuer") || target.includes("analytics")) {
             setTab(Tab.IssuerAnalytics);
+          } else if (target.includes("dashboard")) {
+            setTab(Tab.Dashboard);
           } else {
             setTab(Tab.Identity);
           }
@@ -615,14 +628,18 @@ function AppContent() {
                 ? preloadCredentialsPanel
                 : name === Tab.NetworkStatistics
                   ? preloadNetworkStatistics
-                  : undefined
+                  : name === Tab.Dashboard
+                    ? preloadCustomizableDashboard
+                    : undefined
             }
             onFocus={
               name === Tab.Credentials
                 ? preloadCredentialsPanel
                 : name === Tab.NetworkStatistics
                   ? preloadNetworkStatistics
-                  : undefined
+                  : name === Tab.Dashboard
+                    ? preloadCustomizableDashboard
+                    : undefined
             }
           >
             {t(`tabs.${name}`)}
@@ -688,7 +705,33 @@ function AppContent() {
             data-tour="panel-issuer"
             hidden={tab !== Tab.IssuerAnalytics}
           >
-            {tab === Tab.IssuerAnalytics && <IssuerDashboard />}
+            {tab === Tab.IssuerAnalytics && (
+              <IssuerDashboard onOpenCustomizableDashboard={() => setTab(Tab.Dashboard)} />
+            )}
+          </div>
+          <div
+            id={`panel-${Tab.Dashboard}`}
+            role="tabpanel"
+            aria-labelledby={`tab-${Tab.Dashboard}`}
+            data-tour="panel-dashboard"
+            hidden={tab !== Tab.Dashboard}
+          >
+            {tab === Tab.Dashboard && (
+              <CustomizableDashboard
+                wallet={wallet}
+                network={activeNetwork}
+                networkConfig={networkConfig}
+                onNavigate={(target) => {
+                  const next = (Object.values(Tab) as string[]).includes(target)
+                    ? (target as Tab)
+                    : null;
+                  if (next) {
+                    setTab(next);
+                    tabRefs.current[next]?.focus();
+                  }
+                }}
+              />
+            )}
           </div>
           <div
             id={`panel-${Tab.NetworkStatistics}`}
