@@ -1022,7 +1022,7 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
     <>
       <BrowserExtensionBanner credentials={displayCredentials} />
       {/* Filter bar */}
-      <div className="card">
+      <div className="card" data-tour="credential-list">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
           <h2 style={{ margin: 0 }}>Credentials</h2>
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
@@ -1449,7 +1449,10 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
                   </span>
                 </button>
                 {expandedCredId === cred.id && (
-                  <div style={{ padding: "0.75rem 1rem", borderTop: "1px solid var(--border-input)", background: "var(--card-bg-accent)" }}>
+                  <div
+                    data-tour="credential-details"
+                    style={{ padding: "0.75rem 1rem", borderTop: "1px solid var(--border-input)", background: "var(--card-bg-accent)" }}
+                  >
                     <dl style={{ margin: "0 0 0.75rem", fontSize: "0.8rem" }}>
                       <div style={{ display: "flex", gap: "1rem", marginBottom: "0.25rem" }}>
                         <dt style={{ fontWeight: 600, color: "var(--text-muted)", minWidth: "120px" }}>Issued</dt>
@@ -1652,7 +1655,7 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
         )}
       </div>
 
-      <div className="card">
+      <div className="card" data-tour="verify-credential">
         <h2>Verify Credential</h2>
         <label htmlFor="verify-credential-id" className="visually-hidden">
           Credential ID to verify
@@ -1697,7 +1700,7 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
         )}
       </div>
 
-      <div className="card">
+      <div className="card" data-tour="issue-credential">
         <h2>Issue Credential</h2>
         {wallet.connected ? (
           isIssuer ? (
@@ -1714,7 +1717,8 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
                 selectedTemplateId={selectedTemplate?.id}
                 onSelectTemplate={handleSelectTemplate}
               />
-              
+
+              <div data-tour="credential-form">
               <FormField
                 label="Subject Address"
                 placeholder="Subject address (G…)"
@@ -1792,6 +1796,7 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
                 error={issueErrors.expiresAt}
                 style={{ marginBottom: "1rem" }}
               />
+              </div>
 
               <button
                 data-tour="issue-credential-button"
@@ -1812,7 +1817,7 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
             </p>
           )
         ) : (
-          <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>
+          <p data-tour="credential-wallet" style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>
             Connect your Freighter wallet to issue credentials as a registered issuer.
           </p>
         )}
