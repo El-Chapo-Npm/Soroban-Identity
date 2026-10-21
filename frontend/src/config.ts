@@ -77,6 +77,29 @@ export const COLLAB_CONFIG: CollaborationConfig = (() => {
   };
 })();
 
+// Analytics configuration. The dashboard and real-time stream hook resolve
+// their endpoints from here. VITE_ANALYTICS_URL defaults to the analytics
+// server base URL; VITE_ANALYTICS_WS_URL is optional and, when absent, the
+// dashboard falls back to polling.
+export interface AnalyticsConfig {
+  baseUrl: string;
+  wsUrl: string | undefined;
+  realtimeEnabled: boolean;
+}
+
+const DEFAULT_ANALYTICS_URL = 'http://localhost:4000/api/analytics';
+
+export const ANALYTICS_CONFIG: AnalyticsConfig = (() => {
+  const baseUrl =
+    import.meta.env.VITE_ANALYTICS_URL || DEFAULT_ANALYTICS_URL;
+  const wsUrl = import.meta.env.VITE_ANALYTICS_WS_URL || undefined;
+  return {
+    baseUrl,
+    wsUrl,
+    realtimeEnabled: Boolean(wsUrl),
+  };
+})();
+
 // Returns config for the active network, resolved from VITE_NETWORK / VITE_*_RPC_URL
 // / VITE_*_IDENTITY_REGISTRY_ID env vars defined in .env.example.
 export function getAppConfig() {
@@ -85,5 +108,6 @@ export function getAppConfig() {
     tourEnabled: TOUR_ENABLED,
     search: SEARCH_CONFIG,
     collaboration: COLLAB_CONFIG,
+    analytics: ANALYTICS_CONFIG,
   };
 }

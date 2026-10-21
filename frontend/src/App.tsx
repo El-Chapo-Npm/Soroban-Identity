@@ -20,6 +20,7 @@ const IssuerDashboard = lazy(() => import("./pages/IssuerDashboard"));
 const CredentialRecipientVerify = lazy(() => import("./components/CredentialRecipientVerify"));
 const NetworkStatistics = lazy(() => import("./components/NetworkStatistics"));
 const CustomizableDashboard = lazy(() => import("./components/CustomizableDashboard"));
+const CredentialAnalytics = lazy(() => import("./pages/CredentialAnalytics"));
 
 const preloadCredentialsPanel = () => {
   void import("./components/CredentialsPanel");
@@ -32,6 +33,9 @@ const preloadNetworkStatistics = () => {
 };
 const preloadCustomizableDashboard = () => {
   void import("./components/CustomizableDashboard");
+};
+const preloadCredentialAnalytics = () => {
+  void import("./pages/CredentialAnalytics");
 };
 import WalletButton from "./components/WalletButton";
 import QRScanner from "./components/QRScanner";
@@ -71,6 +75,7 @@ export enum Tab {
   Credentials = "credentials",
   IssuerAnalytics = "issuerAnalytics",
   NetworkStatistics = "networkStatistics",
+  CredentialAnalytics = "credentialAnalytics",
   Dashboard = "dashboard",
 }
 
@@ -79,6 +84,7 @@ const TAB_ORDER: Tab[] = [
   Tab.Credentials,
   Tab.IssuerAnalytics,
   Tab.NetworkStatistics,
+  Tab.CredentialAnalytics,
   Tab.Dashboard,
 ];
 
@@ -123,8 +129,10 @@ function AppContent() {
           const target = transcript.toLowerCase();
           if (target.includes("credential")) {
             setTab(Tab.Credentials);
-          } else if (target.includes("issuer") || target.includes("analytics")) {
+          } else if (target.includes("issuer")) {
             setTab(Tab.IssuerAnalytics);
+          } else if (target.includes("analytics")) {
+            setTab(Tab.CredentialAnalytics);
           } else if (target.includes("dashboard")) {
             setTab(Tab.Dashboard);
           } else {
@@ -628,18 +636,22 @@ function AppContent() {
                 ? preloadCredentialsPanel
                 : name === Tab.NetworkStatistics
                   ? preloadNetworkStatistics
-                  : name === Tab.Dashboard
-                    ? preloadCustomizableDashboard
-                    : undefined
+                  : name === Tab.CredentialAnalytics
+                    ? preloadCredentialAnalytics
+                    : name === Tab.Dashboard
+                      ? preloadCustomizableDashboard
+                      : undefined
             }
             onFocus={
               name === Tab.Credentials
                 ? preloadCredentialsPanel
                 : name === Tab.NetworkStatistics
                   ? preloadNetworkStatistics
-                  : name === Tab.Dashboard
-                    ? preloadCustomizableDashboard
-                    : undefined
+                  : name === Tab.CredentialAnalytics
+                    ? preloadCredentialAnalytics
+                    : name === Tab.Dashboard
+                      ? preloadCustomizableDashboard
+                      : undefined
             }
           >
             {t(`tabs.${name}`)}
@@ -707,6 +719,21 @@ function AppContent() {
           >
             {tab === Tab.IssuerAnalytics && (
               <IssuerDashboard onOpenCustomizableDashboard={() => setTab(Tab.Dashboard)} />
+            )}
+          </div>
+          <div
+            id={`panel-${Tab.CredentialAnalytics}`}
+            role="tabpanel"
+            aria-labelledby={`tab-${Tab.CredentialAnalytics}`}
+            data-tour="panel-credential-analytics"
+            hidden={tab !== Tab.CredentialAnalytics}
+          >
+            {tab === Tab.CredentialAnalytics && (
+              <CredentialAnalytics
+                wallet={wallet}
+                network={activeNetwork}
+                networkConfig={networkConfig}
+              />
             )}
           </div>
           <div

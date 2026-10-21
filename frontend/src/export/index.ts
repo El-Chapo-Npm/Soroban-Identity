@@ -21,3 +21,4 @@ export {
   newTemplateId,
 } from "./templates";
 export { DEFAULT_FIELD_LABELS, credentialStatus } from "./format";
+export { exportAnalyticsCsv, exportAnalyticsPdf } from "./analytics";
