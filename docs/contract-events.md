@@ -64,6 +64,7 @@ Notes for indexers:
 | Topic | Payload |
 | --- | --- |
 | `SCORE,updated` | `[subject: string, reporter: string, delta: number, score: number]` |
+| `SUBDECAY,updated` | `[eventVersion: number, admin: string, subject: string, parameters: DecayParameters]` — subject-specific decay parameters changed |
 
 ## credential-escrow events
 

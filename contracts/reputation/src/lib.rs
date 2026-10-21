@@ -3,16 +3,18 @@
 
 //! Reputation contract — on-chain activity scoring and anti-sybil signals.
 
+mod decay;
+pub use decay::{calculate as calculate_decay, DecayAlgorithm, DecayParameters};
+
 mod events;
 pub use events::{
-    handle_credential_issued, handle_credential_revoked,
-    subscribe_to_credential_events, unsubscribe_from_credential_events,
-    ReputationEventConfig,
+    handle_credential_issued, handle_credential_revoked, subscribe_to_credential_events,
+    unsubscribe_from_credential_events, ReputationEventConfig,
 };
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short,
-    Address, BytesN, Env, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
+    Symbol, Vec,
 };
 
 pub const CONTRACT_VERSION: u32 = 1;
@@ -80,6 +82,8 @@ const DECAY_CFG: Symbol = symbol_short!("DECAYCFG");
 const RPT_DECAY: Symbol = symbol_short!("RPTDECAY");
 /// Storage key prefix for the most recent reporter to score each subject.
 const LAST_RPT: Symbol = symbol_short!("LASTRPT");
+const SUBJECT_DECAY: Symbol = symbol_short!("SUBDECAY");
+const DECAY_LAST: Symbol = symbol_short!("DECAYLAST");
 /// Storage key prefix for per-address stake records (#1055).
 const STAKE: Symbol = symbol_short!("STAKE");
 /// Storage key for the global staking statistics counter (#1055).
@@ -133,6 +137,7 @@ pub enum ContractError {
     BatchTooLarge          = 16,
     /// Issue #657: decay rate exceeds MAX_DECAY_RATE_BPS.
     InvalidDecayRate       = 17,
+    InvalidDecayParameters = 26,
     /// Issue #1055: no stake record exists for the address.
     NoStake                = 18,
     /// Issue #1055: stake is still within its cooldown period.
@@ -338,10 +343,8 @@ impl Reputation {
         // #949: the rate-limit window is not written here — every read falls
         // back to DEFAULT_MIN_INTERVAL, so storing the default at deploy time
         // only adds a ledger write to the initialization transaction.
-        env.events().publish(
-            (ADMIN, symbol_short!("init")),
-            (EVENT_VERSION, admin),
-        );
+        env.events()
+            .publish((ADMIN, symbol_short!("init")), (EVENT_VERSION, admin));
         Ok(())
     }
 
@@ -366,11 +369,7 @@ impl Reputation {
     /// [[`MIN_INTERVAL_FLOOR`], [`MIN_INTERVAL_CEILING`]].
     ///
     /// Closes #580.
-    pub fn set_min_interval(
-        env: Env,
-        admin: Address,
-        ledgers: u32,
-    ) -> Result<(), ContractError> {
+    pub fn set_min_interval(env: Env, admin: Address, ledgers: u32) -> Result<(), ContractError> {
         admin.require_auth();
         let stored: Address = env
             .storage()
@@ -400,11 +399,7 @@ impl Reputation {
         Self::set_min_interval(env, admin, ledgers)
     }
 
-    pub fn propose_admin(
-        env: Env,
-        admin: Address,
-        proposed: Address,
-    ) -> Result<(), ContractError> {
+    pub fn propose_admin(env: Env, admin: Address, proposed: Address) -> Result<(), ContractError> {
         admin.require_auth();
         let stored: Address = env
             .storage()
@@ -489,14 +484,20 @@ impl Reputation {
     pub fn pause(env: Env) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
         env.storage().instance().set(&PAUSED, &true);
-        env.events().publish((symbol_short!("contract"), symbol_short!("paused")), EVENT_VERSION);
+        env.events().publish(
+            (symbol_short!("contract"), symbol_short!("paused")),
+            EVENT_VERSION,
+        );
         Ok(())
     }
 
     pub fn unpause(env: Env) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
         env.storage().instance().set(&PAUSED, &false);
-        env.events().publish((symbol_short!("contract"), symbol_short!("unpaused")), EVENT_VERSION);
+        env.events().publish(
+            (symbol_short!("contract"), symbol_short!("unpaused")),
+            EVENT_VERSION,
+        );
         Ok(())
     }
 
@@ -541,9 +542,13 @@ impl Reputation {
         min_reporters: u32,
     ) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
-        env.storage()
-            .instance()
-            .set(&DEF_THRESH, &DefaultThreshold { min_score, min_reporters });
+        env.storage().instance().set(
+            &DEF_THRESH,
+            &DefaultThreshold {
+                min_score,
+                min_reporters,
+            },
+        );
         env.events().publish(
             (symbol_short!("THRESH"), symbol_short!("updated")),
             (EVENT_VERSION, min_score, min_reporters),
@@ -557,9 +562,13 @@ impl Reputation {
         min_reporters: u32,
     ) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
-        env.storage()
-            .instance()
-            .set(&DEF_THRESH, &DefaultThreshold { min_score, min_reporters });
+        env.storage().instance().set(
+            &DEF_THRESH,
+            &DefaultThreshold {
+                min_score,
+                min_reporters,
+            },
+        );
         Ok(())
     }
 
@@ -567,7 +576,12 @@ impl Reputation {
 
     /// Sets the contract-wide default decay rate (admin only); `rate_bps` is
     /// basis points removed per elapsed day, `0` disables decay (the default).
-    pub fn set_decay_rate(env: Env, admin: Address, rate_bps: u32, mode: DecayMode) -> Result<(), ContractError> {
+    pub fn set_decay_rate(
+        env: Env,
+        admin: Address,
+        rate_bps: u32,
+        mode: DecayMode,
+    ) -> Result<(), ContractError> {
         Self::require_admin_caller(&env, &admin)?;
         if rate_bps > MAX_DECAY_RATE_BPS {
             return Err(ContractError::InvalidDecayRate);
@@ -600,8 +614,12 @@ impl Reputation {
             return Err(ContractError::InvalidDecayRate);
         }
         let key = (RPT_DECAY, reporter.clone());
-        env.storage().persistent().set(&key, &DecayConfig { rate_bps, mode });
-        env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+        env.storage()
+            .persistent()
+            .set(&key, &DecayConfig { rate_bps, mode });
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_MAX, TTL_MAX);
         env.events().publish(
             (RPT_DECAY, symbol_short!("updated")),
             (EVENT_VERSION, admin, reporter, rate_bps),
@@ -610,9 +628,15 @@ impl Reputation {
     }
 
     /// Removes a reporter's decay-rate override (admin only).
-    pub fn clear_reporter_decay_rate(env: Env, admin: Address, reporter: Address) -> Result<(), ContractError> {
+    pub fn clear_reporter_decay_rate(
+        env: Env,
+        admin: Address,
+        reporter: Address,
+    ) -> Result<(), ContractError> {
         Self::require_admin_caller(&env, &admin)?;
-        env.storage().persistent().remove(&(RPT_DECAY, reporter.clone()));
+        env.storage()
+            .persistent()
+            .remove(&(RPT_DECAY, reporter.clone()));
         env.events().publish(
             (RPT_DECAY, symbol_short!("cleared")),
             (EVENT_VERSION, admin, reporter),
@@ -624,6 +648,65 @@ impl Reputation {
     /// override if one is set, otherwise the contract-wide default.
     pub fn get_reporter_decay_rate(env: Env, reporter: Address) -> DecayConfig {
         Self::decay_config_for_reporter(&env, &reporter)
+    }
+
+    /// Sets a subject-specific curve. Subject curves take precedence over the
+    /// legacy global/reporter defaults.
+    pub fn set_decay_algorithm(
+        env: Env,
+        admin: Address,
+        subject: Address,
+        params: DecayParameters,
+    ) -> Result<(), ContractError> {
+        Self::require_admin_caller(&env, &admin)?;
+        if !decay::validate(&params) {
+            return Err(ContractError::InvalidDecayParameters);
+        }
+        let key = Self::subject_decay_key(&subject);
+        env.storage().persistent().set(&key, &params);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_MAX, TTL_MAX);
+        env.events().publish(
+            (SUBJECT_DECAY, symbol_short!("updated")),
+            (EVENT_VERSION, admin, subject, params),
+        );
+        Ok(())
+    }
+
+    pub fn set_subject_decay(
+        env: Env,
+        admin: Address,
+        subject: Address,
+        params: DecayParameters,
+    ) -> Result<(), ContractError> {
+        Self::set_decay_algorithm(env, admin, subject, params)
+    }
+
+    pub fn get_decay_algorithm(env: Env, subject: Address) -> Option<DecayParameters> {
+        env.storage()
+            .persistent()
+            .get(&Self::subject_decay_key(&subject))
+    }
+
+    pub fn get_subject_decay(env: Env, subject: Address) -> Option<DecayParameters> {
+        Self::get_decay_algorithm(env, subject)
+    }
+
+    /// Projects the score at `future_timestamp` without changing storage.
+    pub fn preview_reputation(
+        env: Env,
+        subject: Address,
+        future_timestamp: u64,
+    ) -> ReputationRecord {
+        Self::reputation_at(&env, subject, future_timestamp, false)
+    }
+
+    pub fn get_last_calculation_time(env: Env, subject: Address) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&Self::decay_last_key(&subject))
+            .unwrap_or(0)
     }
 
     pub fn submit_score(
@@ -673,8 +756,7 @@ impl Reputation {
 
         // Now update the aggregate record
         // Issue #667: Recompute score from all reporter histories to handle race conditions
-        let existing_record: Option<ReputationRecord> =
-            env.storage().persistent().get(&rec_key);
+        let existing_record: Option<ReputationRecord> = env.storage().persistent().get(&rec_key);
         let is_new_subject = existing_record.is_none();
 
         // Compute the authoritative score by summing all reporter contributions
@@ -695,13 +777,14 @@ impl Reputation {
                 for entry in rep_history.iter() {
                     // Saturating add prevents overflow on extreme deltas (e.g. i64::MIN / i64::MAX).
                     // Clamp to MIN_SCORE (0) after each step so the running total never goes negative.
-                    computed_score = computed_score.saturating_add(entry.delta).clamp(MIN_SCORE, i64::MAX);
+                    computed_score = computed_score
+                        .saturating_add(entry.delta)
+                        .clamp(MIN_SCORE, i64::MAX);
                 }
             }
         }
 
-        let mut record: ReputationRecord =
-            existing_record.unwrap_or(ReputationRecord {
+        let mut record: ReputationRecord = existing_record.unwrap_or(ReputationRecord {
                 subject: subject.clone(),
                 score: 0,
                 reporter_count: 0,
@@ -713,17 +796,23 @@ impl Reputation {
         record.updated_at = now;
 
         env.storage().persistent().set(&rec_key, &record);
+        let last_reporter_key = Self::last_reporter_key(&subject);
+        env.storage()
+            .persistent()
+            .set(&last_reporter_key, &reporter);
+        env.storage()
+            .persistent()
+            .extend_ttl(&last_reporter_key, TTL_MAX, TTL_MAX);
+        env.storage()
+            .persistent()
+            .remove(&Self::decay_last_key(&subject));
         env.storage()
             .persistent()
             .extend_ttl(&rec_key, TTL_MAX, TTL_MAX);
 
         // Update subject count only on first submission
         if is_new_subject {
-            let cnt: u32 = env
-                .storage()
-                .instance()
-                .get(&SUBJECT_CNT)
-                .unwrap_or(0);
+            let cnt: u32 = env.storage().instance().get(&SUBJECT_CNT).unwrap_or(0);
             env.storage().instance().set(&SUBJECT_CNT, &(cnt + 1));
         }
 
@@ -741,21 +830,7 @@ impl Reputation {
     /// elapsed since `updated_at`; the stored raw score is untouched. With no
     /// decay configured (the default) this is the raw accumulated score.
     pub fn get_reputation(env: Env, subject: Address) -> ReputationRecord {
-        let key = Self::record_key(&subject);
-        if env.storage().persistent().has(&key) {
-            env.storage()
-                .persistent()
-                .extend_ttl(&key, TTL_MAX, TTL_MAX);
-        }
-        let mut record: ReputationRecord =
-            env.storage().persistent().get(&key).unwrap_or(ReputationRecord {
-                subject: subject.clone(),
-                score: 0,
-                reporter_count: 0,
-                updated_at: 0,
-            });
-        record.score = Self::decayed_score(&env, &record);
-        record
+        Self::reputation_at(&env, subject, env.ledger().timestamp(), true)
     }
 
     pub fn get_history(
@@ -799,7 +874,11 @@ impl Reputation {
         }
 
         // Apply offset/limit pagination
-        let effective_limit = if limit == 0 || limit > 100 { 100 } else { limit };
+        let effective_limit = if limit == 0 || limit > 100 {
+            100
+        } else {
+            limit
+        };
         let len = filtered.len();
         let start = offset.min(len);
         let end = (start + effective_limit).min(len);
@@ -849,23 +928,14 @@ impl Reputation {
 
         let dispute_key = Self::dispute_key(&subject, &reporter, delta_index);
         if env.storage().persistent().has(&dispute_key) {
-            let existing: Dispute = env
-                .storage()
-                .persistent()
-                .get(&dispute_key)
-                .unwrap();
+            let existing: Dispute = env.storage().persistent().get(&dispute_key).unwrap();
             if !existing.resolved {
                 return Err(ContractError::DisputeAlreadyOpen);
             }
         }
 
         let entry = history.get(delta_index).unwrap();
-        let dispute_id: u32 = env
-            .storage()
-            .instance()
-            .get(&DISPUTE_CNT)
-            .unwrap_or(0)
-            + 1;
+        let dispute_id: u32 = env.storage().instance().get(&DISPUTE_CNT).unwrap_or(0) + 1;
         env.storage().instance().set(&DISPUTE_CNT, &dispute_id);
 
         let dispute = Dispute {
@@ -943,28 +1013,27 @@ impl Reputation {
                 let now = env.ledger().timestamp();
 
                 let rec_key = Self::record_key(&subject);
-                let mut record: ReputationRecord =
-                    env.storage().persistent().get(&rec_key).unwrap_or(
-                        ReputationRecord {
+                let mut record: ReputationRecord = env
+                    .storage()
+                    .persistent()
+                    .get(&rec_key)
+                    .unwrap_or(ReputationRecord {
                             subject: subject.clone(),
                             score: 0,
                             reporter_count: 0,
                             updated_at: now,
-                        },
-                    );
-                record.score = record
-                    .score
-                    .saturating_sub(disputed_delta)
-                    .max(MIN_SCORE);
+                    });
+                record.score = record.score.saturating_sub(disputed_delta).max(MIN_SCORE);
                 record.updated_at = now;
 
                 if history.is_empty() {
-                    record.reporter_count =
-                        record.reporter_count.saturating_sub(1);
+                    record.reporter_count = record.reporter_count.saturating_sub(1);
                     env.storage().persistent().remove(&history_key);
                 } else {
                     env.storage().persistent().set(&history_key, &history);
-                    env.storage().persistent().extend_ttl(&history_key, TTL_MAX, TTL_MAX);
+                    env.storage()
+                        .persistent()
+                        .extend_ttl(&history_key, TTL_MAX, TTL_MAX);
                 }
 
                 env.storage().persistent().set(&rec_key, &record);
@@ -980,7 +1049,14 @@ impl Reputation {
         // Emit dispute_resolved event
         env.events().publish(
             (DISPUTE, symbol_short!("resolved")),
-            (EVENT_VERSION, dispute.dispute_id, subject, reporter, delta_index, accepted),
+            (
+                EVENT_VERSION,
+                dispute.dispute_id,
+                subject,
+                reporter,
+                delta_index,
+                accepted,
+            ),
         );
         Ok(())
     }
@@ -996,11 +1072,7 @@ impl Reputation {
     /// - [`ContractError::InvalidStakeAmount`] if `amount <= 0`.
     ///
     /// Closes #1055.
-    pub fn stake(
-        env: Env,
-        staker: Address,
-        amount: i64,
-    ) -> Result<StakeRecord, ContractError> {
+    pub fn stake(env: Env, staker: Address, amount: i64) -> Result<StakeRecord, ContractError> {
         staker.require_auth();
         Self::require_not_paused(&env)?;
         if amount <= 0 {
@@ -1008,11 +1080,7 @@ impl Reputation {
         }
 
         let key = Self::stake_key(&staker);
-        let mut record: StakeRecord = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(StakeRecord {
+        let mut record: StakeRecord = env.storage().persistent().get(&key).unwrap_or(StakeRecord {
                 staker: staker.clone(),
                 amount: 0,
                 staked_at: env.ledger().sequence(),
@@ -1029,7 +1097,9 @@ impl Reputation {
         record.unlock_at = 0;
 
         env.storage().persistent().set(&key, &record);
-        env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_MAX, TTL_MAX);
 
         if is_new_staker {
             let mut stats = Self::staking_stats(&env);
@@ -1081,7 +1151,9 @@ impl Reputation {
 
         record.unlock_at = env.ledger().sequence() + STAKE_COOLDOWN_LEDGERS;
         env.storage().persistent().set(&key, &record);
-        env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_MAX, TTL_MAX);
 
         env.events().publish(
             (STAKE, symbol_short!("unstkreq")),
@@ -1132,7 +1204,9 @@ impl Reputation {
         }
 
         env.storage().persistent().set(&key, &record);
-        env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_MAX, TTL_MAX);
 
         env.events().publish(
             (STAKE, symbol_short!("withdrawn")),
@@ -1180,7 +1254,9 @@ impl Reputation {
         }
 
         env.storage().persistent().set(&key, &record);
-        env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_MAX, TTL_MAX);
 
         let mut stats = Self::staking_stats(&env);
         stats.total_staked = stats.total_staked.saturating_sub(amount);
@@ -1218,7 +1294,9 @@ impl Reputation {
         record.total_rewards = record.total_rewards.saturating_add(amount);
 
         env.storage().persistent().set(&key, &record);
-        env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_MAX, TTL_MAX);
 
         let mut stats = Self::staking_stats(&env);
         stats.total_rewards = stats.total_rewards.saturating_add(amount);
@@ -1235,7 +1313,9 @@ impl Reputation {
     pub fn get_stake(env: Env, staker: Address) -> StakeRecord {
         let key = Self::stake_key(&staker);
         if env.storage().persistent().has(&key) {
-            env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_MAX, TTL_MAX);
         }
         env.storage().persistent().get(&key).unwrap_or(StakeRecord {
             staker,
@@ -1303,7 +1383,13 @@ impl Reputation {
         amount: i64,
     ) -> Result<StakeRecord, ContractError> {
         let record = Self::request_unstake(env.clone(), staker.clone(), amount)?;
-        Self::append_stake_history(&env, &staker, StakeAction::UnstakeRequest, amount, record.amount);
+        Self::append_stake_history(
+            &env,
+            &staker,
+            StakeAction::UnstakeRequest,
+            amount,
+            record.amount,
+        );
         Ok(record)
     }
 
@@ -1355,7 +1441,9 @@ impl Reputation {
             rep.score = rep.score.saturating_sub(lost_boost).max(MIN_SCORE);
             rep.updated_at = env.ledger().timestamp();
             env.storage().persistent().set(&rec_key, &rep);
-            env.storage().persistent().extend_ttl(&rec_key, TTL_MAX, TTL_MAX);
+            env.storage()
+                .persistent()
+                .extend_ttl(&rec_key, TTL_MAX, TTL_MAX);
         }
         Ok(record)
     }
@@ -1370,11 +1458,7 @@ impl Reputation {
     /// - [`ContractError::InvalidStakeAmount`] if `amount <= 0`.
     ///
     /// Closes #1122.
-    pub fn fund_reward_pool(
-        env: Env,
-        admin: Address,
-        amount: i64,
-    ) -> Result<i64, ContractError> {
+    pub fn fund_reward_pool(env: Env, admin: Address, amount: i64) -> Result<i64, ContractError> {
         Self::require_admin_caller(&env, &admin)?;
         if amount <= 0 {
             return Err(ContractError::InvalidStakeAmount);
@@ -1425,8 +1509,7 @@ impl Reputation {
         // Sum effective stake across the supplied stakers.
         let mut total_effective: i64 = 0;
         for staker in stakers.iter() {
-            total_effective = total_effective
-                .saturating_add(Self::effective_stake(&env, &staker));
+            total_effective = total_effective.saturating_add(Self::effective_stake(&env, &staker));
         }
         if total_effective <= 0 {
             return Err(ContractError::NoStake);
@@ -1446,14 +1529,12 @@ impl Reputation {
                 continue;
             }
             let key = Self::stake_key(&staker);
-            if let Some(mut record) = env
-                .storage()
-                .persistent()
-                .get::<_, StakeRecord>(&key)
-            {
+            if let Some(mut record) = env.storage().persistent().get::<_, StakeRecord>(&key) {
                 record.total_rewards = record.total_rewards.saturating_add(share);
                 env.storage().persistent().set(&key, &record);
-                env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_MAX, TTL_MAX);
                 Self::append_stake_history(
                     &env,
                     &staker,
@@ -1533,7 +1614,9 @@ impl Reputation {
             delegators.push_back(delegator.clone());
             let list_key = Self::delegators_key(&delegate);
             env.storage().persistent().set(&list_key, &delegators);
-            env.storage().persistent().extend_ttl(&list_key, TTL_MAX, TTL_MAX);
+            env.storage()
+                .persistent()
+                .extend_ttl(&list_key, TTL_MAX, TTL_MAX);
         }
 
         let new_amount = existing
@@ -1548,9 +1631,17 @@ impl Reputation {
             since: existing.as_ref().map(|d| d.since).unwrap_or(since),
         };
         env.storage().persistent().set(&deleg_key, &delegation);
-        env.storage().persistent().extend_ttl(&deleg_key, TTL_MAX, TTL_MAX);
+        env.storage()
+            .persistent()
+            .extend_ttl(&deleg_key, TTL_MAX, TTL_MAX);
 
-        Self::append_stake_history(&env, &delegator, StakeAction::Delegate, amount, stake.amount);
+        Self::append_stake_history(
+            &env,
+            &delegator,
+            StakeAction::Delegate,
+            amount,
+            stake.amount,
+        );
 
         env.events().publish(
             (DELEGATION, symbol_short!("delegated")),
@@ -1597,7 +1688,9 @@ impl Reputation {
             Self::remove_delegator(&env, &delegate, &delegator);
         } else {
             env.storage().persistent().set(&deleg_key, &delegation);
-            env.storage().persistent().extend_ttl(&deleg_key, TTL_MAX, TTL_MAX);
+            env.storage()
+                .persistent()
+                .extend_ttl(&deleg_key, TTL_MAX, TTL_MAX);
         }
 
         let balance = Self::get_stake(env.clone(), delegator.clone()).amount;
@@ -1614,7 +1707,9 @@ impl Reputation {
     pub fn get_delegation(env: Env, delegator: Address, delegate: Address) -> Option<Delegation> {
         let key = Self::delegation_key(&delegator, &delegate);
         if env.storage().persistent().has(&key) {
-            env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_MAX, TTL_MAX);
         }
         env.storage().persistent().get(&key)
     }
@@ -1649,7 +1744,9 @@ impl Reputation {
     pub fn get_stake_history(env: Env, staker: Address) -> Vec<StakeHistoryEntry> {
         let key = Self::stake_history_key(&staker);
         if env.storage().persistent().has(&key) {
-            env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_MAX, TTL_MAX);
         }
         env.storage()
             .persistent()
@@ -1678,7 +1775,8 @@ impl Reputation {
         {
             None => false,
             Some(rec) => {
-                if rec.score < min_score {
+                let effective_score = Self::reputation_at(&env, subject.clone(), env.ledger().timestamp(), false).score;
+                if effective_score < min_score {
                     return false;
                 }
                 let active_reporters = Self::get_reporters(&env);
@@ -1686,9 +1784,7 @@ impl Reputation {
                 for r in active_reporters.iter() {
                     let hk = Self::history_key(&subject, &r);
                     if env.storage().persistent().has(&hk) {
-                        env.storage()
-                            .persistent()
-                            .extend_ttl(&hk, TTL_MAX, TTL_MAX);
+                        env.storage().persistent().extend_ttl(&hk, TTL_MAX, TTL_MAX);
                         active_count += 1;
                     }
                 }
@@ -1697,10 +1793,7 @@ impl Reputation {
         }
     }
 
-    pub fn passes_sybil_check_default(
-        env: Env,
-        subject: Address,
-    ) -> Result<bool, ContractError> {
+    pub fn passes_sybil_check_default(env: Env, subject: Address) -> Result<bool, ContractError> {
         let threshold: DefaultThreshold = env
             .storage()
             .instance()
@@ -1713,10 +1806,11 @@ impl Reputation {
             .get::<(Symbol, Address), ReputationRecord>(&key)
         {
             None => Ok(false),
-            Some(rec) => Ok(
-                rec.score >= threshold.min_score
-                    && rec.reporter_count >= threshold.min_reporters,
-            ),
+            Some(rec) => {
+                let effective_score = Self::reputation_at(&env, subject, env.ledger().timestamp(), false).score;
+                Ok(effective_score >= threshold.min_score
+                    && rec.reporter_count >= threshold.min_reporters)
+            }
         }
     }
 
@@ -1726,16 +1820,15 @@ impl Reputation {
         Self::get_reporters(&env)
     }
 
-    pub fn list_reporters(
-        env: Env,
-        cursor: Option<u64>,
-        limit: u32,
-    ) -> ReportersPage {
+    pub fn list_reporters(env: Env, cursor: Option<u64>, limit: u32) -> ReportersPage {
         let all = Self::get_reporters(&env);
         let total = all.len();
         let start: u64 = cursor.unwrap_or(0);
-        let effective_limit: u32 =
-            if limit == 0 || limit > PAGE_CAP { PAGE_CAP } else { limit };
+        let effective_limit: u32 = if limit == 0 || limit > PAGE_CAP {
+            PAGE_CAP
+        } else {
+            limit
+        };
         let mut items: Vec<Address> = Vec::new(&env);
         let mut next: u64 = start;
         let mut taken: u32 = 0;
@@ -1744,7 +1837,11 @@ impl Reputation {
             next += 1;
             taken += 1;
         }
-        let next_cursor = if (next as u32) < total { Some(next) } else { None };
+        let next_cursor = if (next as u32) < total {
+            Some(next)
+        } else {
+            None
+        };
         ReportersPage { items, next_cursor }
     }
 
@@ -1766,8 +1863,11 @@ impl Reputation {
             .unwrap_or_else(|| Vec::new(&env));
         let total = all.len();
         let start: u64 = cursor.unwrap_or(0);
-        let effective_limit: u32 =
-            if limit == 0 || limit > PAGE_CAP { PAGE_CAP } else { limit };
+        let effective_limit: u32 = if limit == 0 || limit > PAGE_CAP {
+            PAGE_CAP
+        } else {
+            limit
+        };
         let mut items: Vec<ScoreEntry> = Vec::new(&env);
         let mut next: u64 = start;
         let mut taken: u32 = 0;
@@ -1776,22 +1876,18 @@ impl Reputation {
             next += 1;
             taken += 1;
         }
-        let next_cursor = if (next as u32) < total { Some(next) } else { None };
+        let next_cursor = if (next as u32) < total {
+            Some(next)
+        } else {
+            None
+        };
         Ok(ScoreEntriesPage { items, next_cursor })
     }
 
     pub fn get_storage_stats(env: Env) -> ReputationStorageStats {
         ReputationStorageStats {
-            total_subjects: env
-                .storage()
-                .instance()
-                .get(&SUBJECT_CNT)
-                .unwrap_or(0),
-            total_score_entries: env
-                .storage()
-                .instance()
-                .get(&SCORE_CNT)
-                .unwrap_or(0),
+            total_subjects: env.storage().instance().get(&SUBJECT_CNT).unwrap_or(0),
+            total_score_entries: env.storage().instance().get(&SCORE_CNT).unwrap_or(0),
         }
     }
 
@@ -1833,7 +1929,13 @@ impl Reputation {
 
         // All entries valid — write state.
         for entry in entries.iter() {
-            Self::apply_score_entry(&env, &reporter, &entry.subject, entry.delta, entry.reason.clone())?;
+            Self::apply_score_entry(
+                &env,
+                &reporter,
+                &entry.subject,
+                entry.delta,
+                entry.reason.clone(),
+            )?;
         }
 
         env.events().publish(
@@ -1909,11 +2011,62 @@ impl Reputation {
         (LAST_RPT, subject.clone())
     }
 
+    fn subject_decay_key(subject: &Address) -> (Symbol, Address) {
+        (SUBJECT_DECAY, subject.clone())
+    }
+
+    fn decay_last_key(subject: &Address) -> (Symbol, Address) {
+        (DECAY_LAST, subject.clone())
+    }
+
+    fn reputation_at(env: &Env, subject: Address, timestamp: u64, cache: bool) -> ReputationRecord {
+        let key = Self::record_key(&subject);
+        if env.storage().persistent().has(&key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_MAX, TTL_MAX);
+        }
+        let mut record: ReputationRecord =
+            env.storage()
+                .persistent()
+                .get(&key)
+                .unwrap_or(ReputationRecord {
+                    subject: subject.clone(),
+                    score: 0,
+                    reporter_count: 0,
+                    updated_at: 0,
+                });
+        let score = match env
+            .storage()
+            .persistent()
+            .get(&Self::subject_decay_key(&subject))
+        {
+            Some(params) => decay::calculate(
+                record.score,
+                timestamp.saturating_sub(record.updated_at),
+                &params,
+            ),
+            None => Self::decayed_score_at(env, &record, timestamp),
+        };
+        record.score = score;
+        let last = Self::decay_last_key(&subject);
+        if cache {
+            env.storage().persistent().set(&last, &timestamp);
+            env.storage()
+                .persistent()
+                .extend_ttl(&last, TTL_MAX, TTL_MAX);
+        }
+        record
+    }
+
     fn default_decay_config(env: &Env) -> DecayConfig {
         env.storage()
             .instance()
             .get(&DECAY_CFG)
-            .unwrap_or(DecayConfig { rate_bps: 0, mode: DecayMode::Linear })
+            .unwrap_or(DecayConfig {
+                rate_bps: 0,
+                mode: DecayMode::Linear,
+            })
     }
 
     fn decay_config_for_reporter(env: &Env, reporter: &Address) -> DecayConfig {
@@ -1929,11 +2082,10 @@ impl Reputation {
     /// the subject's most recent `submit_score` call, if any (else the
     /// contract-wide default). Never negative; a no-op when the resolved
     /// rate is `0` (the default) or no time has passed.
-    fn decayed_score(env: &Env, record: &ReputationRecord) -> i64 {
+    fn decayed_score_at(env: &Env, record: &ReputationRecord, now: u64) -> i64 {
         if record.score <= 0 {
             return record.score.max(MIN_SCORE);
         }
-        let now = env.ledger().timestamp();
         if now <= record.updated_at {
             return record.score;
         }
@@ -1941,8 +2093,10 @@ impl Reputation {
         if elapsed_periods == 0 {
             return record.score;
         }
-        let last_reporter: Option<Address> =
-            env.storage().persistent().get(&Self::last_reporter_key(&record.subject));
+        let last_reporter: Option<Address> = env
+            .storage()
+            .persistent()
+            .get(&Self::last_reporter_key(&record.subject));
         let cfg = match last_reporter {
             Some(reporter) => Self::decay_config_for_reporter(env, &reporter),
             None => Self::default_decay_config(env),
@@ -2023,7 +2177,9 @@ impl Reputation {
             }
         }
         env.storage().persistent().set(&list_key, &updated);
-        env.storage().persistent().extend_ttl(&list_key, TTL_MAX, TTL_MAX);
+        env.storage()
+            .persistent()
+            .extend_ttl(&list_key, TTL_MAX, TTL_MAX);
     }
 
     fn reward_pool(env: &Env) -> i64 {
@@ -2067,7 +2223,9 @@ impl Reputation {
             ledger: env.ledger().sequence(),
         });
         env.storage().persistent().set(&key, &history);
-        env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_MAX, TTL_MAX);
     }
 
     /// Computes the bounded reputation boost for a staked `amount`.
@@ -2184,7 +2342,9 @@ impl Reputation {
         });
 
         env.storage().persistent().set(&history_key, &history);
-        env.storage().persistent().extend_ttl(&history_key, TTL_MAX, TTL_MAX);
+        env.storage()
+            .persistent()
+            .extend_ttl(&history_key, TTL_MAX, TTL_MAX);
 
         let existing_record: Option<ReputationRecord> = env.storage().persistent().get(&rec_key);
         let is_new_subject = existing_record.is_none();
@@ -2205,7 +2365,9 @@ impl Reputation {
                 for entry in rep_history.iter() {
                     // Saturating add prevents overflow on extreme deltas (e.g. i64::MIN / i64::MAX).
                     // Clamp to MIN_SCORE (0) after each step so the running total never goes negative.
-                    computed_score = computed_score.saturating_add(entry.delta).clamp(MIN_SCORE, i64::MAX);
+                    computed_score = computed_score
+                        .saturating_add(entry.delta)
+                        .clamp(MIN_SCORE, i64::MAX);
                 }
             }
         }
@@ -2222,7 +2384,14 @@ impl Reputation {
         record.updated_at = now;
 
         env.storage().persistent().set(&rec_key, &record);
-        env.storage().persistent().extend_ttl(&rec_key, TTL_MAX, TTL_MAX);
+        env.storage()
+            .persistent()
+            .extend_ttl(&rec_key, TTL_MAX, TTL_MAX);
+        // A new raw score starts a fresh decay origin; discard the previous
+        // view-cache timestamp so callers never observe a stale calculation.
+        env.storage()
+            .persistent()
+            .remove(&Self::decay_last_key(subject));
 
         if is_new_subject {
             let cnt: u32 = env.storage().instance().get(&SUBJECT_CNT).unwrap_or(0);
@@ -2282,7 +2451,8 @@ mod tests {
         client.add_reporter(&reporter);
         let reason = String::from_str(&env, "completed KYC");
         client.submit_score(&reporter, &subject, &50, &reason);
-        env.ledger().with_mut(|li| li.sequence_number += DEFAULT_RATE_LIMIT_WINDOW + 1);
+        env.ledger()
+            .with_mut(|li| li.sequence_number += DEFAULT_RATE_LIMIT_WINDOW + 1);
         client.submit_score(&reporter, &subject, &25, &reason);
         let rec = client.get_reputation(&subject);
         assert_eq!(rec.score, 75);
@@ -2590,9 +2760,15 @@ mod tests {
 
         env.ledger().with_mut(|li| li.timestamp = 1000);
         client.submit_score(&reporter, &subject, &10, &reason);
-        env.ledger().with_mut(|li| { li.sequence_number += 101; li.timestamp = 2000; });
+        env.ledger().with_mut(|li| {
+            li.sequence_number += 101;
+            li.timestamp = 2000;
+        });
         client.submit_score(&reporter, &subject, &20, &reason);
-        env.ledger().with_mut(|li| { li.sequence_number += 101; li.timestamp = 3000; });
+        env.ledger().with_mut(|li| {
+            li.sequence_number += 101;
+            li.timestamp = 3000;
+        });
         client.submit_score(&reporter, &subject, &30, &reason);
 
         let filtered = client.get_history(&subject, &reporter, &0, &100, &Some(1500), &None);
@@ -2625,9 +2801,21 @@ mod tests {
     #[test]
     fn test_storage_key_symbols_are_unique() {
         let keys = [
-            ADMIN, REPORTER, DEF_THRESH, SUBJECT_CNT, SCORE_CNT,
-            RECORD, HISTORY, RATE_LIMIT, DISPUTE, DISPUTE_CNT, MIN_INTERVAL_KEY,
-            DECAY_CFG, RPT_DECAY,
+            ADMIN,
+            REPORTER,
+            DEF_THRESH,
+            SUBJECT_CNT,
+            SCORE_CNT,
+            RECORD,
+            HISTORY,
+            RATE_LIMIT,
+            DISPUTE,
+            DISPUTE_CNT,
+            MIN_INTERVAL_KEY,
+            DECAY_CFG,
+            RPT_DECAY,
+            SUBJECT_DECAY,
+            DECAY_LAST,
         ];
         for (i, left) in keys.iter().enumerate() {
             for right in keys.iter().skip(i + 1) {
@@ -2769,7 +2957,10 @@ mod tests {
 
         client.set_reporter_decay_rate(&admin, &reporter, &5_000, &DecayMode::Linear);
         client.clear_reporter_decay_rate(&admin, &reporter);
-        assert_eq!(client.get_reporter_decay_rate(&reporter), client.get_decay_rate());
+        assert_eq!(
+            client.get_reporter_decay_rate(&reporter),
+            client.get_decay_rate()
+        );
 
         let reason = String::from_str(&env, "activity");
         client.submit_score(&reporter, &subject, &100, &reason);
@@ -2804,6 +2995,66 @@ mod tests {
         let reporter = Address::generate(&env);
         assert_eq!(
             client.try_set_reporter_decay_rate(&attacker, &reporter, &1_000, &DecayMode::Linear),
+            Err(Ok(ContractError::Unauthorized))
+        );
+    }
+
+    // ── Score decay (#815) ─────────────────────────────────────────────────────
+    #[test]
+    fn test_subject_decay_algorithms_preview_and_cache() {
+        let (env, admin, client) = setup();
+        let reporter = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_reporter(&reporter);
+        let reason = String::from_str(&env, "activity");
+        client.submit_score(&reporter, &subject, &100, &reason);
+        let start = env.ledger().timestamp();
+
+        client.set_decay_algorithm(&admin, &subject, &DecayParameters::linear(1_000, 86_400));
+        assert_eq!(
+            client
+                .preview_reputation(&subject, &(start + 2 * 86_400))
+                .score,
+            80
+        );
+        assert_eq!(client.get_last_calculation_time(&subject), 0);
+        assert_eq!(client.get_reputation(&subject).score, 100);
+        assert_eq!(client.get_last_calculation_time(&subject), start);
+
+        client.set_decay_algorithm(&admin, &subject, &DecayParameters::exponential(86_400));
+        assert_eq!(
+            client
+                .preview_reputation(&subject, &(start + 2 * 86_400))
+                .score,
+            25
+        );
+        client.set_decay_algorithm(&admin, &subject, &DecayParameters::step(1_000, 86_400));
+        assert_eq!(
+            client
+                .preview_reputation(&subject, &(start + 2 * 86_400))
+                .score,
+            81
+        );
+        client.set_decay_algorithm(&admin, &subject, &DecayParameters::none());
+        assert_eq!(
+            client
+                .preview_reputation(&subject, &(start + 100 * 86_400))
+                .score,
+            100
+        );
+    }
+
+    #[test]
+    fn test_subject_decay_requires_valid_parameters_and_admin() {
+        let (env, admin, client) = setup();
+        let subject = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        assert_eq!(
+            client.try_set_decay_algorithm(&admin, &subject, &DecayParameters::linear(1_000, 0)),
+            Err(Ok(ContractError::InvalidDecayParameters))
+        );
+        assert_eq!(
+            client.try_set_decay_algorithm(&attacker, &subject, &DecayParameters::none()),
             Err(Ok(ContractError::Unauthorized))
         );
     }
