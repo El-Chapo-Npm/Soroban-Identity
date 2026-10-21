@@ -108,6 +108,10 @@ jobs:
         if: steps.cache-cargo-fuzz.outputs.cache-hit != 'true'
         run: cargo install cargo-fuzz
 
+      # Fail early if the isolated manifest loses cargo-fuzz's required marker.
+      - name: Validate fuzz manifest and bridge target
+        run: cargo fuzz list --fuzz-dir fuzz | grep -Fx fuzz_resolve_external_did
+
       - name: Cache fuzz target build
         uses: actions/cache@v4
         with:

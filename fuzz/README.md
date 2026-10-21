@@ -114,6 +114,17 @@ Arbitrary revoke and delegation sequences against issued credentials.
 Arbitrary DID bytes, documents, sibling lists, and chain selectors against
 the oracle bridge. A rejected proof must not be treated as a cached document.
 
+CI verifies that cargo-fuzz can discover this target before running it. From
+the repository root, run the same check locally:
+
+```bash
+cargo fuzz list --fuzz-dir fuzz | grep -Fx fuzz_resolve_external_did
+```
+
+Keep `[package.metadata]` with `cargo-fuzz = true` in the isolated
+`fuzz/Cargo.toml`; without this marker, cargo-fuzz rejects the manifest before
+it can list or run any target.
+
 ### Known gaps
 
 - Administrative entry points (issuer allow-listing, admin transfer) are
