@@ -20,6 +20,8 @@ const IssuerDashboard = lazy(() => import("./pages/IssuerDashboard"));
 const CredentialRecipientVerify = lazy(() => import("./components/CredentialRecipientVerify"));
 const NetworkStatistics = lazy(() => import("./components/NetworkStatistics"));
 const CustomizableDashboard = lazy(() => import("./components/CustomizableDashboard"));
+const PrivacySettings = lazy(() => import("./components/privacy/PrivacySettings"));
+const { isShareLinkExpired } = await import("./components/privacy/shareLinks");
 
 const preloadCredentialsPanel = () => {
   void import("./components/CredentialsPanel");
@@ -32,6 +34,9 @@ const preloadNetworkStatistics = () => {
 };
 const preloadCustomizableDashboard = () => {
   void import("./components/CustomizableDashboard");
+};
+const preloadPrivacySettings = () => {
+  void import("./components/privacy/PrivacySettings");
 };
 import WalletButton from "./components/WalletButton";
 import QRScanner from "./components/QRScanner";
@@ -72,6 +77,7 @@ export enum Tab {
   IssuerAnalytics = "issuerAnalytics",
   NetworkStatistics = "networkStatistics",
   Dashboard = "dashboard",
+  Privacy = "privacy",
 }
 
 const TAB_ORDER: Tab[] = [
@@ -80,6 +86,7 @@ const TAB_ORDER: Tab[] = [
   Tab.IssuerAnalytics,
   Tab.NetworkStatistics,
   Tab.Dashboard,
+  Tab.Privacy,
 ];
 
 function AppContent() {
@@ -89,6 +96,8 @@ function AppContent() {
   const [verifyId, setVerifyId] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
   const [deepLinkEncrypted, setDeepLinkEncrypted] = useState<{ c: string; k: string } | null>(null);
+  // Set when a shared credential link is past its expiry (#1101).
+  const [deepLinkExpired, setDeepLinkExpired] = useState(false);
   // Credential currently open for collaborative editing (#1105).
   const [activeCredentialId, setActiveCredentialId] = useState<string | null>(null);
   const networkConfig = NETWORK_CONFIGS[activeNetwork];
@@ -200,9 +209,16 @@ function AppContent() {
     const verifyParam = urlParams.get("verify");
     const cParam = urlParams.get("c");
     const kParam = urlParams.get("k");
+    const expParam = urlParams.get("exp");
 
     if (cParam && kParam) {
-      setDeepLinkEncrypted({ c: cParam, k: kParam });
+      // Time-limited sharing (#1101): refuse to decrypt claims from a link
+      // whose expiry has passed.
+      if (isShareLinkExpired(expParam)) {
+        setDeepLinkExpired(true);
+      } else {
+        setDeepLinkEncrypted({ c: cParam, k: kParam });
+      }
       setTab(Tab.Credentials);
     } else if (verifyParam) {
       setVerifyId(verifyParam);
@@ -630,7 +646,9 @@ function AppContent() {
                   ? preloadNetworkStatistics
                   : name === Tab.Dashboard
                     ? preloadCustomizableDashboard
-                    : undefined
+                    : name === Tab.Privacy
+                      ? preloadPrivacySettings
+                      : undefined
             }
             onFocus={
               name === Tab.Credentials
@@ -639,7 +657,9 @@ function AppContent() {
                   ? preloadNetworkStatistics
                   : name === Tab.Dashboard
                     ? preloadCustomizableDashboard
-                    : undefined
+                    : name === Tab.Privacy
+                      ? preloadPrivacySettings
+                      : undefined
             }
           >
             {t(`tabs.${name}`)}
@@ -669,6 +689,24 @@ function AppContent() {
           >
             {tab === Tab.Credentials && (
               <>
+                {deepLinkExpired && (
+                  <div
+                    role="alert"
+                    aria-label="Shared credential link expired"
+                    style={{
+                      background: "var(--warning-bg, #fff3cd)",
+                      color: "var(--warning-text, #856404)",
+                      border: "1px solid var(--warning-border, #ffc107)",
+                      borderRadius: "0.5rem",
+                      padding: "0.6rem 1rem",
+                      marginBottom: "1rem",
+                      fontSize: "0.9rem",
+                    }}
+                  >
+                    <span aria-hidden="true">⚠</span> This shared credential link has expired and can no
+                    longer be opened. Ask the sender for a new link.
+                  </div>
+                )}
                 {deepLinkEncrypted && (
                   <CredentialRecipientVerify
                     ciphertext={deepLinkEncrypted.c}
@@ -741,6 +779,22 @@ function AppContent() {
             hidden={tab !== Tab.NetworkStatistics}
           >
             {tab === Tab.NetworkStatistics && <NetworkStatistics />}
+          </div>
+          <div
+            id={`panel-${Tab.Privacy}`}
+            role="tabpanel"
+            aria-labelledby={`tab-${Tab.Privacy}`}
+            data-tour="panel-privacy"
+            hidden={tab !== Tab.Privacy}
+          >
+            {tab === Tab.Privacy && (
+              <PrivacySettings
+                walletAddress={wallet.publicKey ?? null}
+                onConnectWallet={() => {
+                  void wallet.connect?.();
+                }}
+              />
+            )}
           </div>
           </ViewTransition>
           </Suspense>

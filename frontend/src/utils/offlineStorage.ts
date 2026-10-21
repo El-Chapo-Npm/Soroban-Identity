@@ -2,10 +2,17 @@
  * Offline storage utility using IndexedDB for DIDs, Credentials, and Write Sync Queue.
  */
 
-import type { Credential, DidDocument } from '../../../sdk/src/types';
+import type {
+  Credential,
+  DidDocument,
+  PrivacySettings,
+  VerifierWhitelistEntry,
+  PrivacyAuditEntry,
+  PrivacyPolicyTemplate,
+} from '../../../sdk/src/types';
 
 const DB_NAME = 'soroban-identity';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 export interface QueuedWriteOperation {
   id: string;
@@ -49,6 +56,20 @@ function openDatabase(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains('credential-versions')) {
         const versionStore = db.createObjectStore('credential-versions', { keyPath: 'id' });
         versionStore.createIndex('credentialId', 'credentialId', { unique: false });
+      }
+      if (!db.objectStoreNames.contains('privacy-settings')) {
+        db.createObjectStore('privacy-settings', { keyPath: 'credentialId' });
+      }
+      if (!db.objectStoreNames.contains('verifier-whitelist')) {
+        db.createObjectStore('verifier-whitelist', { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains('privacy-audit-log')) {
+        const auditStore = db.createObjectStore('privacy-audit-log', { keyPath: 'id' });
+        auditStore.createIndex('credentialId', 'credentialId', { unique: false });
+        auditStore.createIndex('timestamp', 'timestamp', { unique: false });
+      }
+      if (!db.objectStoreNames.contains('privacy-templates')) {
+        db.createObjectStore('privacy-templates', { keyPath: 'id' });
       }
     };
   });
@@ -232,6 +253,119 @@ export async function updateQueuedOperation(op: QueuedWriteOperation): Promise<v
     const req = store.put(op);
     req.onsuccess = () => resolve();
     req.onerror = () => reject(req.error);
+  });
+}
+
+// ── Privacy Settings ────────────────────────────────────────────────────────
+
+export async function getPrivacySettings(credentialId: string): Promise<PrivacySettings | null> {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(['privacy-settings'], 'readonly');
+    const store = tx.objectStore('privacy-settings');
+    const req = store.get(credentialId);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function savePrivacySettings(settings: PrivacySettings): Promise<void> {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(['privacy-settings'], 'readwrite');
+    const store = tx.objectStore('privacy-settings');
+    const req = store.put(settings);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  });
+}
+
+// ── Verifier Whitelist ──────────────────────────────────────────────────────
+
+export async function getVerifierWhitelist(): Promise<VerifierWhitelistEntry[]> {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(['verifier-whitelist'], 'readonly');
+    const store = tx.objectStore('verifier-whitelist');
+    const req = store.getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function addVerifier(entry: VerifierWhitelistEntry): Promise<void> {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(['verifier-whitelist'], 'readwrite');
+    const store = tx.objectStore('verifier-whitelist');
+    const req = store.put(entry);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function removeVerifier(id: string): Promise<void> {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(['verifier-whitelist'], 'readwrite');
+    const store = tx.objectStore('verifier-whitelist');
+    const req = store.delete(id);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  });
+}
+
+// ── Privacy Audit Log ───────────────────────────────────────────────────────
+
+export async function appendPrivacyAuditEntry(entry: PrivacyAuditEntry): Promise<void> {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(['privacy-audit-log'], 'readwrite');
+    const store = tx.objectStore('privacy-audit-log');
+    const req = store.put(entry);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function getPrivacyAuditLog(credentialId?: string): Promise<PrivacyAuditEntry[]> {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(['privacy-audit-log'], 'readonly');
+    const store = tx.objectStore('privacy-audit-log');
+    const req = credentialId ? store.index('credentialId').getAll(credentialId) : store.getAll();
+    req.onsuccess = () => {
+      const entries: PrivacyAuditEntry[] = req.result || [];
+      entries.sort((a, b) => b.timestamp - a.timestamp);
+      resolve(entries);
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+// ── Privacy Policy Templates ────────────────────────────────────────────────
+
+export async function getPrivacyTemplates(): Promise<PrivacyPolicyTemplate[]> {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(['privacy-templates'], 'readonly');
+    const store = tx.objectStore('privacy-templates');
+    const req = store.getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function savePrivacyTemplates(templates: PrivacyPolicyTemplate[]): Promise<void> {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(['privacy-templates'], 'readwrite');
+    const store = tx.objectStore('privacy-templates');
+    for (const template of templates) {
+      store.put(template);
+    }
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
   });
 }
 

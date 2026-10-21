@@ -1,12 +1,14 @@
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import type { Credential } from "../../../sdk/src/types";
-import {
-  generateEncryptionKey,
-  encryptCredentialData,
-  trackShareEvent,
-} from "../utils/credentialCrypto";
+import { trackShareEvent } from "../utils/credentialCrypto";
 import { useToast } from "../context/ToastContext";
 import SocialShare from "./SocialShare";
+import SelectiveDisclosure from "./SelectiveDisclosure";
+import {
+  generateShareLink,
+  type CredentialVisibility,
+} from "../utils/privacyControls";
+import { privacyAudit } from "../utils/privacyAudit";
 
 interface CredentialShareProps {
   credential: Credential;
@@ -20,25 +22,48 @@ export const CredentialShare: React.FC<CredentialShareProps> = ({ credential, on
   const [generating, setGenerating] = useState<boolean>(false);
   const [copied, setCopied] = useState<boolean>(false);
   const [privacyMode, setPrivacyMode] = useState<"link-only" | "credential-summary">("link-only");
+  const [visibility, setVisibility] = useState<CredentialVisibility>("private");
+  const [disclosedAttributes, setDisclosedAttributes] = useState<string[]>([]);
+  const [verifierId, setVerifierId] = useState<string>("");
+
+  const availableAttributes = useMemo(() => {
+    const claims = (credential as unknown as { claims?: Record<string, unknown> }).claims;
+    return claims ? Object.keys(claims) : [];
+  }, [credential]);
+
+  const whitelistWarning = useMemo(() => {
+    if (!verifierId.trim()) return false;
+    return !privacyAudit.isTrustedVerifier(verifierId.trim());
+  }, [verifierId]);
 
   const handleGenerateLink = async () => {
     setGenerating(true);
     try {
-      const { key, keyString } = await generateEncryptionKey();
       const expiryMs = expiryHours * 60 * 60 * 1000;
-      const encryptedData = await encryptCredentialData(credential, key, expiryMs);
+      const generatedLink = await generateShareLink(credential, {
+        expiryMs,
+        visibility,
+        disclosedAttributes,
+        verifierId: verifierId.trim() || undefined,
+      });
 
-      // Deep link format: app.com/verify?c=<ciphertext>&k=<key>
-      const url = new URL(window.location.origin + window.location.pathname);
-      url.searchParams.set("c", encryptedData);
-      url.searchParams.set("k", keyString);
-
-      const generatedLink = url.toString();
       setShareUrl(generatedLink);
 
       trackShareEvent("credential_share_link_created", {
         credentialId: credential.id,
         credentialType: credential.credentialType,
+        expiryHours,
+        visibility,
+        disclosedAttributes,
+      });
+
+      privacyAudit.log({
+        action: "share_created",
+        credentialId: credential.id,
+        credentialType: credential.credentialType,
+        visibility,
+        disclosedAttributes,
+        verifierId: verifierId.trim() || undefined,
         expiryHours,
       });
 
@@ -59,12 +84,35 @@ export const CredentialShare: React.FC<CredentialShareProps> = ({ credential, on
       trackShareEvent("credential_share_link_copied", {
         credentialId: credential.id,
       });
+      privacyAudit.log({
+        action: "share_copied",
+        credentialId: credential.id,
+        credentialType: credential.credentialType,
+        visibility,
+        disclosedAttributes,
+        verifierId: verifierId.trim() || undefined,
+        expiryHours,
+      });
       toast.success("Link copied to clipboard!");
       setTimeout(() => setCopied(false), 2500);
     } catch (err) {
       console.error("Copy failed:", err);
       toast.error("Failed to copy to clipboard.");
     }
+  };
+
+  const handleRevoke = () => {
+    privacyAudit.log({
+      action: "share_revoked",
+      credentialId: credential.id,
+      credentialType: credential.credentialType,
+      visibility,
+      disclosedAttributes,
+      verifierId: verifierId.trim() || undefined,
+      expiryHours,
+    });
+    setShareUrl("");
+    toast.success("Share link revoked.");
   };
 
   return (
@@ -159,6 +207,81 @@ export const CredentialShare: React.FC<CredentialShareProps> = ({ credential, on
             {credential.id}
           </code>
         </div>
+
+        <div style={{ marginBottom: "1.25rem" }}>
+          <label
+            htmlFor="visibility-select"
+            style={{
+              display: "block",
+              fontSize: "0.85rem",
+              fontWeight: 500,
+              marginBottom: "0.35rem",
+            }}
+          >
+            Visibility:
+          </label>
+          <select
+            id="visibility-select"
+            value={visibility}
+            onChange={(e) => setVisibility(e.target.value as CredentialVisibility)}
+            style={{
+              width: "100%",
+              padding: "0.5rem",
+              borderRadius: "0.375rem",
+              border: "1px solid var(--border-input, #cbd5e1)",
+              backgroundColor: "var(--card-bg, #ffffff)",
+              color: "var(--text, #1e293b)",
+            }}
+          >
+            <option value="private">Private — only you</option>
+            <option value="custom">Custom — selected attributes only</option>
+            <option value="public">Public — anyone with the link</option>
+          </select>
+        </div>
+
+        <div style={{ marginBottom: "1.25rem" }}>
+          <label
+            htmlFor="verifier-input"
+            style={{
+              display: "block",
+              fontSize: "0.85rem",
+              fontWeight: 500,
+              marginBottom: "0.35rem",
+            }}
+          >
+            Trusted verifier (optional):
+          </label>
+          <input
+            id="verifier-input"
+            type="text"
+            value={verifierId}
+            onChange={(e) => setVerifierId(e.target.value)}
+            placeholder="Verifier ID or DID"
+            style={{
+              width: "100%",
+              padding: "0.5rem",
+              borderRadius: "0.375rem",
+              border: "1px solid var(--border-input, #cbd5e1)",
+              backgroundColor: "var(--card-bg, #ffffff)",
+              color: "var(--text, #1e293b)",
+            }}
+          />
+          {whitelistWarning && (
+            <p
+              role="alert"
+              style={{ fontSize: "0.75rem", color: "#b45309", margin: "0.35rem 0 0" }}
+            >
+              ⚠ This verifier is not on your trusted whitelist. Sharing outside the whitelist is
+              not recommended.
+            </p>
+          )}
+        </div>
+
+        <SelectiveDisclosure
+          attributes={availableAttributes}
+          selected={disclosedAttributes}
+          onChange={setDisclosedAttributes}
+        />
 
         <div style={{ marginBottom: "1.25rem" }}>
           <label
@@ -286,7 +409,7 @@ export const CredentialShare: React.FC<CredentialShareProps> = ({ credential, on
               </span>
               <button
                 type="button"
-                onClick={() => setShareUrl("")}
+                onClick={handleRevoke}
                 style={{
                   background: "none",
                   border: "none",
@@ -296,7 +419,7 @@ export const CredentialShare: React.FC<CredentialShareProps> = ({ credential, on
                   textDecoration: "underline",
                 }}
               >
-                Create new link
+                Revoke &amp; create new link
               </button>
             </div>
             <div style={{ marginTop: "1rem" }}>
