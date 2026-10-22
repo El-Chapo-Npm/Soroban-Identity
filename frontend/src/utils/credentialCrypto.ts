@@ -292,6 +292,105 @@ export async function decryptCredentialData<T = unknown>(
 }
 
 /**
+ * Options controlling how a time-limited share link is generated.
+ */
+export interface ShareLinkOptions {
+  /** Attributes (claim names) to disclose. If omitted, all claims are shared. */
+  disclosedAttributes?: string[];
+  /** Validity duration in milliseconds (default 24 hours). */
+  expiryDurationMs?: number;
+  /** Optional base URL for the generated link (defaults to current origin). */
+  baseUrl?: string;
+}
+
+/**
+ * Result of generating a time-limited share link.
+ */
+export interface ShareLink {
+  url: string;
+  expiresAt: number;
+  disclosedAttributes: string[];
+}
+
+/**
+ * Build a filtered share payload containing only the disclosed attributes.
+ *
+ * The credential is treated as a flat record of claims. Any claim not listed in
+ * `disclosedAttributes` is stripped so it never leaves the client. When
+ * `disclosedAttributes` is omitted, all claims are included.
+ */
+export function buildSharePayload(
+  credential: Record<string, unknown>,
+  disclosedAttributes?: string[],
+  expiresAt: number = Date.now() + 24 * 60 * 60 * 1000
+): { data: Record<string, unknown>; disclosedAttributes: string[]; expiresAt: number } {
+  const allAttributes = Object.keys(credential);
+  const attributes = disclosedAttributes
+    ? allAttributes.filter((attr) => disclosedAttributes.includes(attr))
+    : allAttributes;
+
+  const data: Record<string, unknown> = {};
+  for (const attr of attributes) {
+    data[attr] = credential[attr];
+  }
+
+  return { data, disclosedAttributes: attributes, expiresAt };
+}
+
+/**
+ * Generate a time-limited, selectively-disclosed share link.
+ *
+ * The filtered payload is encrypted with a fresh AES-GCM key. The key and the
+ * encrypted payload are packed into the URL fragment so they are never sent to
+ * the server in the request line. The recipient can decrypt the payload with
+ * `decryptCredentialData` using the key embedded in the fragment.
+ */
+export async function generateShareLink(
+  credential: Record<string, unknown>,
+  options: ShareLinkOptions = {}
+): Promise<ShareLink> {
+  const expiryDurationMs = options.expiryDurationMs ?? 24 * 60 * 60 * 1000;
+  const expiresAt = Date.now() + expiryDurationMs;
+
+  const { data, disclosedAttributes } = buildSharePayload(
+    credential,
+    options.disclosedAttributes,
+    expiresAt
+  );
+
+  const { key, keyString } = await generateEncryptionKey();
+  const payloadString = await encryptCredentialData(data, key, expiryDurationMs);
+
+  const baseUrl =
+    options.baseUrl ??
+    (typeof window !== 'undefined' && window.location
+      ? `${window.location.origin}/share`
+      : '/share');
+
+  const url = `${baseUrl}#payload=${payloadString}&key=${keyString}`;
+
+  return { url, expiresAt, disclosedAttributes };
+}
+
+/**
+ * Check whether a share link payload has expired without exposing its claims.
+ *
+ * Only the unencrypted envelope (which carries `expiresAt`) is parsed; the
+ * ciphertext is never decrypted, so no claim data is revealed.
+ */
+export function verifyShareLinkExpiry(payloadString: string): {
+  expiresAt: number;
+  isExpired: boolean;
+} {
+  const jsonStr = new TextDecoder().decode(base64UrlToBuffer(payloadString));
+  const payload: EncryptedPayload = JSON.parse(jsonStr);
+  return {
+    expiresAt: payload.expiresAt,
+    isExpired: Date.now() > payload.expiresAt,
+  };
+}
+
+/**
  * Analytics tracking helper for share events
  */
 export function trackShareEvent(event: string, properties?: Record<string, unknown>): void {
