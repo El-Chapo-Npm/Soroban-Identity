@@ -76,6 +76,7 @@ export enum Tab {
   Credentials = "credentials",
   IssuerAnalytics = "issuerAnalytics",
   NetworkStatistics = "networkStatistics",
+  CredentialAnalytics = "credentialAnalytics",
   Dashboard = "dashboard",
   Privacy = "privacy",
 }
@@ -85,6 +86,7 @@ const TAB_ORDER: Tab[] = [
   Tab.Credentials,
   Tab.IssuerAnalytics,
   Tab.NetworkStatistics,
+  Tab.CredentialAnalytics,
   Tab.Dashboard,
   Tab.Privacy,
 ];
@@ -132,8 +134,10 @@ function AppContent() {
           const target = transcript.toLowerCase();
           if (target.includes("credential")) {
             setTab(Tab.Credentials);
-          } else if (target.includes("issuer") || target.includes("analytics")) {
+          } else if (target.includes("issuer")) {
             setTab(Tab.IssuerAnalytics);
+          } else if (target.includes("analytics")) {
+            setTab(Tab.CredentialAnalytics);
           } else if (target.includes("dashboard")) {
             setTab(Tab.Dashboard);
           } else {
@@ -804,6 +808,21 @@ function AppContent() {
           >
             {tab === Tab.IssuerAnalytics && (
               <IssuerDashboard onOpenCustomizableDashboard={() => setTab(Tab.Dashboard)} />
+            )}
+          </div>
+          <div
+            id={`panel-${Tab.CredentialAnalytics}`}
+            role="tabpanel"
+            aria-labelledby={`tab-${Tab.CredentialAnalytics}`}
+            data-tour="panel-credential-analytics"
+            hidden={tab !== Tab.CredentialAnalytics}
+          >
+            {tab === Tab.CredentialAnalytics && (
+              <CredentialAnalytics
+                wallet={wallet}
+                network={activeNetwork}
+                networkConfig={networkConfig}
+              />
             )}
           </div>
           <div
