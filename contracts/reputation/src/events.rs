@@ -189,6 +189,85 @@ pub fn emit_staked(
     );
 }
 
+/// Emit an event when a stake deposit is recorded.
+///
+/// This is the canonical deposit event emitted by the staking entry point.
+/// It carries the total stake after the deposit so indexers can track
+/// the staker's position without replaying history.
+///
+/// # Parameters
+/// - `env`: The Soroban environment
+/// - `staker`: The address that deposited the stake
+/// - `amount`: The amount of tokens deposited in this operation
+/// - `total_staked`: The staker's total stake after the deposit
+/// - `reputation_boost`: The reputation boost derived from the total stake
+/// - `staked_at`: Timestamp when the deposit occurred
+pub fn emit_stake_deposited(
+    env: &Env,
+    staker: Address,
+    amount: i128,
+    total_staked: i128,
+    reputation_boost: i32,
+    staked_at: u64,
+) {
+    env.events().publish(
+        (soroban_sdk::symbol_short!("stk_dep"), staker),
+        (amount, total_staked, reputation_boost, staked_at),
+    );
+}
+
+/// Emit an event when a staker requests to unstake tokens.
+///
+/// The request starts the cooldown period; tokens remain locked until
+/// the cooldown elapses and the withdrawal is executed.
+///
+/// # Parameters
+/// - `env`: The Soroban environment
+/// - `staker`: The address requesting the unstake
+/// - `amount`: The amount of tokens requested for withdrawal
+/// - `unlock_at`: Timestamp when the cooldown ends and withdrawal is allowed
+/// - `requested_at`: Timestamp when the request was made
+pub fn emit_unstake_requested(
+    env: &Env,
+    staker: Address,
+    amount: i128,
+    unlock_at: u64,
+    requested_at: u64,
+) {
+    env.events().publish(
+        (soroban_sdk::symbol_short!("stk_req"), staker),
+        (amount, unlock_at, requested_at),
+    );
+}
+
+/// Emit an event when a staker withdraws tokens after the cooldown period.
+///
+/// # Parameters
+/// - `env`: The Soroban environment
+/// - `staker`: The address withdrawing the stake
+/// - `amount`: The amount of tokens withdrawn
+/// - `total_staked`: The staker's remaining total stake after withdrawal
+/// - `reputation_boost_removed`: The reputation boost removed by the withdrawal
+/// - `withdrawn_at`: Timestamp when the withdrawal occurred
+pub fn emit_stake_withdrawn(
+    env: &Env,
+    staker: Address,
+    amount: i128,
+    total_staked: i128,
+    reputation_boost_removed: i32,
+    withdrawn_at: u64,
+) {
+    env.events().publish(
+        (soroban_sdk::symbol_short!("stk_wdr"), staker),
+        (
+            amount,
+            total_staked,
+            reputation_boost_removed,
+            withdrawn_at,
+        ),
+    );
+}
+
 /// Emit an event when a user unstakes tokens after the cooldown period.
 ///
 /// # Parameters
@@ -231,6 +310,40 @@ pub fn emit_slashed(
     );
 }
 
+/// Emit an event when a stake is slashed for fraud.
+///
+/// Extends [`emit_slashed`] with the remaining stake and the reputation
+/// penalty applied, so observers can reconcile balances and scores.
+///
+/// # Parameters
+/// - `env`: The Soroban environment
+/// - `staker`: The address whose stake was slashed
+/// - `amount`: The amount of tokens slashed
+/// - `remaining_stake`: The staker's total stake after the slash
+/// - `reputation_penalty`: The reputation points removed by the slash
+/// - `reason_code`: The reason code for the slashing
+/// - `slashed_at`: Timestamp when the slash occurred
+pub fn emit_stake_slashed(
+    env: &Env,
+    staker: Address,
+    amount: i128,
+    remaining_stake: i128,
+    reputation_penalty: i32,
+    reason_code: u32,
+    slashed_at: u64,
+) {
+    env.events().publish(
+        (soroban_sdk::symbol_short!("stk_sls"), staker),
+        (
+            amount,
+            remaining_stake,
+            reputation_penalty,
+            reason_code,
+            slashed_at,
+        ),
+    );
+}
+
 /// Emit an event when a staking reward or penalty is applied.
 ///
 /// # Parameters
@@ -270,6 +383,69 @@ pub fn emit_penalty_applied(
     env.events().publish(
         (soroban_sdk::symbol_short!("stk_pen"), staker),
         (amount, reputation_delta, applied_at),
+    );
+}
+
+/// Emit an event when staking rewards are distributed to a staker.
+///
+/// # Parameters
+/// - `env`: The Soroban environment
+/// - `staker`: The address receiving the reward
+/// - `amount`: The reward amount distributed
+/// - `total_staked`: The staker's total stake used as the reward basis
+/// - `distributed_at`: Timestamp when the reward was distributed
+pub fn emit_rewards_distributed(
+    env: &Env,
+    staker: Address,
+    amount: i128,
+    total_staked: i128,
+    distributed_at: u64,
+) {
+    env.events().publish(
+        (soroban_sdk::symbol_short!("stk_dis"), staker),
+        (amount, total_staked, distributed_at),
+    );
+}
+
+/// Emit an event when a staker delegates their stake to a delegatee.
+///
+/// # Parameters
+/// - `env`: The Soroban environment
+/// - `delegator`: The address delegating the stake
+/// - `delegatee`: The address receiving the delegated stake weight
+/// - `amount`: The amount of stake delegated
+/// - `created_at`: Timestamp when the delegation was created
+pub fn emit_delegation_created(
+    env: &Env,
+    delegator: Address,
+    delegatee: Address,
+    amount: i128,
+    created_at: u64,
+) {
+    env.events().publish(
+        (soroban_sdk::symbol_short!("stk_dlg"), delegator),
+        (delegatee, amount, created_at),
+    );
+}
+
+/// Emit an event when a stake delegation is revoked.
+///
+/// # Parameters
+/// - `env`: The Soroban environment
+/// - `delegator`: The address that had delegated the stake
+/// - `delegatee`: The address that was receiving the delegated stake weight
+/// - `amount`: The amount of stake undelegated
+/// - `revoked_at`: Timestamp when the delegation was revoked
+pub fn emit_delegation_revoked(
+    env: &Env,
+    delegator: Address,
+    delegatee: Address,
+    amount: i128,
+    revoked_at: u64,
+) {
+    env.events().publish(
+        (soroban_sdk::symbol_short!("stk_dlr"), delegator),
+        (delegatee, amount, revoked_at),
     );
 }
 
@@ -389,5 +565,23 @@ mod tests {
 
         let events = env.events().all();
         assert_eq!(events.len(), 5);
+    }
+
+    #[test]
+    fn test_emit_staking_lifecycle_events() {
+        let env = Env::default();
+        let staker = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+
+        emit_stake_deposited(&env, staker.clone(), 1_000, 1_000, 10, 100);
+        emit_unstake_requested(&env, staker.clone(), 400, 1_100, 200);
+        emit_stake_withdrawn(&env, staker.clone(), 400, 600, 4, 1_200);
+        emit_stake_slashed(&env, staker.clone(), 100, 500, -5, 2, 1_300);
+        emit_rewards_distributed(&env, staker.clone(), 25, 500, 1_400);
+        emit_delegation_created(&env, staker.clone(), delegatee.clone(), 300, 1_500);
+        emit_delegation_revoked(&env, staker.clone(), delegatee.clone(), 300, 1_600);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 7);
     }
 }

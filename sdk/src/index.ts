@@ -28,6 +28,93 @@ export type { AccountInfo, RevocationRecord } from './types';
 // ── Presentation ──────────────────────────────────────────────────────────────
 export { PresentationClient } from './presentation';
 
+// ── DID resolver (universal resolver, closes #1120) ───────────────────────────
+//
+// Supports did:stellar, did:ethr and did:web out of the box, with a fallback
+// chain, resolved-DID caching and custom resolver plugins.
+//
+// Usage:
+//   const resolver = new DidResolver({ cache: { ttlMs: 60_000 } });
+//   resolver.registerPlugin(myCustomResolver);
+//   const doc = await resolver.resolve('did:stellar:G...');
+export {
+  DidResolver,
+  StellarDidResolver,
+  EthrDidResolver,
+  WebDidResolver,
+  DidResolverError,
+  DidDocumentValidationError,
+  validateDidDocument,
+  parseDid,
+  createDefaultResolver,
+} from './did-resolver';
+export type {
+  ParsedDid,
+  DidResolverPlugin,
+  DidResolverOptions,
+  DidCacheOptions,
+  DidCacheEntry,
+  DidResolutionResult,
+  DidResolutionMetadata,
+  DidDocumentMetadata,
+  DidResolverErrorCode,
+} from './did-resolver';
+
+// ── Revocation list (bitmap CRL, closes #1121) ────────────────────────────────
+//
+// Bitmap-backed revocation storage with batch revocation, reason codes,
+// merkle proofs and statistics queries.
+//
+// Usage:
+//   const crl = new RevocationListClient(client);
+//   await crl.revokeBatch([id1, id2], RevocationReason.Fraud);
+//   const proof = await crl.generateProof(id1);
+export {
+  RevocationListClient,
+  RevocationBitmap,
+  buildRevokeBatchWithReasonsArgs,
+  buildGetRevocationStatsArgs,
+  buildGenerateRevocationProofArgs,
+  buildVerifyRevocationProofArgs,
+} from './revocation-list';
+export type {
+  RevocationEntry,
+  RevocationProof,
+  RevocationStats,
+  RevocationBatchOptions,
+  RevocationBatchResult,
+  RevocationListOptions,
+} from './revocation-list';
+
+// ── Reputation staking (closes #1122) ─────────────────────────────────────────
+//
+// Stake tokens to boost reputation, with cooldown-based unstaking, slashing,
+// rewards and stake delegation.
+//
+// Usage:
+//   const staking = new StakingClient(client);
+//   await staking.deposit(amount);
+//   const multiplier = await staking.getReputationMultiplier(holder);
+export {
+  StakingClient,
+  calculateStakeMultiplier,
+  buildDepositStakeArgs,
+  buildWithdrawStakeArgs,
+  buildSlashStakeArgs,
+  buildClaimStakingRewardsArgs,
+  buildDelegateStakeArgs,
+  buildGetStakeInfoArgs,
+  buildGetStakingHistoryArgs,
+} from './staking';
+export type {
+  StakeInfo,
+  StakingHistoryEntry,
+  StakingRewards,
+  StakingOptions,
+  SlashReason,
+  DelegationInfo,
+} from './staking';
+
 // ── Merkle proofs (batch credential verification, closes #1056) ───────────────
 //
 // Merkle tree structure:
@@ -153,6 +240,10 @@ export type {
   PresentationProof,
   PresentationVerifyResult,
   PresentationVerifyFailReason,
+  PresentationChallenge,
+  PresentationTemplate,
+  PresentationProofFormat,
+  SelectiveDisclosureOptions,
 } from './presentation';
 
 // ── Health ────────────────────────────────────────────────────────────────────

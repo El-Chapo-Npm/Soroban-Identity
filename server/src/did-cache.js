@@ -2,17 +2,46 @@ import { RedisClient } from './redis-client.js';
 import { logger } from './logger.js';
 
 const KEY_PREFIX = 'did:doc:';
+const META_PREFIX = 'did:meta:';
+
+/**
+ * Extract the DID method from a DID string (`did:<method>:...`).
+ *
+ * Returns `stellar` for bare Stellar addresses, since those are implicitly
+ * `did:stellar` identifiers.
+ */
+export function didMethod(didOrAddress) {
+  const value = String(didOrAddress ?? '');
+  if (!value.startsWith('did:')) return 'stellar';
+  const rest = value.slice('did:'.length);
+  const separator = rest.indexOf(':');
+  return separator === -1 ? rest : rest.slice(0, separator);
+}
 
 /**
  * Normalise a DID or bare Stellar address into a stable cache key.
  *
  * `did:stellar:G...` and a bare `G...` refer to the same document, so they must
- * not occupy two cache entries that can drift apart on invalidation.
+ * not occupy two cache entries that can drift apart on invalidation. DIDs of
+ * other methods (`did:ethr:...`, `did:web:...`, custom plugins) are keyed by
+ * their full DID so distinct methods never collide.
  */
 export function didCacheKey(didOrAddress) {
   const value = String(didOrAddress ?? '');
-  const address = value.startsWith('did:stellar:') ? value.slice('did:stellar:'.length) : value;
-  return `${KEY_PREFIX}${address}`;
+  if (value.startsWith('did:stellar:')) {
+    return `${KEY_PREFIX}${value.slice('did:stellar:'.length)}`;
+  }
+  if (value.startsWith('did:')) {
+    return `${KEY_PREFIX}${value}`;
+  }
+  return `${KEY_PREFIX}${value}`;
+}
+
+/**
+ * Cache key for the resolver metadata stored alongside a DID document.
+ */
+export function didMetaKey(didOrAddress) {
+  return `${META_PREFIX}${didCacheKey(didOrAddress).slice(KEY_PREFIX.length)}`;
 }
 
 /**
@@ -47,6 +76,9 @@ export class DidCache {
     this.available = false;
     this.consecutiveFailures = 0;
     this.stats = { hits: 0, misses: 0, errors: 0, sets: 0, invalidations: 0 };
+    // Bumped whenever resolver plugins or the fallback chain change, so
+    // documents resolved under an old configuration can be discarded.
+    this.resolverGeneration = 0;
   }
 
   /**
@@ -126,6 +158,16 @@ export class DidCache {
    *   failure, or any cache error.
    */
   async get(didOrAddress) {
+    const entry = await this.getEntry(didOrAddress);
+    return entry ? entry.document : null;
+  }
+
+  /**
+   * Read a cached DID document together with its resolver metadata.
+   *
+   * @returns {Promise<{document: object, meta: object}|null>}
+   */
+  async getEntry(didOrAddress) {
     if (!this.usable) return null;
 
     try {
@@ -139,7 +181,12 @@ export class DidCache {
       this.consecutiveFailures = 0;
       this.stats.hits += 1;
       this._recordMetric('did_cache_hits_total');
-      return JSON.parse(raw);
+      const parsed = JSON.parse(raw);
+      // Entries written before metadata support hold the bare document.
+      if (parsed && typeof parsed === 'object' && 'document' in parsed) {
+        return { document: parsed.document, meta: parsed.meta ?? {} };
+      }
+      return { document: parsed, meta: {} };
     } catch (error) {
       if (error instanceof SyntaxError) {
         // A corrupt entry is treated as a miss and dropped, rather than
@@ -156,12 +203,26 @@ export class DidCache {
 
   /**
    * Cache a resolved DID document with a TTL.
+   *
+   * `meta` records how the document was produced (resolver method, plugin
+   * name, whether a fallback was used) so callers can reason about staleness
+   * and the resolver generation that produced it.
    */
-  async set(didOrAddress, document, ttlMs = this.ttlMs) {
+  async set(didOrAddress, document, ttlMs = this.ttlMs, meta = {}) {
     if (!this.usable || document === null || document === undefined) return false;
 
+    const entry = {
+      document,
+      meta: {
+        method: didMethod(didOrAddress),
+        resolverGeneration: this.resolverGeneration,
+        resolvedAt: Date.now(),
+        ...meta,
+      },
+    };
+
     try {
-      await this.client.set(didCacheKey(didOrAddress), JSON.stringify(document), ttlMs);
+      await this.client.set(didCacheKey(didOrAddress), JSON.stringify(entry), ttlMs);
       this.consecutiveFailures = 0;
       this.stats.sets += 1;
       this._recordMetric('did_cache_sets_total');
@@ -211,6 +272,58 @@ export class DidCache {
   }
 
   /**
+   * Drop every cached document for one DID method (e.g. after a resolver
+   * plugin for that method is registered, replaced or removed).
+   *
+   * @param {string} method  The DID method, without the `did:` prefix.
+   */
+  async invalidateMethod(method) {
+    if (!this.usable) return 0;
+
+    try {
+      const keys = await this.client.scanKeys(`${KEY_PREFIX}*`);
+      const matching = keys.filter((key) => {
+        const id = key.slice(KEY_PREFIX.length);
+        return didMethod(id.startsWith('did:') ? id : `did:stellar:${id}`) === method;
+      });
+      if (matching.length === 0) return 0;
+      await this.client.del(...matching);
+      this.stats.invalidations += matching.length;
+      this._recordMetric('did_cache_method_invalidations_total');
+      logger.info({ method, count: matching.length }, 'DID cache invalidated for method');
+      return matching.length;
+    } catch (error) {
+      this._recordFailure('invalidateMethod', error);
+      return 0;
+    }
+  }
+
+  /**
+   * Hook for resolver plugin changes: bump the resolver generation and drop
+   * every cached document, since any of them may have been produced by the
+   * plugin that just changed.
+   */
+  async onResolverPluginsChanged() {
+    this.resolverGeneration += 1;
+    logger.info({ resolverGeneration: this.resolverGeneration }, 'Resolver plugins changed; flushing DID cache');
+    return this.invalidateAll();
+  }
+
+  /**
+   * Hook for fallback chain changes: bump the resolver generation and drop
+   * every cached document, since resolution order may now yield different
+   * results for the same DID.
+   */
+  async onFallbackChainChanged() {
+    this.resolverGeneration += 1;
+    logger.info(
+      { resolverGeneration: this.resolverGeneration },
+      'Resolver fallback chain changed; flushing DID cache',
+    );
+    return this.invalidateAll();
+  }
+
+  /**
    * Pre-populate the cache for a set of DIDs.
    *
    * Resolution failures are counted and skipped rather than aborting the warm,
@@ -256,6 +369,7 @@ export class DidCache {
       enabled: this.enabled,
       available: this.available,
       ttlMs: this.ttlMs,
+      resolverGeneration: this.resolverGeneration,
       hitRate: lookups === 0 ? 0 : Number((this.stats.hits / lookups).toFixed(4)),
     };
   }

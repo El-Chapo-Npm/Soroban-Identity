@@ -8,6 +8,7 @@ use soroban_sdk::{
 use soroban_sdk::xdr::ToXdr;
 
 pub mod recovery;
+pub mod resolver;
 pub mod did_resolver;
 
 pub use did_resolver::{DidMethod, ResolvedDid};
@@ -53,6 +54,16 @@ pub enum ContractError {
     UnsupportedDidMethod = 24,
     /// The DID method is already registered with the resolver.
     DidMethodAlreadyRegistered = 25,
+    /// The DID string uses a method that has no registered resolver.
+    UnknownDidMethod = 26,
+    /// The resolved DID document is missing required fields or is malformed.
+    InvalidDidDocument = 27,
+    /// No cached resolution exists for the requested DID (or it has expired).
+    CacheMiss = 28,
+    /// A resolver plugin operation failed (bad registration, duplicate, etc.).
+    ResolverPluginError = 29,
+    /// The fallback chain is empty or exceeds the maximum supported length.
+    InvalidFallbackChain = 30,
 }
 
 /// Version returned by `ping` for deployment health checks.
@@ -97,6 +108,13 @@ const DELEGATION: Symbol = symbol_short!("DELEG");
 const DELEGATION_CHILDREN: Symbol = symbol_short!("DELGCH");
 const DELEGATION_PARENT: Symbol = symbol_short!("DELGPAR");
 const MAX_DELEGATION_SCOPE_LEN: u32 = 128;
+
+/// Maximum number of entries accepted in a resolver fallback chain.
+pub const MAX_FALLBACK_CHAIN: u32 = 8;
+/// Default TTL (in ledgers) applied to cached DID resolutions.
+pub const DEFAULT_RESOLVER_CACHE_TTL: u32 = 17_280;
+/// Maximum TTL (in ledgers) accepted for a cached DID resolution (~30 days).
+pub const MAX_RESOLVER_CACHE_TTL: u32 = 518_400;
 
 /// Maximum number of entries accepted by [`IdentityRegistry::update_dids_batch`]
 /// in a single call. Set lower than creation batch to account for additional
@@ -770,6 +788,57 @@ impl IdentityRegistry {
         controller: Address,
     ) -> Option<recovery::RecoveryRequest> {
         recovery::get_pending(&env, &controller)
+    }
+
+    // ── Universal DID resolver (#1120) ────────────────────────────────────────
+
+    /// Resolves any supported DID string (`did:stellar:`, `did:ethr:`, `did:web:`)
+    /// to a validated [`resolver::ResolvedDid`], consulting the resolution cache
+    /// first and falling back through the configured chain on failure.
+    ///
+    /// # Errors
+    /// Returns [`ContractError::InvalidDid`] if the DID string is malformed,
+    /// [`ContractError::UnknownDidMethod`] if no resolver (built-in or plugin)
+    /// handles the method, [`ContractError::InvalidDidDocument`] if the resolved
+    /// document fails validation, or [`ContractError::DidNotFound`] if every
+    /// resolver in the fallback chain fails.
+    pub fn resolve_did_universal(env: Env, did: String) -> Result<resolver::ResolvedDid, ContractError> {
+        resolver::resolve_universal(&env, &did)
+    }
+
+    /// Registers a custom resolver plugin for `method` (e.g. `"did:key"`).
+    /// Admin-only. Re-registering an existing method overwrites its handler.
+    pub fn register_resolver_plugin(
+        env: Env,
+        admin: Address,
+        method: String,
+        handler: Address,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        Self::require_not_paused(&env)?;
+        resolver::register_plugin(&env, &method, &handler)
+    }
+
+    /// Sets the ordered fallback chain of method names tried when the primary
+    /// resolution fails. Admin-only. An empty chain disables fallback.
+    pub fn set_fallback_chain(env: Env, admin: Address, chain: Vec<String>) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        Self::require_not_paused(&env)?;
+        resolver::set_fallback_chain(&env, &chain)
+    }
+
+    /// Returns the cached resolution for `did`, or [`ContractError::CacheMiss`]
+    /// if it is absent or expired.
+    pub fn get_cached_did(env: Env, did: String) -> Result<resolver::ResolvedDid, ContractError> {
+        resolver::get_cached(&env, &did)
+    }
+
+    /// Validates a DID document against the required-field rules. Returns
+    /// [`ContractError::InvalidDidDocument`] when the document is malformed.
+    pub fn validate_did_document(env: Env, doc: resolver::ResolvedDid) -> Result<(), ContractError> {
+        resolver::validate_document(&env, &doc)
     }
 
     // ── Service endpoints ─────────────────────────────────────────────────────

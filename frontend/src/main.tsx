@@ -12,6 +12,7 @@ import "./styles/index.css";
 // Initialize theme before React renders to prevent flicker
 (function initializeTheme() {
   const THEME_STORAGE_KEY = 'theme-preference';
+  const CUSTOM_THEME_STORAGE_KEY = 'custom-theme';
   const storedTheme = localStorage.getItem(THEME_STORAGE_KEY) as 'system' | 'light' | 'dark' | null;
   const html = document.documentElement;
   
@@ -27,6 +28,27 @@ import "./styles/index.css";
   
   // Set data attribute for immediate access
   html.setAttribute('data-theme', storedTheme || 'system');
+
+  // Apply persisted custom theme CSS variables before first paint
+  try {
+    const rawCustomTheme = localStorage.getItem(CUSTOM_THEME_STORAGE_KEY);
+    if (rawCustomTheme) {
+      const customTheme = JSON.parse(rawCustomTheme) as {
+        colors?: Record<string, string>;
+      } | null;
+      if (customTheme && customTheme.colors) {
+        Object.entries(customTheme.colors).forEach(([token, value]) => {
+          if (typeof value === 'string' && value) {
+            const variableName = token.startsWith('--') ? token : `--color-${token}`;
+            html.style.setProperty(variableName, value);
+          }
+        });
+        html.setAttribute('data-custom-theme', 'true');
+      }
+    }
+  } catch {
+    // Ignore malformed stored theme data
+  }
 })();
 
 // Initialize the animation system before React renders so CSS can gate

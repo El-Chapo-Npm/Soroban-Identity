@@ -55,6 +55,82 @@ fn rr_no_index_panic() {
     assert!(records_in_bounds(&r));
 }
 
+/// S-RR-6: batch revocation is atomic. Either every requested index is
+/// revoked (and counted) or the registry is left untouched. No partial
+/// application is observable.
+#[kani::proof]
+#[kani::unwind(5)]
+fn rr_batch_revocation_atomic() {
+    let mut r = any_registry();
+    kani::assume(records_in_bounds(&r));
+    kani::assume(records_consistent(&r));
+    kani::assume(set_bits(&r) == r.active_records());
+    kani::assume(r.rev_count == r.active_records());
+    let before = r.clone();
+    let issuer = any_addr();
+    let indices: Vec<u32> = kani::any();
+    kani::assume(indices.len() <= 8);
+    let result = r.revoke_batch(issuer, issuer, &indices);
+    match result {
+        Ok(()) => {
+            // Every requested index is now revoked and counted.
+            assert!(indices.iter().all(|&i| r.is_revoked(issuer, i)));
+            assert_eq!(set_bits(&r), r.active_records());
+            assert_eq!(r.rev_count, r.active_records());
+        }
+        Err(_) => {
+            // Failure leaves the registry unchanged.
+            assert_eq!(r.bitmaps, before.bitmaps);
+            assert_eq!(r.records, before.records);
+            assert_eq!(r.rev_count, before.rev_count);
+        }
+    }
+}
+
+/// S-RR-7: revocation proof soundness. If `verify_revocation` accepts a proof
+/// for (issuer, index), then the corresponding bit is actually set in the
+/// issuer's bitmap. A forged proof for an unrevoked slot is rejected.
+#[kani::proof]
+#[kani::unwind(5)]
+fn rr_proof_sound() {
+    let mut r = any_registry();
+    kani::assume(records_in_bounds(&r));
+    let issuer = any_addr();
+    let index: u32 = kani::any();
+    let proof: Vec<u8> = kani::any();
+    kani::assume(proof.len() <= 64);
+    if r.verify_revocation(issuer, index, &proof) {
+        assert!(r.is_revoked(issuer, index));
+    }
+    // A proof generated for a revoked slot always verifies.
+    if r.is_revoked(issuer, index) {
+        if let Ok(p) = r.revocation_proof(issuer, index) {
+            assert!(r.verify_revocation(issuer, index, &p));
+        }
+    }
+}
+
+/// S-RR-8: statistics queries agree with the underlying bitmap state.
+/// `revoked_count` equals the number of set bits and `is_revoked` agrees with
+/// the bitmap word for every in-range index.
+#[kani::proof]
+#[kani::unwind(5)]
+fn rr_stats_consistent() {
+    let r = any_registry();
+    kani::assume(records_in_bounds(&r));
+    kani::assume(records_consistent(&r));
+    kani::assume(set_bits(&r) == r.active_records());
+    let issuer = any_addr();
+    assert_eq!(r.revoked_count(issuer), set_bits(&r));
+    let index: u32 = kani::any();
+    if let Some(b) = r.bitmaps[issuer as usize] {
+        if index < b.word_count * 64 {
+            let expected = b.words[(index / 64) as usize] & (1u64 << (index % 64)) != 0;
+            assert_eq!(r.is_revoked(issuer, index), expected);
+        }
+    }
+}
+
 /// S-RR-2: `init_bitmap` never overflows. EXPECTED FAIL (finding RR-3):
 /// `capacity + 63` overflows for capacity > u32::MAX - 63.
 #[kani::proof]

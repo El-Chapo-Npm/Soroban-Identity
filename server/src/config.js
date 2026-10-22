@@ -396,6 +396,79 @@ export function loadConfig(env = process.env) {
       .split(",")
       .map((entry) => entry.trim())
       .filter(Boolean),
+    // Multi-layer caching strategy (#1118).
+    // L1: in-process LRU cache. CACHE_L1_MAX_ENTRIES=0 disables L1.
+    cacheL1Enabled: parseBoolean(env.CACHE_L1_ENABLED, true),
+    cacheL1MaxEntries: parseInteger(env.CACHE_L1_MAX_ENTRIES, 1000, true),
+    cacheL1DefaultTtlMs: parseInteger(env.CACHE_L1_DEFAULT_TTL_MS, 30_000),
+    // L2: Redis-backed shared cache. TTLs are per data type so volatile data
+    // (e.g. balances) is not held as long as stable data (e.g. DIDs).
+    cacheL2Enabled: parseBoolean(env.CACHE_L2_ENABLED, true),
+    cacheL2KeyPrefix: env.CACHE_L2_KEY_PREFIX ?? "cache:",
+    cacheL2TtlDefaultMs: parseInteger(env.CACHE_L2_TTL_DEFAULT_MS, 60_000),
+    cacheL2TtlDidMs: parseInteger(env.CACHE_L2_TTL_DID_MS, 60_000),
+    cacheL2TtlCredentialMs: parseInteger(env.CACHE_L2_TTL_CREDENTIAL_MS, 30_000),
+    cacheL2TtlVerificationMs: parseInteger(env.CACHE_L2_TTL_VERIFICATION_MS, 10_000),
+    cacheL2TtlApiResponseMs: parseInteger(env.CACHE_L2_TTL_API_RESPONSE_MS, 5_000),
+    cacheL2TtlSessionMs: parseInteger(env.CACHE_L2_TTL_SESSION_MS, 300_000),
+    cacheL2TtlAnalyticsMs: parseInteger(env.CACHE_L2_TTL_ANALYTICS_MS, 600_000),
+    // L3: CDN. Purging is opt-in; without a purge URL the CDN is assumed to
+    // expire entries on its own TTL.
+    cacheL3Enabled: parseBoolean(env.CACHE_L3_ENABLED, false),
+    cacheL3PurgeUrl: env.CACHE_L3_PURGE_URL ?? "",
+    cacheL3PurgeToken: env.CACHE_L3_PURGE_TOKEN ?? "",
+    cacheL3PurgeTimeoutMs: parseInteger(env.CACHE_L3_PURGE_TIMEOUT_MS, 5000),
+    // Cache warming: a cron schedule (empty disables) plus the list of keys
+    // to preload on startup and on each scheduled run.
+    cacheWarmEnabled: parseBoolean(env.CACHE_WARM_ENABLED, false),
+    cacheWarmCronSchedule: env.CACHE_WARM_CRON_SCHEDULE ?? "",
+    cacheWarmKeys: parseList(env.CACHE_WARM_KEYS, []),
+    cacheWarmOnStartup: parseBoolean(env.CACHE_WARM_ON_STARTUP, true),
+    // Stampede prevention: a per-key lock so only one caller recomputes a
+    // missing entry while the rest wait (or serve stale) instead of all
+    // hammering the origin at once.
+    cacheStampedeLockTtlMs: parseInteger(env.CACHE_STAMPEDE_LOCK_TTL_MS, 5000),
+    cacheStampedeWaitTimeoutMs: parseInteger(env.CACHE_STAMPEDE_WAIT_TIMEOUT_MS, 2000),
+    cacheStampedeServeStale: parseBoolean(env.CACHE_STAMPEDE_SERVE_STALE, true),
+    // Hit-rate monitoring: per-layer counters exposed on the metrics endpoint.
+    cacheMetricsEnabled: parseBoolean(env.CACHE_METRICS_ENABLED, true),
+    cacheMetricsLogIntervalMs: parseInteger(
+      env.CACHE_METRICS_LOG_INTERVAL_MS,
+      60_000,
+      true,
+    ),
+    // API usage metering and billing (#1119).
+    meteringEnabled: parseBoolean(env.METERING_ENABLED, false),
+    // Where usage records are persisted (JSONL append log).
+    usageStoragePath: env.USAGE_STORAGE_PATH
+      ? path.resolve(env.USAGE_STORAGE_PATH)
+      : path.join(DEFAULT_DATA_DIR, "usage"),
+    // Tier definitions: name -> monthly included calls and per-call overage
+    // price in cents. Overridable as JSON so pricing can change without a
+    // deploy; the defaults mirror the documented Free/Pro/Enterprise tiers.
+    billingTiers: parseJson(env.BILLING_TIERS, {
+      free: { monthlyCalls: 1000, overageCentsPerCall: 0, custom: false },
+      pro: { monthlyCalls: 50000, overageCentsPerCall: 1, custom: false },
+      enterprise: { monthlyCalls: 0, overageCentsPerCall: 0, custom: true },
+    }),
+    billingDefaultTier: (env.BILLING_DEFAULT_TIER ?? "free").trim().toLowerCase(),
+    // Stripe integration. Without a secret key invoices are generated but
+    // never charged, so a deployment can meter usage before billing is live.
+    stripeApiKey: env.STRIPE_API_KEY ?? "",
+    stripeWebhookSecret: env.STRIPE_WEBHOOK_SECRET ?? "",
+    stripeApiBaseUrl: env.STRIPE_API_BASE_URL ?? "https://api.stripe.com",
+    stripeTimeoutMs: parseInteger(env.STRIPE_TIMEOUT_MS, 10_000),
+    // Monthly invoice generation. Empty schedule falls back to the 1st of the
+    // month at midnight.
+    invoiceCronSchedule: env.INVOICE_CRON_SCHEDULE ?? "0 0 1 * *",
+    invoiceCurrency: (env.INVOICE_CURRENCY ?? "usd").trim().toLowerCase(),
+    // Overage alerts: warn once usage crosses these percentages of the
+    // tier's included quota.
+    usageAlertThresholds: parseThresholds(env.USAGE_ALERT_THRESHOLDS, [80, 100]),
+    usageAlertWebhookUrl: env.USAGE_ALERT_WEBHOOK_URL ?? "",
+    // Usage-based discounts: percentage off the overage charge once a
+    // customer's monthly call volume reaches the given threshold.
+    usageDiscountTiers: parseJson(env.USAGE_DISCOUNT_TIERS, []),
     healthProbeTimeoutMs: parseInteger(env.HEALTH_PROBE_TIMEOUT_MS, 2000),
     redisUrl: env.REDIS_URL ?? "",
     accessLogEnabled: env.ACCESS_LOG_ENABLED !== "false",
@@ -597,6 +670,20 @@ export function validateConfig(env = process.env) {
     { key: "OAUTH_ACCESS_TOKEN_TTL_MS", desc: "must be a valid integer" },
     { key: "OAUTH_REFRESH_TOKEN_TTL_MS", desc: "must be a valid integer" },
     { key: "REQUEST_NONCE_TTL_SECONDS", desc: "must be a valid integer" },
+    { key: "CACHE_L1_MAX_ENTRIES", desc: "must be a valid integer" },
+    { key: "CACHE_L1_DEFAULT_TTL_MS", desc: "must be a valid integer" },
+    { key: "CACHE_L2_TTL_DEFAULT_MS", desc: "must be a valid integer" },
+    { key: "CACHE_L2_TTL_DID_MS", desc: "must be a valid integer" },
+    { key: "CACHE_L2_TTL_CREDENTIAL_MS", desc: "must be a valid integer" },
+    { key: "CACHE_L2_TTL_VERIFICATION_MS", desc: "must be a valid integer" },
+    { key: "CACHE_L2_TTL_API_RESPONSE_MS", desc: "must be a valid integer" },
+    { key: "CACHE_L2_TTL_SESSION_MS", desc: "must be a valid integer" },
+    { key: "CACHE_L2_TTL_ANALYTICS_MS", desc: "must be a valid integer" },
+    { key: "CACHE_L3_PURGE_TIMEOUT_MS", desc: "must be a valid integer" },
+    { key: "CACHE_STAMPEDE_LOCK_TTL_MS", desc: "must be a valid integer" },
+    { key: "CACHE_STAMPEDE_WAIT_TIMEOUT_MS", desc: "must be a valid integer" },
+    { key: "CACHE_METRICS_LOG_INTERVAL_MS", desc: "must be a valid integer" },
+    { key: "STRIPE_TIMEOUT_MS", desc: "must be a valid integer" },
   ];
 
   for (const item of numericVars) {
@@ -744,6 +831,67 @@ export function validateConfig(env = process.env) {
     }
   }
 
+  // Cache warming (#1118): a malformed schedule would silently never run.
+  const cacheWarmCron = env.CACHE_WARM_CRON_SCHEDULE;
+  if (cacheWarmCron !== undefined && cacheWarmCron !== "") {
+    try {
+      parseCronExpression(cacheWarmCron);
+    } catch (error) {
+      invalid.push(`CACHE_WARM_CRON_SCHEDULE: ${error.message}`);
+    }
+  }
+
+  const cacheL3PurgeUrl = env.CACHE_L3_PURGE_URL;
+  if (cacheL3PurgeUrl !== undefined && cacheL3PurgeUrl !== "") {
+    try {
+      new URL(cacheL3PurgeUrl);
+    } catch {
+      invalid.push("CACHE_L3_PURGE_URL: must be a valid URL");
+    }
+  }
+
+  // Monthly invoicing (#1119): the schedule must parse, and the default tier
+  // must exist in the configured tier table or every customer would be
+  // billed against a tier that has no pricing.
+  const invoiceCron = env.INVOICE_CRON_SCHEDULE;
+  if (invoiceCron !== undefined && invoiceCron !== "") {
+    try {
+      parseCronExpression(invoiceCron);
+    } catch (error) {
+      invalid.push(`INVOICE_CRON_SCHEDULE: ${error.message}`);
+    }
+  }
+
+  let billingTiers;
+  try {
+    billingTiers = parseJson(env.BILLING_TIERS, {
+      free: { monthlyCalls: 1000, overageCentsPerCall: 0, custom: false },
+      pro: { monthlyCalls: 50000, overageCentsPerCall: 1, custom: false },
+      enterprise: { monthlyCalls: 0, overageCentsPerCall: 0, custom: true },
+    });
+  } catch (error) {
+    invalid.push(`BILLING_TIERS: ${error.message}`);
+  }
+  if (billingTiers && (typeof billingTiers !== "object" || Array.isArray(billingTiers))) {
+    invalid.push("BILLING_TIERS: must be a JSON object mapping tier names to pricing");
+  } else if (billingTiers) {
+    const defaultTier = (env.BILLING_DEFAULT_TIER ?? "free").trim().toLowerCase();
+    if (!billingTiers[defaultTier]) {
+      invalid.push(
+        `BILLING_DEFAULT_TIER: '${defaultTier}' is not defined in BILLING_TIERS`,
+      );
+    }
+  }
+
+  const usageAlertWebhookUrl = env.USAGE_ALERT_WEBHOOK_URL;
+  if (usageAlertWebhookUrl !== undefined && usageAlertWebhookUrl !== "") {
+    try {
+      new URL(usageAlertWebhookUrl);
+    } catch {
+      invalid.push("USAGE_ALERT_WEBHOOK_URL: must be a valid URL");
+    }
+  }
+
   const encryptionEnabled = parseBoolean(env.ENCRYPTION_ENABLED, false);
   if (encryptionEnabled) {
     const rotation = parseInteger(
@@ -852,6 +1000,44 @@ export function logDefaultValues(env = process.env) {
     { key: "REQUEST_NONCE_ENABLED", defaultVal: "false" },
     { key: "REQUEST_NONCE_TTL_SECONDS", defaultVal: "300" },
     { key: "REQUEST_NONCE_HEADER", defaultVal: "'X-Nonce'" },
+    { key: "CACHE_L1_ENABLED", defaultVal: "true" },
+    { key: "CACHE_L1_MAX_ENTRIES", defaultVal: "1000" },
+    { key: "CACHE_L1_DEFAULT_TTL_MS", defaultVal: "30000" },
+    { key: "CACHE_L2_ENABLED", defaultVal: "true" },
+    { key: "CACHE_L2_KEY_PREFIX", defaultVal: "'cache:'" },
+    { key: "CACHE_L2_TTL_DEFAULT_MS", defaultVal: "60000" },
+    { key: "CACHE_L2_TTL_DID_MS", defaultVal: "60000" },
+    { key: "CACHE_L2_TTL_CREDENTIAL_MS", defaultVal: "30000" },
+    { key: "CACHE_L2_TTL_VERIFICATION_MS", defaultVal: "10000" },
+    { key: "CACHE_L2_TTL_API_RESPONSE_MS", defaultVal: "5000" },
+    { key: "CACHE_L2_TTL_SESSION_MS", defaultVal: "300000" },
+    { key: "CACHE_L2_TTL_ANALYTICS_MS", defaultVal: "600000" },
+    { key: "CACHE_L3_ENABLED", defaultVal: "false" },
+    { key: "CACHE_L3_PURGE_URL", defaultVal: "'' (no purge)" },
+    { key: "CACHE_L3_PURGE_TOKEN", defaultVal: "''" },
+    { key: "CACHE_L3_PURGE_TIMEOUT_MS", defaultVal: "5000" },
+    { key: "CACHE_WARM_ENABLED", defaultVal: "false" },
+    { key: "CACHE_WARM_CRON_SCHEDULE", defaultVal: "'' (startup only)" },
+    { key: "CACHE_WARM_KEYS", defaultVal: "'' (none)" },
+    { key: "CACHE_WARM_ON_STARTUP", defaultVal: "true" },
+    { key: "CACHE_STAMPEDE_LOCK_TTL_MS", defaultVal: "5000" },
+    { key: "CACHE_STAMPEDE_WAIT_TIMEOUT_MS", defaultVal: "2000" },
+    { key: "CACHE_STAMPEDE_SERVE_STALE", defaultVal: "true" },
+    { key: "CACHE_METRICS_ENABLED", defaultVal: "true" },
+    { key: "CACHE_METRICS_LOG_INTERVAL_MS", defaultVal: "60000" },
+    { key: "METERING_ENABLED", defaultVal: "false" },
+    { key: "USAGE_STORAGE_PATH", defaultVal: "data/usage" },
+    { key: "BILLING_TIERS", defaultVal: "free/pro/enterprise defaults" },
+    { key: "BILLING_DEFAULT_TIER", defaultVal: "'free'" },
+    { key: "STRIPE_API_KEY", defaultVal: "'' (invoices not charged)" },
+    { key: "STRIPE_WEBHOOK_SECRET", defaultVal: "''" },
+    { key: "STRIPE_API_BASE_URL", defaultVal: "'https://api.stripe.com'" },
+    { key: "STRIPE_TIMEOUT_MS", defaultVal: "10000" },
+    { key: "INVOICE_CRON_SCHEDULE", defaultVal: "'0 0 1 * *'" },
+    { key: "INVOICE_CURRENCY", defaultVal: "'usd'" },
+    { key: "USAGE_ALERT_THRESHOLDS", defaultVal: "80,100" },
+    { key: "USAGE_ALERT_WEBHOOK_URL", defaultVal: "''" },
+    { key: "USAGE_DISCOUNT_TIERS", defaultVal: "[]" },
   ];
 
   for (const item of defaults) {

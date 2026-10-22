@@ -22,6 +22,60 @@ const CACHED_AT_HEADER = 'sw-cached-at';
 // Set on responses served from the API cache so the app can flag stale data.
 const CACHE_STATUS_HEADER = 'x-sw-cache';
 
+// TTLs per data type (milliseconds) - aligned with L2/L3 cache policies
+const CACHE_TTLS = {
+  static: 7 * 24 * 60 * 60 * 1000, // 7 days for static assets
+  api: 5 * 60 * 1000, // 5 minutes for API responses
+  public: 60 * 60 * 1000, // 1 hour for public data
+};
+
+// Cache hit rate monitoring counters
+const cacheStats = {
+  hits: 0,
+  misses: 0,
+  revalidations: 0,
+};
+
+function recordCacheHit() {
+  cacheStats.hits += 1;
+}
+
+function recordCacheMiss() {
+  cacheStats.misses += 1;
+}
+
+function recordRevalidation() {
+  cacheStats.revalidations += 1;
+}
+
+function getCacheHitRate() {
+  const total = cacheStats.hits + cacheStats.misses;
+  return total === 0 ? 0 : cacheStats.hits / total;
+}
+
+// Store a response with a timestamp header for TTL-based expiry
+async function putWithTimestamp(cacheName, request, response) {
+  const headers = new Headers(response.headers);
+  headers.set('x-sw-cached-at', Date.now().toString());
+  const body = await response.clone().blob();
+  const cachedResponse = new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+  const cache = await caches.open(cacheName);
+  await cache.put(request, cachedResponse);
+}
+
+// Check whether a cached response has exceeded its TTL
+function isExpired(response, ttl) {
+  const cachedAt = response.headers.get('x-sw-cached-at');
+  if (!cachedAt) {
+    return true;
+  }
+  return Date.now() - parseInt(cachedAt, 10) > ttl;
+}
+
 // Install event - cache static assets
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -37,6 +91,7 @@ self.addEventListener('install', (event) => {
 // Activate event - remove this app's caches from older versions. Caches
 // with other names on the same origin are left alone.
 self.addEventListener('activate', (event) => {
+  const currentCaches = [CACHE_NAME, STATIC_CACHE_NAME, API_CACHE_NAME];
   event.waitUntil(
     caches.keys().then((cacheNames) => {
       return Promise.all(
@@ -364,7 +419,11 @@ self.addEventListener('notificationclick', (event) => {
 
 // Message handler for client communication
 self.addEventListener('message', (event) => {
-  if (event.data && event.data.type === 'SKIP_WAITING') {
+  if (!event.data) {
+    return;
+  }
+
+  if (event.data.type === 'SKIP_WAITING') {
     self.skipWaiting();
   }
   // Drop cached API data, e.g. when the wallet disconnects.

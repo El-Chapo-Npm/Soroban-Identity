@@ -964,3 +964,385 @@ export interface ResolvedDidDocument extends DidDocument {
   /** `true` when the document was served from a local cache. */
   fromCache: boolean;
 }
+
+/* -------------------------------------------------------------------------- */
+/* DID resolver (#1120)                                                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * DID method supported by the universal resolver (#1120).
+ *
+ * - `stellar` — resolved against the on-chain identity-registry contract.
+ * - `ethr` — resolved via an Ethereum DID registry.
+ * - `web` — resolved by fetching `https://<domain>/.well-known/did.json`.
+ * - `custom` — handled by a caller-supplied {@link ResolverPlugin}.
+ */
+export type ResolverMethod = "stellar" | "ethr" | "web" | "custom";
+
+/** Every built-in resolver method, in resolution-preference order. */
+export const RESOLVER_METHODS: readonly ResolverMethod[] = ["stellar", "ethr", "web", "custom"];
+
+/**
+ * A DID parsed into its method-specific parts.
+ *
+ * `did:stellar:GABC…` parses to `{ method: "stellar", id: "GABC…" }`.
+ */
+export interface ParsedDid {
+  /** Full DID string, e.g. `did:stellar:GABC…`. */
+  did: string;
+  /** Method segment of the DID. */
+  method: ResolverMethod;
+  /** Method-specific identifier (everything after the second `:`). */
+  id: string;
+  /** Optional path segments following the method-specific id. */
+  path?: string;
+}
+
+/**
+ * Outcome of a DID resolution attempt (#1120).
+ *
+ * `didResolutionMetadata.error` is set (and `didDocument` omitted) when the
+ * DID could not be resolved. `didDocumentMetadata` carries resolver-specific
+ * bookkeeping such as cache hits and the resolver that produced the document.
+ */
+export interface DidResolutionResult {
+  /** The DID that was resolved. */
+  did: string;
+  /** Resolved document, or `undefined` when resolution failed. */
+  didDocument?: DidDocument;
+  /** Resolution metadata (content type, error, cache status, resolver used). */
+  didResolutionMetadata: {
+    /** MIME type of the resolved document. Defaults to `application/did+json`. */
+    contentType?: string;
+    /** Machine-readable error code when resolution failed. */
+    error?: string;
+    /** Human-readable error description when resolution failed. */
+    errorMessage?: string;
+    /** `true` when the document was served from the resolver cache. */
+    cached?: boolean;
+    /** Method of the resolver that produced the document. */
+    resolverMethod?: ResolverMethod;
+    /** Unix timestamp (ms) when the document was cached. */
+    cachedAt?: number;
+  };
+  /** Document metadata (creation/update timestamps, deactivation, version). */
+  didDocumentMetadata: {
+    created?: number;
+    updated?: number;
+    deactivated?: boolean;
+    versionId?: string;
+  };
+}
+
+/**
+ * Pluggable resolver for a DID method (#1120).
+ *
+ * Register plugins via `DidResolver.registerPlugin`. A plugin is consulted for
+ * every DID whose method it declares in {@link ResolverPlugin.methods}; the
+ * resolver falls back to the next plugin (or built-in resolver) when a plugin
+ * returns `undefined` or throws.
+ */
+export interface ResolverPlugin {
+  /** Unique plugin name, used in logs and resolution metadata. */
+  name: string;
+  /** DID methods this plugin can resolve. */
+  methods: ResolverMethod[];
+  /** Resolution priority; higher values are consulted first. Defaults to 0. */
+  priority?: number;
+  /** Resolve a parsed DID. Return `undefined` to defer to the next resolver. */
+  resolve(did: ParsedDid, options?: ResolveDidOptions): Promise<DidResolutionResult | undefined>;
+}
+
+/** Options for {@link DidResolver.resolve} and the underlying resolvers. */
+export interface ResolveDidOptions extends CallOptions {
+  /** Restrict resolution to a single method instead of the fallback chain. */
+  method?: ResolverMethod;
+  /** Bypass the cache and force a fresh resolution. Defaults to `false`. */
+  noCache?: boolean;
+  /** Cache entry TTL in milliseconds. Overrides the resolver default. */
+  cacheTtlMs?: number;
+  /** Ordered fallback chain of methods to try. Defaults to {@link RESOLVER_METHODS}. */
+  fallbackChain?: ResolverMethod[];
+}
+
+/** Options for {@link DidResolver.registerPlugin}. */
+export interface RegisterPluginOptions {
+  /** Replace an existing plugin with the same name. Defaults to `false`. */
+  replace?: boolean;
+}
+
+/** Cache statistics returned by {@link DidResolver.getCacheStats}. */
+export interface DidResolverCacheStats {
+  /** Number of entries currently cached. */
+  size: number;
+  /** Number of cache hits since construction. */
+  hits: number;
+  /** Number of cache misses since construction. */
+  misses: number;
+  /** Number of entries evicted due to TTL expiry. */
+  evictions: number;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Bitmap revocation list (#1121)                                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Bitmap-based revocation storage for a single issuer (#1121).
+ *
+ * Each credential is assigned a zero-based index within the issuer's bitmap;
+ * the bit at that index is `1` when the credential is revoked. This keeps the
+ * on-chain footprint at one bit per credential and makes batch revocation a
+ * single storage write.
+ */
+export interface RevocationBitmap {
+  /** Issuer address that owns this bitmap. */
+  issuer: string;
+  /** Hex-encoded bitmap bytes (little-endian bit order). */
+  bitmap: string;
+  /** Number of bits allocated in the bitmap. */
+  bitCount: number;
+  /** Number of bits currently set to `1`. */
+  revokedCount: number;
+  /** Unix timestamp (seconds) when the bitmap was last updated. */
+  updatedAt: number;
+}
+
+/**
+ * Merkle inclusion proof that a credential is revoked (#1121).
+ *
+ * The proof commits to the bitmap's merkle root; a verifier checks the leaf
+ * (credential id + revocation reason) against the root without reading the
+ * whole bitmap.
+ */
+export interface RevocationProof {
+  /** Credential id the proof is for. */
+  credentialId: string;
+  /** Zero-based index of the credential within the issuer's bitmap. */
+  index: number;
+  /** Reason recorded for the revocation. */
+  reason: RevocationReason;
+  /** Hex-encoded 32-byte merkle root of the revocation set. */
+  root: string;
+  /** Sibling hashes from the leaf upwards. */
+  siblings: MerkleProofSibling[];
+  /** Unix timestamp (seconds) of the revocation. */
+  revokedAt: number;
+}
+
+/** Aggregate revocation statistics for an issuer (#1121). */
+export interface RevocationStats {
+  /** Issuer the statistics are for. */
+  issuer: string;
+  /** Total number of credentials tracked in the bitmap. */
+  totalCredentials: number;
+  /** Number of revoked credentials. */
+  revokedCredentials: number;
+  /** Revoked count broken down by reason. */
+  byReason: Record<RevocationReason, number>;
+  /** Unix timestamp (seconds) of the most recent revocation, or `0`. */
+  lastRevokedAt: number;
+}
+
+/** Options for batch revocation (#1121). */
+export interface BatchRevokeOptions extends CallOptions {
+  /** Reason applied to every credential in the batch. Defaults to `AdminRevoked`. */
+  reason?: RevocationReason;
+  /** When `true`, the whole batch reverts if any credential is already revoked. */
+  atomic?: boolean;
+}
+
+/** Result of a batch revocation (#1121). */
+export interface BatchRevokeResult {
+  /** Credential ids that were revoked by this call. */
+  revoked: string[];
+  /** Credential ids skipped because they were already revoked. */
+  skipped: string[];
+  /** Estimated fee in stroops for the batch transaction. */
+  estimatedFee: number;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Reputation staking (#1122)                                                 */
+/* -------------------------------------------------------------------------- */
+
+/** Status of a stake position (#1122). */
+export type StakeStatus = "active" | "unbonding" | "withdrawn" | "slashed";
+
+/**
+ * A stake position held by a credential holder (#1122).
+ *
+ * Staked tokens increase the holder's reputation multiplier; unstaking starts
+ * a cooldown during which the stake remains slashable.
+ */
+export interface StakeRecord {
+  /** Staker address. */
+  staker: string;
+  /** Amount staked, in stroops. */
+  amount: number;
+  /** Unix timestamp (seconds) when the stake was created. */
+  stakedAt: number;
+  /** Unix timestamp (seconds) when the cooldown ends; `0` while active. */
+  unlockAt: number;
+  /** Current status of the position. */
+  status: StakeStatus;
+  /** Reputation multiplier derived from `amount` (1.0 = no boost). */
+  multiplier: number;
+  /** Amount slashed from this position, in stroops. */
+  slashedAmount: number;
+}
+
+/**
+ * Delegation of staking power from one holder to another (#1122).
+ */
+export interface Delegation {
+  /** Delegator address. */
+  delegator: string;
+  /** Delegatee address whose reputation receives the boost. */
+  delegatee: string;
+  /** Amount delegated, in stroops. */
+  amount: number;
+  /** Unix timestamp (seconds) when the delegation was created. */
+  delegatedAt: number;
+  /** Unix timestamp (seconds) when the delegation was revoked; `0` if active. */
+  revokedAt: number;
+}
+
+/** A single staking history entry (#1122). */
+export interface StakingHistoryEntry {
+  /** Address the entry belongs to. */
+  staker: string;
+  /** Kind of staking event. */
+  action: "stake" | "unstake" | "slash" | "reward" | "delegate" | "undelegate";
+  /** Amount involved, in stroops. */
+  amount: number;
+  /** Unix timestamp (seconds) of the event. */
+  timestamp: number;
+  /** Optional human-readable note (e.g. slashing reason). */
+  note?: string;
+}
+
+/** Options for staking a deposit (#1122). */
+export interface StakeOptions extends CallOptions {
+  /** Optional delegatee whose reputation receives the boost. */
+  delegateTo?: string;
+}
+
+/** Options for unstaking (#1122). */
+export interface UnstakeOptions extends CallOptions {
+  /** Amount to unstake, in stroops. Omit to unstake the full position. */
+  amount?: number;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Verifiable presentations (#1123)                                           */
+/* -------------------------------------------------------------------------- */
+
+/** Supported presentation proof formats (#1123). */
+export type PresentationProofFormat = "jwt" | "ld-proof";
+
+/**
+ * A proof attached to a {@link VerifiablePresentation} (#1123).
+ */
+export interface PresentationProof {
+  /** Proof format. */
+  format: PresentationProofFormat;
+  /** Signature suite / algorithm (e.g. `Ed25519Signature2020`, `ES256K`). */
+  type: string;
+  /** Unix timestamp (seconds) when the proof was created. */
+  created: number;
+  /** DID of the party that created the proof. */
+  verificationMethod: string;
+  /** Encoded proof value (JWS for `jwt`, base58 for `ld-proof`). */
+  proofValue: string;
+  /** Server-supplied challenge the proof commits to. */
+  challenge?: string;
+  /** Domain the proof is bound to. */
+  domain?: string;
+}
+
+/**
+ * W3C Verifiable Presentation bundling one or more credentials (#1123).
+ *
+ * A presentation is created by a holder, signed with a {@link PresentationProof}
+ * and verified by a relying party. Selective disclosure lets the holder include
+ * only a subset of claims from each credential.
+ */
+export interface VerifiablePresentation {
+  /** Presentation identifier (URI). */
+  id: string;
+  /** Context URIs; defaults to the W3C credentials context. */
+  "@context": string[];
+  /** Presentation types; always includes `VerifiablePresentation`. */
+  type: string[];
+  /** DID of the holder that created the presentation. */
+  holder: string;
+  /** Credentials (or selectively disclosed subsets) included in the bundle. */
+  verifiableCredential: Credential[];
+  /** Proof(s) securing the presentation. */
+  proof?: PresentationProof[];
+  /** Unix timestamp (seconds) after which the presentation is invalid. */
+  expiresAt?: number;
+  /** Challenge the presentation is bound to. */
+  challenge?: string;
+}
+
+/** Options for creating a verifiable presentation (#1123). */
+export interface CreatePresentationOptions extends CallOptions {
+  /** Credential ids to include. Omit to include every credential of the holder. */
+  credentialIds?: string[];
+  /**
+   * Claims to disclose per credential id. When set, only these claim keys are
+   * included in the presentation (selective disclosure).
+   */
+  discloseClaims?: Record<string, string[]>;
+  /** Challenge the presentation proof should commit to. */
+  challenge?: string;
+  /** Domain the presentation proof should be bound to. */
+  domain?: string;
+  /** Presentation lifetime in seconds from creation. */
+  expiresInSeconds?: number;
+  /** Proof format to use. Defaults to `ld-proof`. */
+  proofFormat?: PresentationProofFormat;
+}
+
+/** Options for verifying a verifiable presentation (#1123). */
+export interface VerifyPresentationOptions extends CallOptions {
+  /** Expected challenge; verification fails when it does not match. */
+  challenge?: string;
+  /** Expected domain; verification fails when it does not match. */
+  domain?: string;
+  /** When `true`, every bundled credential must verify. Defaults to `true`. */
+  requireAllCredentials?: boolean;
+}
+
+/** Result of verifying a verifiable presentation (#1123). */
+export interface PresentationVerificationResult {
+  /** `true` when the presentation and its proofs are valid. */
+  valid: boolean;
+  /** Failure reason when `valid` is `false`. */
+  reason?: "expired" | "invalid_proof" | "challenge_mismatch" | "domain_mismatch" | "invalid_credential";
+  /** Per-credential verification results, keyed by credential id. */
+  credentials?: Record<string, VerifyResult>;
+}
+
+/**
+ * Reusable presentation template (#1123).
+ *
+ * Templates pre-select which credential types and claims to disclose so a
+ * holder can produce consistent presentations for a relying party.
+ */
+export interface PresentationTemplate {
+  /** Template identifier. */
+  id: string;
+  /** Human-readable template name. */
+  name: string;
+  /** Credential types to include. */
+  credentialTypes: CredentialType[];
+  /** Claim keys to disclose per credential type. */
+  discloseClaims?: Partial<Record<CredentialType, string[]>>;
+  /** Default proof format for presentations created from this template. */
+  proofFormat?: PresentationProofFormat;
+  /** Default lifetime in seconds for presentations created from this template. */
+  expiresInSeconds?: number;
+}

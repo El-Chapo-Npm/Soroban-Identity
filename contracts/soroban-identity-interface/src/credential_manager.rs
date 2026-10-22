@@ -4,8 +4,9 @@ use credential_manager::{
     BatchVerifyResult, Credential, CredentialIdsPage, CredentialManager, CredentialStorageStats,
     CredentialTemplate, CredentialTypeDescriptor, CredentialType, ContractError, DataFeedSchema,
     Escrow, EscrowConditions, EscrowDeposit, EscrowStatus, IssuersPage, OracleConfig,
-    OracleRequest, OracleResponse, RevocationReason, RevocationRecord, SignatureScheme,
-    SignedPayload, SignerSet,
+    OracleRequest, OracleResponse, PresentationTemplate, RevocationProof, RevocationReason,
+    RevocationRecord, RevocationStats, SignatureScheme, SignedPayload, SignerSet,
+    VerifiablePresentation,
 };
 use soroban_sdk::{Address, Bytes, BytesN, Env, Map, String, Vec};
 
@@ -126,6 +127,62 @@ pub trait CredentialManagerInterface {
         env: Env,
         credential_id: BytesN<32>,
     ) -> Result<RevocationRecord, ContractError>;
+
+    // ── Bitmap revocation list (#1121) ──────────────────────────────────────
+
+    /// Revoke up to 50 credentials in one call, recording the same reason for
+    /// each. Returns the number of credentials newly revoked.
+    fn batch_revoke(
+        env: Env,
+        issuer: Address,
+        credential_ids: Vec<BytesN<32>>,
+        reason: RevocationReason,
+    ) -> Result<u32, ContractError>;
+
+    /// Generate a merkle proof that `credential_id` is (or is not) revoked.
+    fn generate_revocation_proof(
+        env: Env,
+        credential_id: BytesN<32>,
+    ) -> Result<RevocationProof, ContractError>;
+
+    /// Verify a revocation proof against the on-chain revocation root.
+    fn verify_revocation_proof(env: Env, proof: RevocationProof) -> bool;
+
+    /// Aggregate revocation statistics for the bitmap revocation list.
+    fn get_revocation_stats(env: Env) -> RevocationStats;
+
+    // ── Verifiable presentations (#1123) ────────────────────────────────────
+
+    /// Create a W3C Verifiable Presentation bundling the given credentials.
+    fn create_presentation(
+        env: Env,
+        holder: Address,
+        credential_ids: Vec<BytesN<32>>,
+        challenge: Option<String>,
+        expires_at: u64,
+        template_name: Option<String>,
+    ) -> Result<BytesN<32>, ContractError>;
+
+    /// Verify a verifiable presentation, including its proofs and expiry.
+    fn verify_presentation(
+        env: Env,
+        presentation: VerifiablePresentation,
+        challenge: Option<String>,
+    ) -> Result<(), ContractError>;
+
+    /// Register a reusable presentation template.
+    fn register_presentation_template(
+        env: Env,
+        admin: Address,
+        template_name: String,
+        template: PresentationTemplate,
+    ) -> Result<(), ContractError>;
+
+    /// Fetch a registered presentation template by name.
+    fn get_presentation_template(
+        env: Env,
+        template_name: String,
+    ) -> Result<PresentationTemplate, ContractError>;
 
     fn expire_credential(
         env: Env,
@@ -515,6 +572,65 @@ impl CredentialManagerInterface for CredentialManager {
         credential_id: BytesN<32>,
     ) -> Result<RevocationRecord, ContractError> {
         Self::get_revocation(env, credential_id)
+    }
+
+    fn batch_revoke(
+        env: Env,
+        issuer: Address,
+        credential_ids: Vec<BytesN<32>>,
+        reason: RevocationReason,
+    ) -> Result<u32, ContractError> {
+        Self::batch_revoke(env, issuer, credential_ids, reason)
+    }
+
+    fn generate_revocation_proof(
+        env: Env,
+        credential_id: BytesN<32>,
+    ) -> Result<RevocationProof, ContractError> {
+        Self::generate_revocation_proof(env, credential_id)
+    }
+
+    fn verify_revocation_proof(env: Env, proof: RevocationProof) -> bool {
+        Self::verify_revocation_proof(env, proof)
+    }
+
+    fn get_revocation_stats(env: Env) -> RevocationStats {
+        Self::get_revocation_stats(env)
+    }
+
+    fn create_presentation(
+        env: Env,
+        holder: Address,
+        credential_ids: Vec<BytesN<32>>,
+        challenge: Option<String>,
+        expires_at: u64,
+        template_name: Option<String>,
+    ) -> Result<BytesN<32>, ContractError> {
+        Self::create_presentation(env, holder, credential_ids, challenge, expires_at, template_name)
+    }
+
+    fn verify_presentation(
+        env: Env,
+        presentation: VerifiablePresentation,
+        challenge: Option<String>,
+    ) -> Result<(), ContractError> {
+        Self::verify_presentation(env, presentation, challenge)
+    }
+
+    fn register_presentation_template(
+        env: Env,
+        admin: Address,
+        template_name: String,
+        template: PresentationTemplate,
+    ) -> Result<(), ContractError> {
+        Self::register_presentation_template(env, admin, template_name, template)
+    }
+
+    fn get_presentation_template(
+        env: Env,
+        template_name: String,
+    ) -> Result<PresentationTemplate, ContractError> {
+        Self::get_presentation_template(env, template_name)
     }
 
     fn expire_credential(

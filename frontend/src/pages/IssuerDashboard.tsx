@@ -16,9 +16,15 @@ import {
 } from "recharts";
 import { useContractEvents } from "../hooks/useContractEvents";
 import { useWalletContext } from "../context/WalletContext";
+import { CustomizableDashboard } from "../components/dashboard/CustomizableDashboard";
+import { DashboardWidgetDefinition } from "../components/dashboard/widgetRegistry";
 
 export interface IssuerAnalyticsProps {
   issuerAddress?: string;
+  /** Render the drag-and-drop customizable dashboard instead of the fixed layout. */
+  customizable?: boolean;
+  /** Called when the user toggles between the fixed and customizable views. */
+  onToggleCustomizable?: (customizable: boolean) => void;
 }
 
 export type TimeGranularity = "daily" | "weekly" | "monthly";
@@ -46,9 +52,25 @@ interface ReputationTrendPoint {
 const PIE_COLORS = ["#0088FE", "#00C49F", "#FFBB28", "#FF8042", "#8884d8", "#82ca9d"];
 const DAYS_OF_WEEK = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-export const IssuerDashboard: React.FC<IssuerAnalyticsProps> = ({ issuerAddress: propIssuer }) => {
+export const IssuerDashboard: React.FC<IssuerAnalyticsProps> = ({
+  issuerAddress: propIssuer,
+  customizable: customizableProp,
+  onToggleCustomizable,
+}) => {
   const wallet = useWalletContext();
   const issuer = propIssuer || wallet.publicKey || "G_ISSUER_DEFAULT_ADDRESS";
+
+  // View mode: fixed analytics layout vs. drag-and-drop customizable dashboard
+  const [customizableState, setCustomizableState] = useState<boolean>(customizableProp ?? false);
+  const isCustomizable = customizableProp ?? customizableState;
+
+  const handleToggleCustomizable = useCallback(
+    (next: boolean) => {
+      setCustomizableState(next);
+      onToggleCustomizable?.(next);
+    },
+    [onToggleCustomizable]
+  );
 
   // Date range state
   const [datePreset, setDatePreset] = useState<DatePreset>("30d");
@@ -206,6 +228,265 @@ export const IssuerDashboard: React.FC<IssuerAnalyticsProps> = ({ issuerAddress:
     return "#e0f2fe";
   };
 
+  // Widget library: existing analytics widgets registered for the customizable dashboard
+  const widgetLibrary = useMemo<DashboardWidgetDefinition[]>(
+    () => [
+      {
+        id: "issuance-over-time",
+        title: "Credential Issuance Over Time",
+        description: "Issued vs. revoked credentials across the selected granularity.",
+        defaultSize: { w: 6, h: 4 },
+        minSize: { w: 3, h: 3 },
+        render: () => (
+          <div style={{ width: "100%", height: "100%" }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={issuanceSeriesData} margin={{ top: 10, right: 20, left: -20, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="widgetColorIssued" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#2563eb" stopOpacity={0.8} />
+                    <stop offset="95%" stopColor="#2563eb" stopOpacity={0} />
+                  </linearGradient>
+                  <linearGradient id="widgetColorRevoked" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#ef4444" stopOpacity={0.8} />
+                    <stop offset="95%" stopColor="#ef4444" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} opacity={0.3} />
+                <XAxis dataKey="date" fontSize={11} />
+                <YAxis fontSize={11} />
+                <Tooltip />
+                <Legend />
+                <Area
+                  type="monotone"
+                  dataKey="issued"
+                  name="Issued"
+                  stroke="#2563eb"
+                  fillOpacity={1}
+                  fill="url(#widgetColorIssued)"
+                />
+                <Area
+                  type="monotone"
+                  dataKey="revoked"
+                  name="Revoked"
+                  stroke="#ef4444"
+                  fillOpacity={1}
+                  fill="url(#widgetColorRevoked)"
+                />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        ),
+      },
+      {
+        id: "credential-type-distribution",
+        title: "Credential Type Distribution",
+        description: "Breakdown of issued credentials by type.",
+        defaultSize: { w: 6, h: 4 },
+        minSize: { w: 3, h: 3 },
+        render: () => (
+          <div style={{ width: "100%", height: "100%" }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <PieChart>
+                <Pie
+                  data={credentialTypeData}
+                  cx="50%"
+                  cy="50%"
+                  outerRadius={85}
+                  innerRadius={45}
+                  dataKey="value"
+                  label={({ name, percent }) => `${name} (${((percent || 0) * 100).toFixed(0)}%)`}
+                  labelLine={false}
+                >
+                  {credentialTypeData.map((_, index) => (
+                    <Cell key={`widget-cell-${index}`} fill={PIE_COLORS[index % PIE_COLORS.length]} />
+                  ))}
+                </Pie>
+                <Tooltip />
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
+        ),
+      },
+      {
+        id: "verification-heatmap",
+        title: "Verification Heatmap (Day & Hour)",
+        description: "Verification volume by day of week and hour.",
+        defaultSize: { w: 6, h: 4 },
+        minSize: { w: 4, h: 3 },
+        render: () => (
+          <div style={{ overflowX: "auto", height: "100%" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.75rem" }}>
+              <thead>
+                <tr>
+                  <th style={{ padding: "0.35rem", textAlign: "left" }}>Day</th>
+                  {heatmapData.hours.map((h) => (
+                    <th key={h} style={{ padding: "0.35rem", textAlign: "center" }}>
+                      {h}:00
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {heatmapData.days.map((day) => (
+                  <tr key={day}>
+                    <td style={{ padding: "0.35rem", fontWeight: 600 }}>{day}</td>
+                    {heatmapData.hours.map((h) => {
+                      const count = heatmapData.data[day]?.[h] || 0;
+                      return (
+                        <td key={h} style={{ padding: "0.35rem", textAlign: "center" }}>
+                          <div
+                            title={`${day} @ ${h}:00 - ${count} verifications`}
+                            style={{
+                              backgroundColor: getHeatmapColor(count),
+                              color: count > 30 ? "#fff" : "#1e293b",
+                              padding: "0.35rem 0.2rem",
+                              borderRadius: "0.25rem",
+                              fontWeight: 500,
+                              cursor: "default",
+                            }}
+                          >
+                            {count}
+                          </div>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ),
+      },
+      {
+        id: "reputation-trend",
+        title: "Reputation Score Trend",
+        description: "Reputation score and confidence over time.",
+        defaultSize: { w: 6, h: 4 },
+        minSize: { w: 3, h: 3 },
+        render: () => (
+          <div style={{ width: "100%", height: "100%" }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={reputationTrendData} margin={{ top: 10, right: 20, left: -20, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} opacity={0.3} />
+                <XAxis dataKey="date" fontSize={11} />
+                <YAxis domain={[60, 100]} fontSize={11} />
+                <Tooltip />
+                <Legend />
+                <Line
+                  type="monotone"
+                  dataKey="score"
+                  name="Reputation Score"
+                  stroke="#10b981"
+                  strokeWidth={2.5}
+                  dot={{ r: 3 }}
+                  activeDot={{ r: 6 }}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="confidence"
+                  name="Confidence %"
+                  stroke="#6366f1"
+                  strokeWidth={1.5}
+                  strokeDasharray="4 4"
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        ),
+      },
+      {
+        id: "key-metrics",
+        title: "Key Metrics",
+        description: "Summary of total issued, active, revocation rate and reputation.",
+        defaultSize: { w: 12, h: 2 },
+        minSize: { w: 4, h: 2 },
+        render: () => (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
+              gap: "0.75rem",
+              height: "100%",
+            }}
+          >
+            {[
+              { label: "Total Issued", value: metrics.totalIssued.toLocaleString(), color: "#0f172a" },
+              { label: "Active", value: metrics.activeCredentials.toLocaleString(), color: "#2563eb" },
+              { label: "Revocation Rate", value: metrics.revocationRate, color: "#ef4444" },
+              { label: "Reputation", value: `${metrics.reputationScore} / 100`, color: "#059669" },
+            ].map((m) => (
+              <div key={m.label} style={{ padding: "0.5rem" }}>
+                <div style={{ color: "var(--text-muted, #64748b)", fontSize: "0.75rem", fontWeight: 500 }}>
+                  {m.label}
+                </div>
+                <div style={{ fontSize: "1.25rem", fontWeight: 700, color: m.color }}>{m.value}</div>
+              </div>
+            ))}
+          </div>
+        ),
+      },
+    ],
+    [issuanceSeriesData, credentialTypeData, heatmapData, reputationTrendData, metrics]
+  );
+
+  if (isCustomizable) {
+    return (
+      <div
+        ref={dashboardRef}
+        className="issuer-dashboard-container"
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: "1.5rem",
+          maxWidth: "1400px",
+          margin: "0 auto",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: "1rem",
+            background: "var(--card-bg, #ffffff)",
+            padding: "1.25rem",
+            borderRadius: "0.75rem",
+            boxShadow: "0 1px 3px rgba(0,0,0,0.1)",
+          }}
+        >
+          <div>
+            <h1 style={{ margin: 0, fontSize: "1.5rem", fontWeight: 700 }}>
+              Issuer Credential Analytics
+            </h1>
+            <p style={{ margin: "0.25rem 0 0", color: "var(--text-muted, #64748b)", fontSize: "0.875rem" }}>
+              Issuer: <code style={{ wordBreak: "break-all" }}>{issuer}</code>
+            </p>
+          </div>
+          <button
+            onClick={() => handleToggleCustomizable(false)}
+            style={{
+              padding: "0.45rem 1rem",
+              borderRadius: "0.375rem",
+              background: "#0f172a",
+              color: "#fff",
+              border: "none",
+              cursor: "pointer",
+              fontWeight: 500,
+            }}
+          >
+            Exit Customize Mode
+          </button>
+        </div>
+
+        <CustomizableDashboard
+          storageKey={`issuer-dashboard-layout:${issuer}`}
+          widgets={widgetLibrary}
+        />
+      </div>
+    );
+  }
+
   return (
     <div
       ref={dashboardRef}
@@ -287,6 +568,25 @@ export const IssuerDashboard: React.FC<IssuerAnalyticsProps> = ({ issuerAddress:
               />
             </div>
           )}
+
+          {/* Customize Dashboard Button */}
+          <button
+            onClick={() => handleToggleCustomizable(true)}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "0.5rem",
+              padding: "0.45rem 1rem",
+              borderRadius: "0.375rem",
+              background: "var(--primary-color, #2563eb)",
+              color: "#fff",
+              border: "none",
+              cursor: "pointer",
+              fontWeight: 500,
+            }}
+          >
+            <span>Customize Dashboard</span>
+          </button>
 
           {/* PDF Export Button */}
           <button

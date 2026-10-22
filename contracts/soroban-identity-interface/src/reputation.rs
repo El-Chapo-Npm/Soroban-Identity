@@ -117,6 +117,55 @@ pub trait ReputationInterface {
     fn clear_reporter_decay_rate(env: Env, admin: Address, reporter: Address) -> Result<(), ContractError>;
 
     fn get_reporter_decay_rate(env: Env, reporter: Address) -> DecayConfig;
+
+    fn deposit_stake(
+        env: Env,
+        holder: Address,
+        amount: i128,
+    ) -> Result<(), ContractError>;
+
+    fn request_unstake(
+        env: Env,
+        holder: Address,
+        amount: i128,
+    ) -> Result<(), ContractError>;
+
+    fn withdraw_stake(env: Env, holder: Address) -> Result<i128, ContractError>;
+
+    fn slash_stake(
+        env: Env,
+        admin: Address,
+        holder: Address,
+        amount: i128,
+    ) -> Result<(), ContractError>;
+
+    fn distribute_rewards(
+        env: Env,
+        admin: Address,
+        total_reward: i128,
+    ) -> Result<(), ContractError>;
+
+    fn delegate_stake(
+        env: Env,
+        delegator: Address,
+        delegatee: Address,
+        amount: i128,
+    ) -> Result<(), ContractError>;
+
+    fn revoke_delegation(
+        env: Env,
+        delegator: Address,
+        delegatee: Address,
+    ) -> Result<(), ContractError>;
+
+    fn get_stake(env: Env, holder: Address) -> i128;
+
+    fn get_staking_history(
+        env: Env,
+        holder: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<ScoreEntry>, ContractError>;
 }
 
 /// Blanket implementation delegating to `Reputation`'s existing
@@ -279,5 +328,72 @@ impl ReputationInterface for Reputation {
 
     fn get_reporter_decay_rate(env: Env, reporter: Address) -> DecayConfig {
         Self::get_reporter_decay_rate(env, reporter)
+    }
+
+    fn deposit_stake(
+        env: Env,
+        holder: Address,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        Self::deposit_stake(env, holder, amount)
+    }
+
+    fn request_unstake(
+        env: Env,
+        holder: Address,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        Self::request_unstake(env, holder, amount)
+    }
+
+    fn withdraw_stake(env: Env, holder: Address) -> Result<i128, ContractError> {
+        Self::withdraw_stake(env, holder)
+    }
+
+    fn slash_stake(
+        env: Env,
+        admin: Address,
+        holder: Address,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        Self::slash_stake(env, admin, holder, amount)
+    }
+
+    fn distribute_rewards(
+        env: Env,
+        admin: Address,
+        total_reward: i128,
+    ) -> Result<(), ContractError> {
+        Self::distribute_rewards(env, admin, total_reward)
+    }
+
+    fn delegate_stake(
+        env: Env,
+        delegator: Address,
+        delegatee: Address,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        Self::delegate_stake(env, delegator, delegatee, amount)
+    }
+
+    fn revoke_delegation(
+        env: Env,
+        delegator: Address,
+        delegatee: Address,
+    ) -> Result<(), ContractError> {
+        Self::revoke_delegation(env, delegator, delegatee)
+    }
+
+    fn get_stake(env: Env, holder: Address) -> i128 {
+        Self::get_stake(env, holder)
+    }
+
+    fn get_staking_history(
+        env: Env,
+        holder: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<ScoreEntry>, ContractError> {
+        Self::get_staking_history(env, holder, offset, limit)
     }
 }

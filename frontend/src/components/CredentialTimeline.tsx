@@ -15,6 +15,10 @@
 import { useRef, useState, useCallback, useEffect, useMemo } from "react";
 import type { Credential } from "../../../sdk/src/types";
 import { formatTimestamp } from "../utils/formatDate";
+import {
+  useCredentialVersioning,
+  type CredentialVersion,
+} from "../hooks/useCredentialVersioning";
 
 // ── Activity feed types ───────────────────────────────────────────────────────
 
@@ -112,20 +116,10 @@ interface Props {
   credential?: Credential;
   /** Optional additional verified-at timestamps from external checks. */
   verifiedAt?: number[];
-  /**
-   * Activity feed mode: when provided, renders a chronological vertical
-   * timeline of recent credential / DID operations instead of the
-   * single-credential horizontal timeline.
-   */
-  events?: StreamedContractEvent[];
-  /** Stellar network used for explorer links (e.g. "testnet", "public"). */
-  network?: string;
-  /** Called when the user scrolls near the bottom of the feed. */
-  onLoadMore?: () => void;
-  /** Whether more history is available (enables infinite scroll). */
-  hasMore?: boolean;
-  /** Whether a page of history is currently loading. */
-  loadingMore?: boolean;
+  /** Called when the user requests a comparison view for a version. */
+  onCompareVersion?: (version: CredentialVersion) => void;
+  /** Called when the user requests restoring a version. */
+  onRestoreVersion?: (version: CredentialVersion) => void;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -233,40 +227,9 @@ function buildEvents(credential: Credential, verifiedAt: number[] = []): Timelin
 export default function CredentialTimeline({
   credential,
   verifiedAt = [],
-  events,
-  network = "testnet",
-  onLoadMore,
-  hasMore = false,
-  loadingMore = false,
+  onCompareVersion,
+  onRestoreVersion,
 }: Props) {
-  if (events !== undefined) {
-    return (
-      <ActivityFeed
-        events={events}
-        network={network}
-        onLoadMore={onLoadMore}
-        hasMore={hasMore}
-        loadingMore={loadingMore}
-      />
-    );
-  }
-
-  if (!credential) {
-    return null;
-  }
-
-  return <SingleCredentialTimeline credential={credential} verifiedAt={verifiedAt} />;
-}
-
-// ── Single-credential horizontal timeline ─────────────────────────────────────
-
-function SingleCredentialTimeline({
-  credential,
-  verifiedAt,
-}: {
-  credential: Credential;
-  verifiedAt: number[];
-}) {
   const allEvents = buildEvents(credential, verifiedAt);
 
   const [activeFilters, setActiveFilters] = useState<Set<TimelineEventType>>(
@@ -281,6 +244,73 @@ function SingleCredentialTimeline({
   const dragStartX = useRef(0);
   const panAtDragStart = useRef(0);
   const exportCanvasRef = useRef<HTMLCanvasElement>(null);
+
+  // ── Version history state ────────────────────────────────────────────────
+  const {
+    versions,
+    branches,
+    selectedVersionId,
+    selectVersion,
+    annotateVersion,
+    restoreVersion,
+    branchFromVersion,
+  } = useCredentialVersioning(credential.id);
+
+  const [editingAnnotationId, setEditingAnnotationId] = useState<string | null>(null);
+  const [annotationDraft, setAnnotationDraft] = useState("");
+
+  const sortedVersions = useMemo(
+    () => [...versions].sort((a, b) => b.timestamp - a.timestamp),
+    [versions],
+  );
+
+  const branchNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    branches.forEach((b) => map.set(b.id, b.name));
+    return map;
+  }, [branches]);
+
+  const handleStartAnnotation = useCallback((version: CredentialVersion) => {
+    setEditingAnnotationId(version.id);
+    setAnnotationDraft(version.annotation ?? "");
+  }, []);
+
+  const handleSaveAnnotation = useCallback(
+    (versionId: string) => {
+      annotateVersion(versionId, annotationDraft.trim());
+      setEditingAnnotationId(null);
+      setAnnotationDraft("");
+    },
+    [annotateVersion, annotationDraft],
+  );
+
+  const handleCancelAnnotation = useCallback(() => {
+    setEditingAnnotationId(null);
+    setAnnotationDraft("");
+  }, []);
+
+  const handleCompare = useCallback(
+    (version: CredentialVersion) => {
+      selectVersion(version.id);
+      onCompareVersion?.(version);
+    },
+    [selectVersion, onCompareVersion],
+  );
+
+  const handleRestore = useCallback(
+    (version: CredentialVersion) => {
+      restoreVersion(version.id);
+      onRestoreVersion?.(version);
+    },
+    [restoreVersion, onRestoreVersion],
+  );
+
+  const handleBranch = useCallback(
+    (version: CredentialVersion) => {
+      branchFromVersion(version.id);
+    },
+    [branchFromVersion],
+  );
 
   const filteredEvents = allEvents.filter((e) => activeFilters.has(e.type));
 
@@ -707,6 +737,264 @@ function SingleCredentialTimeline({
           </button>
         </div>
       )}
+
+      {/* ── Version history ─────────────────────────────────────────────── */}
+      <section
+        aria-label="Credential version history"
+        style={{
+          marginTop: "1rem",
+          paddingTop: "0.75rem",
+          borderTop: "1px solid var(--border-input, #333)",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: "0.5rem",
+            marginBottom: "0.5rem",
+          }}
+        >
+          <h4 style={{ margin: 0, fontSize: "0.9rem", fontWeight: 600 }}>
+            Version history
+          </h4>
+          <span style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>
+            {sortedVersions.length} version{sortedVersions.length === 1 ? "" : "s"}
+          </span>
+        </div>
+
+        {sortedVersions.length === 0 ? (
+          <p style={{ fontSize: "0.8rem", color: "var(--text-muted)", margin: 0 }}>
+            No version history recorded yet.
+          </p>
+        ) : (
+          <ol
+            style={{
+              listStyle: "none",
+              margin: 0,
+              padding: 0,
+              display: "flex",
+              flexDirection: "column",
+              gap: "0.5rem",
+            }}
+          >
+            {sortedVersions.map((version) => {
+              const isSelected = selectedVersionId === version.id;
+              const isEditing = editingAnnotationId === version.id;
+              const branchName = version.branchId
+                ? branchNameById.get(version.branchId)
+                : undefined;
+
+              return (
+                <li
+                  key={version.id}
+                  style={{
+                    padding: "0.5rem 0.7rem",
+                    borderRadius: "0.5rem",
+                    border: `1px solid ${
+                      isSelected
+                        ? EVENT_COLORS.amended
+                        : "var(--border-input, #333)"
+                    }`,
+                    background: isSelected
+                      ? EVENT_BG.amended
+                      : "var(--card-bg, #16213e)",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "0.35rem",
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      flexWrap: "wrap",
+                      gap: "0.35rem",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", flexWrap: "wrap" }}>
+                      <span
+                        style={{
+                          fontSize: "0.75rem",
+                          fontWeight: 700,
+                          color: EVENT_COLORS.amended,
+                        }}
+                      >
+                        v{version.version}
+                      </span>
+                      <span style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>
+                        {formatTimestamp(version.timestamp)}
+                      </span>
+                      {version.author && (
+                        <span style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>
+                          · {version.author}
+                        </span>
+                      )}
+                      {branchName && (
+                        <span
+                          title={`Branch: ${branchName}`}
+                          style={{
+                            fontSize: "0.65rem",
+                            padding: "0.05rem 0.4rem",
+                            borderRadius: "999px",
+                            border: `1px solid ${EVENT_COLORS.issued}`,
+                            color: EVENT_COLORS.issued,
+                            background: EVENT_BG.issued,
+                          }}
+                        >
+                          ⑂ {branchName}
+                        </span>
+                      )}
+                    </div>
+
+                    <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
+                      <button
+                        type="button"
+                        onClick={() => handleCompare(version)}
+                        title="Compare this version"
+                        style={{
+                          padding: "0.15rem 0.55rem",
+                          borderRadius: "0.35rem",
+                          border: "1px solid var(--border-input)",
+                          background: "transparent",
+                          color: "var(--text-muted)",
+                          cursor: "pointer",
+                          fontSize: "0.7rem",
+                        }}
+                      >
+                        ⇄ Compare
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleBranch(version)}
+                        title="Create a branch from this version"
+                        style={{
+                          padding: "0.15rem 0.55rem",
+                          borderRadius: "0.35rem",
+                          border: "1px solid var(--border-input)",
+                          background: "transparent",
+                          color: "var(--text-muted)",
+                          cursor: "pointer",
+                          fontSize: "0.7rem",
+                        }}
+                      >
+                        ⑂ Branch
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleRestore(version)}
+                        title="Restore this version"
+                        style={{
+                          padding: "0.15rem 0.55rem",
+                          borderRadius: "0.35rem",
+                          border: `1px solid ${EVENT_COLORS.verified}`,
+                          background: "transparent",
+                          color: EVENT_COLORS.verified,
+                          cursor: "pointer",
+                          fontSize: "0.7rem",
+                        }}
+                      >
+                        ↺ Restore
+                      </button>
+                    </div>
+                  </div>
+
+                  {isEditing ? (
+                    <div style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
+                      <input
+                        type="text"
+                        value={annotationDraft}
+                        onChange={(e) => setAnnotationDraft(e.target.value)}
+                        placeholder="Add a note for this version…"
+                        aria-label={`Annotation for version ${version.version}`}
+                        style={{
+                          flex: 1,
+                          padding: "0.25rem 0.5rem",
+                          borderRadius: "0.35rem",
+                          border: "1px solid var(--border-input)",
+                          background: "transparent",
+                          color: "inherit",
+                          fontSize: "0.75rem",
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleSaveAnnotation(version.id)}
+                        style={{
+                          padding: "0.15rem 0.55rem",
+                          borderRadius: "0.35rem",
+                          border: `1px solid ${EVENT_COLORS.verified}`,
+                          background: "transparent",
+                          color: EVENT_COLORS.verified,
+                          cursor: "pointer",
+                          fontSize: "0.7rem",
+                        }}
+                      >
+                        Save
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleCancelAnnotation}
+                        style={{
+                          padding: "0.15rem 0.55rem",
+                          borderRadius: "0.35rem",
+                          border: "1px solid var(--border-input)",
+                          background: "transparent",
+                          color: "var(--text-muted)",
+                          cursor: "pointer",
+                          fontSize: "0.7rem",
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: "0.5rem",
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontSize: "0.75rem",
+                          color: version.annotation
+                            ? "inherit"
+                            : "var(--text-muted)",
+                          fontStyle: version.annotation ? "normal" : "italic",
+                        }}
+                      >
+                        {version.annotation || "No annotation"}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleStartAnnotation(version)}
+                        title="Edit annotation"
+                        style={{
+                          padding: "0.1rem 0.45rem",
+                          borderRadius: "0.35rem",
+                          border: "1px solid var(--border-input)",
+                          background: "transparent",
+                          color: "var(--text-muted)",
+                          cursor: "pointer",
+                          fontSize: "0.7rem",
+                        }}
+                      >
+                        ✎ Note
+                      </button>
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ol>
+        )}
+      </section>
 
       {/* Hidden canvas for PNG export */}
       <canvas ref={exportCanvasRef} style={{ display: "none" }} aria-hidden="true" />

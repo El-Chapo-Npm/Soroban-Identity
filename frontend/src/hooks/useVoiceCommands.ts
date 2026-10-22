@@ -309,7 +309,10 @@ export function useVoiceCommands(
     };
   }, [onSearch, onNavigate, onVerify, onCommand, onUnrecognized, onError]);
 
-  /* ----------------------------- Command registry ---------------------------- */
+  const customCommandsRef = useRef(customCommands);
+  useEffect(() => {
+    customCommandsRef.current = customCommands;
+  }, [customCommands]);
 
   const commandRegistry = useMemo<Record<VoiceCommandAction, string[]>>(() => {
     const t = i18n.getFixedT(resolvedLang);
@@ -336,6 +339,8 @@ export function useVoiceCommands(
       if (typeof value === 'string') return [value];
       return fallback;
     };
+
+    const recordCommands = (!Array.isArray(customCommands) ? customCommands : undefined);
 
     return {
       search: ensureArray(dictCommands?.search ?? localized.search, DEFAULT_COMMANDS.search),

@@ -68,6 +68,10 @@ import {
   buildUpdateSignersArgs,
   buildValidateThresholdArgs,
   buildAggregateSignaturesArgs,
+  buildBatchRevokeArgs,
+  buildGenerateRevocationProofArgs,
+  buildVerifyRevocationProofArgs,
+  buildGetRevocationStatsArgs,
 } from "./contract-args";
 
 const PROBE_ADDRESS = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
@@ -142,6 +146,59 @@ export interface MerkleTree {
   leaves: string[];
   /** All tree levels, `levels[0]` being the leaves and the last level the root. */
   levels: string[][];
+}
+
+/**
+ * Options for {@link CredentialClient.batchRevoke}. #1121
+ */
+export interface BatchRevokeOptions extends CallOptions {
+  /** Revocation reason code recorded for every credential in the batch. */
+  reason?: RevocationReason;
+}
+
+/**
+ * Result of {@link CredentialClient.batchRevoke}. #1121
+ */
+export interface BatchRevokeResult {
+  /** Hex-encoded credential IDs that were revoked. */
+  revoked: string[];
+  /** Number of credentials revoked in this call. */
+  count: number;
+  /** The on-chain transaction hash. */
+  txHash: string;
+}
+
+/**
+ * A bitmap-based revocation proof. #1121
+ *
+ * The contract stores revocations in a bitmap keyed by issuer; a proof
+ * consists of the word index within the bitmap, the bit position within that
+ * word, and the word value itself, which lets a verifier check the bit
+ * without reading the whole list.
+ */
+export interface RevocationProof {
+  /** Hex-encoded credential ID the proof is for. */
+  credentialId: string;
+  /** Index of the bitmap word containing the credential's bit. */
+  wordIndex: number;
+  /** Bit position (0-255) within the word. */
+  bitIndex: number;
+  /** The bitmap word value as a bigint. */
+  word: bigint;
+  /** Whether the bit is set (credential revoked). */
+  revoked: boolean;
+}
+
+/**
+ * Aggregated revocation statistics for an issuer. #1121
+ */
+export interface RevocationStats {
+  /** Total number of revoked credentials. */
+  totalRevoked: number;
+  /** Number of bitmap words currently allocated. */
+  wordCount: number;
+  /** Per-reason revocation counts, keyed by {@link RevocationReason}. */
+  byReason: Record<number, number>;
 }
 
 /**
@@ -2398,5 +2455,185 @@ export class CredentialClient extends BaseClient {
     } catch (e) {
       throw wrapError(e);
     }
+  }
+
+  /**
+   * Revoke multiple credentials in a single transaction using the on-chain
+   * bitmap-based revocation list. #1121
+   *
+   * Unlike {@link revokeBatch}, this entry point writes into the gas-efficient
+   * bitmap storage and records a single reason code for the whole batch.
+   *
+   * @param issuerKeypair The registered issuer signing the transaction.
+   * @param credentialIds Hex-encoded 32-byte credential IDs to revoke.
+   * @param options       Per-call overrides plus an optional `reason`.
+   * @returns The revoked IDs, their count, and the transaction hash.
+   */
+  async batchRevoke(
+    issuerKeypair: Keypair,
+    credentialIds: string[],
+    options?: BatchRevokeOptions
+  ): Promise<BatchRevokeResult> {
+    if (!Array.isArray(credentialIds) || credentialIds.length === 0) {
+      throw new SorobanIdentityError(
+        'InvalidBatch: at least one credential ID is required',
+        'VALIDATION_ERROR'
+      );
+    }
+    const normalized = credentialIds.map(normalizeCredentialIdHex);
+    const account = await this.server.getAccount(issuerKeypair.publicKey());
+    const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
+
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        this.contract.call(
+          'batch_revoke',
+          ...buildBatchRevokeArgs({
+            issuer: issuerKeypair.publicKey(),
+            credentialIds: normalized.map((id) => Buffer.from(id, 'hex')),
+            reason: options?.reason,
+          })
+        )
+      )
+      .setTimeout(timeout)
+      .build();
+
+    try {
+      const prepared = await retryWithBackoff(() => this.server.prepareTransaction(tx));
+      prepared.sign(issuerKeypair);
+
+      const result = await retryWithBackoff(() => this.server.sendTransaction(prepared));
+      this.debug('sdk.submission_outcome', { operation: 'credentials.batchRevoke', status: result.status });
+      if (result.status !== 'PENDING') {
+        throw new SorobanIdentityError(`Transaction failed: ${result.status}`, 'CONTRACT_ERROR');
+      }
+
+      const txHash = result.hash;
+      await pollTransactionStatus(this.server, txHash);
+      return { revoked: normalized, count: normalized.length, txHash };
+    } catch (e) {
+      throw wrapError(e);
+    }
+  }
+
+  /**
+   * Generate a bitmap revocation proof for a credential. #1121
+   *
+   * The proof is produced by the contract from the on-chain bitmap and can be
+   * checked locally with {@link verifyRevocationProof} or on-chain with
+   * {@link verifyRevocationProofOnChain}.
+   *
+   * @param callerAddress Any valid Stellar address used to build the read simulation.
+   * @param issuerAddress The issuer whose bitmap to query.
+   * @param credentialId  Hex-encoded 32-byte credential ID.
+   * @param options       Per-call overrides.
+   * @returns The {@link RevocationProof}, or `null` when no proof is available.
+   */
+  async generateRevocationProof(
+    callerAddress: string,
+    issuerAddress: string,
+    credentialId: string,
+    options?: CallOptions
+  ): Promise<RevocationProof | null> {
+    validateStellarAddress(issuerAddress);
+    const idHex = normalizeCredentialIdHex(credentialId);
+    const raw = await this.simulateRead(
+      callerAddress,
+      'generate_revocation_proof',
+      buildGenerateRevocationProofArgs({
+        issuer: issuerAddress,
+        credentialId: Buffer.from(idHex, 'hex'),
+      }),
+      options
+    ) as
+      | { credential_id: Uint8Array; word_index: number; bit_index: number; word: bigint; revoked: boolean }
+      | null;
+    if (!raw) return null;
+    return {
+      credentialId: Buffer.from(raw.credential_id).toString('hex'),
+      wordIndex: Number(raw.word_index),
+      bitIndex: Number(raw.bit_index),
+      word: BigInt(raw.word),
+      revoked: Boolean(raw.revoked),
+    };
+  }
+
+  /**
+   * Verify a bitmap revocation proof client-side, without any network calls. #1121
+   *
+   * Recomputes the bit from `proof.word` and compares it to `proof.revoked`.
+   *
+   * @param proof The proof returned by {@link generateRevocationProof}.
+   * @returns `true` when the proof is internally consistent.
+   */
+  verifyRevocationProof(proof: RevocationProof): boolean {
+    if (!proof || typeof proof.wordIndex !== 'number' || typeof proof.bitIndex !== 'number') {
+      return false;
+    }
+    if (proof.bitIndex < 0 || proof.bitIndex > 255) return false;
+    const bit = (proof.word >> BigInt(proof.bitIndex)) & BigInt(1);
+    return (bit === BigInt(1)) === proof.revoked;
+  }
+
+  /**
+   * Verify a bitmap revocation proof against the on-chain bitmap. #1121
+   *
+   * This is a read-only simulation; the proof is checked by the contract so the
+   * caller does not need to trust a locally-cached bitmap.
+   */
+  async verifyRevocationProofOnChain(
+    callerAddress: string,
+    issuerAddress: string,
+    proof: RevocationProof,
+    options?: CallOptions
+  ): Promise<boolean> {
+    validateStellarAddress(issuerAddress);
+    const result = await this.simulateRead(
+      callerAddress,
+      'verify_revocation_proof',
+      buildVerifyRevocationProofArgs({
+        issuer: issuerAddress,
+        credentialId: Buffer.from(normalizeCredentialIdHex(proof.credentialId), 'hex'),
+        wordIndex: proof.wordIndex,
+        bitIndex: proof.bitIndex,
+        word: proof.word,
+      }),
+      options
+    );
+    return result === true;
+  }
+
+  /**
+   * Fetch aggregated revocation statistics for an issuer from the bitmap. #1121
+   *
+   * @param callerAddress Any valid Stellar address used to build the read simulation.
+   * @param issuerAddress The issuer whose statistics to fetch.
+   * @param options       Per-call overrides.
+   * @returns The {@link RevocationStats} for the issuer.
+   */
+  async getRevocationStats(
+    callerAddress: string,
+    issuerAddress: string,
+    options?: CallOptions
+  ): Promise<RevocationStats> {
+    validateStellarAddress(issuerAddress);
+    const raw = await this.simulateRead(
+      callerAddress,
+      'get_revocation_stats',
+      buildGetRevocationStatsArgs({ issuer: issuerAddress }),
+      options
+    ) as { total_revoked: number; word_count: number; by_reason: Array<[number, number]> } | null;
+    const byReason: Record<number, number> = {};
+    for (const [reason, count] of raw?.by_reason ?? []) {
+      byReason[Number(reason)] = Number(count);
+    }
+    return {
+      totalRevoked: Number(raw?.total_revoked ?? 0),
+      wordCount: Number(raw?.word_count ?? 0),
+      byReason,
+    };
   }
 }

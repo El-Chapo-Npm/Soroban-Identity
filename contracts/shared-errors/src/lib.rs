@@ -60,6 +60,16 @@ pub enum IdentityRegistryError {
     SignerRotationTimelockActive = 22,
     /// The guardian approvals are insufficient for the operation.
     InsufficientGuardianApprovals = 23,
+    /// The DID method in the supplied DID is not supported.
+    UnknownDidMethod = 24,
+    /// The resolved DID document failed validation.
+    InvalidDidDocument = 25,
+    /// The requested resolver plugin was not found.
+    ResolverPluginNotFound = 26,
+    /// The resolver fallback chain was exhausted without a result.
+    FallbackChainExhausted = 27,
+    /// The requested DID was not present in the resolver cache.
+    CacheMiss = 28,
 }
 
 /// Errors returned by the credential-manager contract.
@@ -113,4 +123,30 @@ pub enum CredentialManagerError {
     SignerNotAuthorized = 22,
     /// The configured signer set is invalid.
     InvalidSignerSet = 23,
+    /// The supplied bitmap index is out of range.
+    InvalidBitmapIndex = 24,
+    /// The supplied batch exceeds the maximum allowed size.
+    BatchTooLarge = 25,
+    /// The supplied revocation proof is invalid.
+    RevocationProofInvalid = 26,
+    /// The supplied merkle proof is invalid.
+    MerkleProofInvalid = 27,
+    /// The supplied stake is insufficient for the operation.
+    InsufficientStake = 28,
+    /// The unstake cooldown period is still active.
+    UnstakeCooldownActive = 29,
+    /// The slash amount exceeds the maximum allowed.
+    SlashExceedsMax = 30,
+    /// The requested delegation was not found.
+    DelegationNotFound = 31,
+    /// The staking reward pool is empty.
+    RewardPoolEmpty = 32,
+    /// The supplied presentation is malformed.
+    InvalidPresentation = 33,
+    /// The presentation challenge does not match.
+    ChallengeMismatch = 34,
+    /// The presentation has expired.
+    PresentationExpired = 35,
+    /// The presentation proof format is not supported.
+    UnsupportedProofFormat = 36,
 }

@@ -201,6 +201,142 @@ impl TransferPolicy {
 
 pub const TRANSFER_REQUEST_TTL: u64 = 7 * 24 * 60 * 60;
 
+/// Number of credential slots addressed by a single bitmap word (u64).
+pub const BITMAP_WORD_BITS: u32 = 64;
+
+/// Number of words packed into a single bitmap page.
+pub const BITMAP_PAGE_WORDS: u32 = 16;
+
+/// Number of credential slots addressed by a single bitmap page.
+pub const BITMAP_PAGE_BITS: u32 = BITMAP_WORD_BITS * BITMAP_PAGE_WORDS;
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BitmapWord {
+    pub index: u32,
+    pub bits: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BitmapPage {
+    pub index: u32,
+    pub words: soroban_sdk::Vec<BitmapWord>,
+    pub set_count: u32,
+}
+
+impl BitmapPage {
+    pub fn is_set(&self, bit: u32) -> bool {
+        let word_index = bit / BITMAP_WORD_BITS;
+        let bit_offset = bit % BITMAP_WORD_BITS;
+        match self.words.get(word_index) {
+            Some(word) => (word.bits >> bit_offset) & 1 == 1,
+            None => false,
+        }
+    }
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RevocationProof {
+    pub credential_id: BytesN<32>,
+    pub page_index: u32,
+    pub word_index: u32,
+    pub bit_offset: u32,
+    pub word: u64,
+    pub merkle_path: soroban_sdk::Vec<BytesN<32>>,
+    pub merkle_root: BytesN<32>,
+    pub revoked: bool,
+    pub reason: RevocationReason,
+    pub revoked_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RevocationStats {
+    pub total_revoked: u64,
+    pub total_pages: u32,
+    pub total_words: u32,
+    pub last_revoked_at: u64,
+    pub reason_counts: Map<u32, u64>,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum PresentationProofFormat {
+    Jwt = 0,
+    LdProof = 1,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PresentationProof {
+    pub format: PresentationProofFormat,
+    pub proof_value: Bytes,
+    pub verification_method: String,
+    pub created_at: u64,
+    pub challenge: Option<String>,
+    pub domain: Option<String>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PresentationCredential {
+    pub credential_id: BytesN<32>,
+    pub disclosed_claims: soroban_sdk::Vec<String>,
+    pub credential: Credential,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct VerifiablePresentation {
+    pub id: BytesN<32>,
+    pub holder: Address,
+    pub credentials: soroban_sdk::Vec<PresentationCredential>,
+    pub proof: PresentationProof,
+    pub challenge: Option<String>,
+    pub created_at: u64,
+    pub expires_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PresentationTemplate {
+    pub id: BytesN<32>,
+    pub name: String,
+    pub required_credential_types: soroban_sdk::Vec<CredentialType>,
+    pub required_claims: soroban_sdk::Vec<String>,
+    pub proof_format: PresentationProofFormat,
+    pub default_ttl: u64,
+    pub requires_challenge: bool,
+}
+
+pub mod revocation_keys {
+    use soroban_sdk::{contracttype, BytesN};
+
+    #[contracttype]
+    #[derive(Clone, Debug, PartialEq)]
+    pub enum RevocationKey {
+        Page(u32),
+        Record(BytesN<32>),
+        Stats,
+        MerkleRoot,
+    }
+}
+
+pub mod presentation_keys {
+    use soroban_sdk::{contracttype, BytesN};
+
+    #[contracttype]
+    #[derive(Clone, Debug, PartialEq)]
+    pub enum PresentationKey {
+        Presentation(BytesN<32>),
+        Template(BytesN<32>),
+        UsedChallenge(BytesN<32>),
+    }
+}
+
 pub mod transfer_keys {
     use soroban_sdk::{contracttype, BytesN};
 

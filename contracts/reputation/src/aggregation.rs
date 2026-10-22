@@ -109,6 +109,65 @@ pub fn get_stake_weighted_reputation(stakes: &[(i64, i64)]) -> Option<i64> {
     }
 }
 
+/// Returns the total amount staked across all positive entries in `stakes`.
+///
+/// Non-positive stake amounts are ignored so the aggregate matches the
+/// accounting used by [`get_stake_stats`].
+pub fn get_total_staked(stakes: &[(i64, i64)]) -> i64 {
+    get_stake_stats(stakes).total_staked
+}
+
+/// Returns the mean stake amount over all positive entries in `stakes`.
+///
+/// Returns `0` when no positive stake is present.
+pub fn get_average_stake(stakes: &[(i64, i64)]) -> i64 {
+    get_stake_stats(stakes).average_stake
+}
+
+/// Returns the average reputation of stakers, weighted by stake amount.
+///
+/// This is the staking-aware counterpart to
+/// [`get_average_reputation_by_issuer`]: rather than treating every record
+/// equally it weights each `(stake_amount, score)` pair by the amount staked,
+/// so larger stakers contribute proportionally more. Returns `None` when no
+/// positive stake is present.
+pub fn get_average_stake_weighted_reputation(stakes: &[(i64, i64)]) -> Option<i64> {
+    get_stake_weighted_reputation(stakes)
+}
+
+/// Returns up to `limit` `(stake_amount, score)` pairs sorted by stake amount
+/// in descending order.
+///
+/// Ties are broken by score (higher first) so the ordering is deterministic
+/// across invocations. The result is bounded by `limit`, so the allocation is
+/// `O(limit)` regardless of how many entries are supplied. Non-positive stake
+/// amounts are skipped.
+pub fn get_top_stakers(stakes: &[(i64, i64)], limit: u32) -> Vec<(i64, i64)> {
+    let mut top: Vec<(i64, i64)> = Vec::new();
+    if limit == 0 {
+        return top;
+    }
+
+    for entry in stakes.iter() {
+        if entry.0 <= 0 {
+            continue;
+        }
+        if top.len() >= limit {
+            let worst_idx = worst_stake_index(&top);
+            let worst = top.get(worst_idx).unwrap();
+            if !is_better_stake(entry, &worst) {
+                continue;
+            }
+            top.set(worst_idx, *entry);
+        } else {
+            top.push_back(*entry);
+        }
+    }
+
+    sort_stakes_desc(&mut top);
+    top
+}
+
 /// Returns the average score attributed to `subject` by `issuer`.
 ///
 /// The average is computed over every record in `records` whose subject matches
@@ -257,6 +316,49 @@ fn is_better(candidate: &ReputationRecord, current: &ReputationRecord) -> bool {
         return candidate.score > current.score;
     }
     candidate.subject < current.subject
+}
+
+/// Returns `true` when `candidate` should rank above `current` by stake.
+fn is_better_stake(candidate: &(i64, i64), current: &(i64, i64)) -> bool {
+    if candidate.0 != current.0 {
+        return candidate.0 > current.0;
+    }
+    candidate.1 > current.1
+}
+
+/// Index of the lowest-ranked stake entry in `stakes` (assumes non-empty).
+fn worst_stake_index(stakes: &Vec<(i64, i64)>) -> u32 {
+    let mut idx: u32 = 0;
+    let mut i: u32 = 1;
+    while i < stakes.len() {
+        let current = stakes.get(i).unwrap();
+        let worst = stakes.get(idx).unwrap();
+        if is_better_stake(&worst, &current) {
+            idx = i;
+        }
+        i += 1;
+    }
+    idx
+}
+
+/// In-place insertion sort of stake entries by descending stake amount.
+fn sort_stakes_desc(stakes: &mut Vec<(i64, i64)>) {
+    let len = stakes.len();
+    let mut i: u32 = 1;
+    while i < len {
+        let key = stakes.get(i).unwrap();
+        let mut j = i;
+        while j > 0 {
+            let prev = stakes.get(j - 1).unwrap();
+            if is_better_stake(&prev, &key) {
+                break;
+            }
+            stakes.set(j, prev);
+            j -= 1;
+        }
+        stakes.set(j, key);
+        i += 1;
+    }
 }
 
 /// Index of the lowest-ranked entry in `records` (assumes non-empty).
@@ -435,5 +537,42 @@ mod tests {
         assert_eq!(get_stake_weighted_reputation(&stakes), None);
         let zero = [(0i64, 50i64)];
         assert_eq!(get_stake_weighted_reputation(&zero), None);
+    }
+
+    #[test]
+    fn total_and_average_stake_ignore_non_positive() {
+        let stakes = [(100i64, 10i64), (300, 20), (0, 99), (-50, 5)];
+        assert_eq!(get_total_staked(&stakes), 400);
+        assert_eq!(get_average_stake(&stakes), 200);
+        let empty: [(i64, i64); 0] = [];
+        assert_eq!(get_total_staked(&empty), 0);
+        assert_eq!(get_average_stake(&empty), 0);
+    }
+
+    #[test]
+    fn average_stake_weighted_reputation_matches_weighted() {
+        let stakes = [(100i64, 10i64), (300, 20)];
+        assert_eq!(
+            get_average_stake_weighted_reputation(&stakes),
+            Some((100 * 10 + 300 * 20) / 400)
+        );
+        let empty: [(i64, i64); 0] = [];
+        assert_eq!(get_average_stake_weighted_reputation(&empty), None);
+    }
+
+    #[test]
+    fn top_stakers_sorted_descending_and_bounded() {
+        let stakes = [(100i64, 10i64), (500, 5), (250, 20), (250, 30)];
+        let top = get_top_stakers(&stakes, 3);
+        assert_eq!(top.len(), 3);
+        assert_eq!(top.get(0).unwrap(), (500, 5));
+        assert_eq!(top.get(1).unwrap(), (250, 30));
+        assert_eq!(top.get(2).unwrap(), (250, 20));
+    }
+
+    #[test]
+    fn top_stakers_zero_limit_is_empty() {
+        let stakes = [(100i64, 10i64)];
+        assert_eq!(get_top_stakers(&stakes, 0).len(), 0);
     }
 }

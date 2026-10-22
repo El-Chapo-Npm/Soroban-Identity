@@ -51,8 +51,8 @@ export const V1_ROUTES = {
   health:              { method: "GET",    path: "/health" },
   info:                { method: "GET",    path: "/info" },
   metrics:             { method: "GET",    path: "/metrics" },
-  shortenShareLink:    { method: "POST",   path: "/share/shorten" },
-  resolveShareLink:    { method: "GET",    path: "/share/:id" },
+  cacheStats:          { method: "GET",    path: "/cache/stats",              read: true },
+  cachePurge:          { method: "POST",   path: "/cache/purge" },
 };
 
 /**
@@ -248,139 +248,172 @@ export function networkStatisticsRoute({ analyticsService } = {}) {
 }
 
 /**
- * Privacy options supported for credential sharing (#1030).
+ * Scopes permitted to inspect cache statistics.
  */
-export const SHARE_PRIVACY_OPTIONS = ["public", "private", "selective"];
+export const CACHE_STATS_SCOPES = ["admin:read", "cache:read"];
 
 /**
- * Normalise a requested share privacy setting, defaulting to "private".
- *
- * @param {string} [privacy]
- * @returns {"public"|"private"|"selective"}
+ * Scopes permitted to manually purge cache entries.
  */
-export function normalizeSharePrivacy(privacy) {
-  const value = String(privacy || "").toLowerCase();
-  return SHARE_PRIVACY_OPTIONS.includes(value) ? value : "private";
+export const CACHE_PURGE_SCOPES = ["admin:write", "cache:write"];
+
+/**
+ * Check whether the given scopes grant access to cache statistics.
+ *
+ * @param {string[]|string|undefined} scopes
+ * @returns {boolean}
+ */
+export function canReadCacheStats(scopes) {
+  if (!scopes) return false;
+  const list = Array.isArray(scopes) ? scopes : String(scopes).split(/\s+/);
+  return list.some((scope) => CACHE_STATS_SCOPES.includes(scope));
 }
 
 /**
- * Generate a short, URL-safe share id.
+ * Check whether the given scopes grant access to cache purging.
  *
- * @param {() => number} [random]  injectable RNG for deterministic tests
- * @returns {string}
+ * @param {string[]|string|undefined} scopes
+ * @returns {boolean}
  */
-export function generateShareId(random = Math.random) {
-  const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
-  let id = "";
-  for (let i = 0; i < 8; i += 1) {
-    id += alphabet[Math.floor(random() * alphabet.length)];
+export function canPurgeCache(scopes) {
+  if (!scopes) return false;
+  const list = Array.isArray(scopes) ? scopes : String(scopes).split(/\s+/);
+  return list.some((scope) => CACHE_PURGE_SCOPES.includes(scope));
+}
+
+/**
+ * Compute the hit ratio for a single cache layer.
+ *
+ * @param {number} hits
+ * @param {number} misses
+ * @returns {number} ratio in [0, 1], or 0 when there was no traffic
+ */
+export function cacheHitRatio(hits, misses) {
+  const h = Number(hits) || 0;
+  const m = Number(misses) || 0;
+  const total = h + m;
+  if (total <= 0) return 0;
+  return h / total;
+}
+
+/**
+ * Normalise raw cache statistics into a per-layer hit/miss report.
+ *
+ * Accepts either a `{ layers: { l1: {hits, misses}, ... } }` object or a flat
+ * `{ l1: {hits, misses}, ... }` map. Each layer in the output includes its
+ * hit/miss counts and hit ratio.
+ *
+ * @param {object} stats
+ * @returns {{ layers: Record<string, {hits: number, misses: number, hitRatio: number}>, overallHitRatio: number }}
+ */
+export function summarizeCacheStats(stats = {}) {
+  const source = stats && typeof stats === "object" && stats.layers ? stats.layers : stats || {};
+  const layers = {};
+  let totalHits = 0;
+  let totalMisses = 0;
+
+  for (const [name, layer] of Object.entries(source)) {
+    if (!layer || typeof layer !== "object") continue;
+    const hits = Number(layer.hits) || 0;
+    const misses = Number(layer.misses) || 0;
+    layers[name] = { hits, misses, hitRatio: cacheHitRatio(hits, misses) };
+    totalHits += hits;
+    totalMisses += misses;
   }
-  return id;
+
+  return { layers, overallHitRatio: cacheHitRatio(totalHits, totalMisses) };
 }
 
 /**
- * POST /share/shorten handler.
+ * GET /cache/stats handler.
  *
- * Creates a short id for a share URL and records a `share_created`
- * analytics event. The target URL is validated to be an absolute http(s)
- * URL so that shared links cannot be used to redirect to arbitrary schemes.
+ * Returns hit/miss ratios per cache layer (L1 in-memory, L2 Redis, L3 CDN,
+ * etc.) as reported by the cache service.
+ *
+ * Requires the `admin:read` or `cache:read` scope.
  *
  * @param {object} deps
- * @param {{ createShortLink: Function }} [deps.shareService]
- * @param {{ track: Function }} [deps.analyticsService]
- * @param {object} [deps.body]  request body ({ url, privacy, credentialId })
- * @returns {Promise<{ id: string, url: string, privacy: string }>}
+ * @param {{ getStats: Function }} deps.cacheService
+ * @returns {Promise<*>}
  */
-export async function shortenShareLink({ shareService, analyticsService, body = {} } = {}) {
-  const targetUrl = body?.url;
-  if (typeof targetUrl !== "string" || !/^https?:\/\//i.test(targetUrl)) {
-    const err = new Error("A valid http(s) url is required");
+export async function getCacheStats({ cacheService } = {}) {
+  if (!cacheService || typeof cacheService.getStats !== "function") {
+    throw new Error("CacheService with getStats() is required");
+  }
+  const stats = await cacheService.getStats();
+  return summarizeCacheStats(stats);
+}
+
+/**
+ * POST /cache/purge handler.
+ *
+ * Manually invalidates cache entries by key or by data type. At least one of
+ * `key` or `dataType` must be provided.
+ *
+ * Requires the `admin:write` or `cache:write` scope.
+ *
+ * @param {object} deps
+ * @param {{ invalidate: Function }} deps.cacheService
+ * @param {{ key?: string, dataType?: string }} [deps.body]
+ * @returns {Promise<*>}
+ */
+export async function purgeCache({ cacheService, body = {} } = {}) {
+  if (!cacheService || typeof cacheService.invalidate !== "function") {
+    throw new Error("CacheService with invalidate() is required");
+  }
+  const { key, dataType } = body || {};
+  if (!key && !dataType) {
+    const err = new Error("Either 'key' or 'dataType' is required to purge cache");
     err.status = 400;
     throw err;
   }
-
-  const privacy = normalizeSharePrivacy(body?.privacy);
-  const id = shareService && typeof shareService.createShortLink === "function"
-    ? await shareService.createShortLink({ url: targetUrl, privacy, credentialId: body?.credentialId })
-    : generateShareId();
-
-  if (analyticsService && typeof analyticsService.track === "function") {
-    await analyticsService.track("share_created", {
-      shareId: id,
-      privacy,
-      credentialId: body?.credentialId,
-    });
-  }
-
-  return { id, url: withV1Prefix(`/share/${id}`), privacy };
+  return cacheService.invalidate({ key, dataType });
 }
 
 /**
- * GET /share/:id handler.
- *
- * Resolves a short id to its target URL, records a `share_opened` analytics
- * event, and returns the target so the caller can redirect. Shared links
- * carry the credential id (when present) so the recipient can verify the
- * credential from the shared link.
+ * Build the v1 route map entry for cache statistics, including the required
+ * scope check, so app.js can register it consistently.
  *
  * @param {object} deps
- * @param {{ resolveShortLink: Function }} [deps.shareService]
- * @param {{ track: Function }} [deps.analyticsService]
- * @param {object} [deps.params]  route params ({ id })
- * @returns {Promise<{ url: string, privacy: string, credentialId?: string }>}
+ * @param {{ getStats: Function }} deps.cacheService
+ * @returns {{ method: string, path: string, scopes: string[], handler: Function }}
  */
-export async function resolveShareLink({ shareService, analyticsService, params = {} } = {}) {
-  const id = params?.id;
-  if (!id) {
-    const err = new Error("Share id is required");
-    err.status = 400;
-    throw err;
-  }
-
-  const resolved = shareService && typeof shareService.resolveShortLink === "function"
-    ? await shareService.resolveShortLink(id)
-    : null;
-  if (!resolved || typeof resolved.url !== "string") {
-    const err = new Error("Share link not found");
-    err.status = 404;
-    throw err;
-  }
-
-  if (analyticsService && typeof analyticsService.track === "function") {
-    await analyticsService.track("share_opened", {
-      shareId: id,
-      privacy: resolved.privacy,
-      credentialId: resolved.credentialId,
-    });
-  }
-
+export function cacheStatsRoute({ cacheService } = {}) {
   return {
-    url: resolved.url,
-    privacy: normalizeSharePrivacy(resolved.privacy),
-    ...(resolved.credentialId ? { credentialId: resolved.credentialId } : {}),
+    method: V1_ROUTES.cacheStats.method,
+    path: withV1Prefix(V1_ROUTES.cacheStats.path),
+    scopes: CACHE_STATS_SCOPES,
+    handler: (req) => {
+      if (!canReadCacheStats(req?.scopes ?? req?.user?.scopes)) {
+        const err = new Error("Insufficient scope for cache statistics");
+        err.status = 403;
+        throw err;
+      }
+      return getCacheStats({ cacheService });
+    },
   };
 }
 
 /**
- * Build the v1 route map entries for credential sharing (#1030), so app.js
- * can register them consistently with networkStatisticsRoute.
+ * Build the v1 route map entry for cache purging, including the required
+ * scope check, so app.js can register it consistently.
  *
  * @param {object} deps
- * @param {{ createShortLink: Function, resolveShortLink: Function }} [deps.shareService]
- * @param {{ track: Function }} [deps.analyticsService]
- * @returns {Array<{ method: string, path: string, handler: Function }>}
+ * @param {{ invalidate: Function }} deps.cacheService
+ * @returns {{ method: string, path: string, scopes: string[], handler: Function }}
  */
-export function shareRoutes({ shareService, analyticsService } = {}) {
-  return [
-    {
-      method: V1_ROUTES.shortenShareLink.method,
-      path: withV1Prefix(V1_ROUTES.shortenShareLink.path),
-      handler: (req) => shortenShareLink({ shareService, analyticsService, body: req?.body }),
+export function cachePurgeRoute({ cacheService } = {}) {
+  return {
+    method: V1_ROUTES.cachePurge.method,
+    path: withV1Prefix(V1_ROUTES.cachePurge.path),
+    scopes: CACHE_PURGE_SCOPES,
+    handler: (req) => {
+      if (!canPurgeCache(req?.scopes ?? req?.user?.scopes)) {
+        const err = new Error("Insufficient scope for cache purge");
+        err.status = 403;
+        throw err;
+      }
+      return purgeCache({ cacheService, body: req?.body });
     },
-    {
-      method: V1_ROUTES.resolveShareLink.method,
-      path: withV1Prefix(V1_ROUTES.resolveShareLink.path),
-      handler: (req) => resolveShareLink({ shareService, analyticsService, params: req?.params }),
-    },
-  ];
+  };
 }

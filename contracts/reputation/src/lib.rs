@@ -84,6 +84,14 @@ const LAST_RPT: Symbol = symbol_short!("LASTRPT");
 const STAKE: Symbol = symbol_short!("STAKE");
 /// Storage key for the global staking statistics counter (#1055).
 const STAKE_STATS: Symbol = symbol_short!("STKSTATS");
+/// Storage key prefix for per-staker staking history (#1122).
+const STAKE_HIST: Symbol = symbol_short!("STKHIST");
+/// Storage key prefix for delegation records (#1122).
+const DELEGATION: Symbol = symbol_short!("DELEG");
+/// Storage key prefix for the list of delegators to a delegate (#1122).
+const DELEGATORS: Symbol = symbol_short!("DELEGS");
+/// Storage key for the global staking reward pool (#1122).
+const REWARD_POOL: Symbol = symbol_short!("RWPOOL");
 
 // ── Staking (#1055) ──────────────────────────────────────────────────────────
 
@@ -96,6 +104,10 @@ const STAKE_BOOST_PER_UNIT: i64 = 1;
 const MAX_STAKE_BOOST: i64 = 1_000;
 /// Token units required per reputation point of boost.
 const STAKE_UNITS_PER_BOOST: i64 = 1;
+/// Maximum number of history entries retained per staker (#1122).
+const MAX_STAKE_HISTORY: u32 = 50;
+/// Maximum number of delegators a single delegate may accumulate (#1122).
+const MAX_DELEGATORS: u32 = 100;
 
 // ── Error codes ───────────────────────────────────────────────────────────────
 
@@ -129,6 +141,14 @@ pub enum ContractError {
     InvalidStakeAmount     = 20,
     /// Issue #1055: slash amount exceeds the staked balance.
     InsufficientStake      = 21,
+    /// Issue #1122: the staker cannot delegate to itself.
+    SelfDelegation         = 22,
+    /// Issue #1122: no delegation record exists.
+    NoDelegation           = 23,
+    /// Issue #1122: the delegate already has the maximum number of delegators.
+    TooManyDelegators      = 24,
+    /// Issue #1122: the reward pool has insufficient funds.
+    InsufficientRewardPool = 25,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -241,6 +261,42 @@ pub struct StakingStats {
     pub total_staked: i64,
     pub total_rewards: i64,
     pub total_penalties: i64,
+}
+
+/// The kind of action recorded in a staker's history (#1122).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Copy)]
+pub enum StakeAction {
+    Deposit,
+    UnstakeRequest,
+    Withdraw,
+    Slash,
+    Reward,
+    Delegate,
+    Undelegate,
+}
+
+/// A single staking history entry (#1122).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct StakeHistoryEntry {
+    pub action: StakeAction,
+    /// Amount involved in the action (token units).
+    pub amount: i64,
+    /// Staker's balance after the action was applied.
+    pub balance_after: i64,
+    /// Ledger sequence at which the action occurred.
+    pub ledger: u32,
+}
+
+/// A delegation record: `delegator`'s stake counted toward `delegate` (#1122).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Delegation {
+    pub delegator: Address,
+    pub delegate: Address,
+    pub amount: i64,
+    pub since: u32,
 }
 
 #[contracttype]
@@ -1210,6 +1266,397 @@ impl Reputation {
         Self::get_stake(env, staker).unlock_at
     }
 
+    // ── Staking extensions (#1122) ────────────────────────────────────────────
+
+    /// Deposits `amount` token units as a stake for `staker` and records the
+    /// action in the staker's history. Equivalent to [`Self::stake`] but also
+    /// appends a [`StakeHistoryEntry`].
+    ///
+    /// Emits a `stake_deposited` event.
+    ///
+    /// # Errors
+    /// - [`ContractError::InvalidStakeAmount`] if `amount <= 0`.
+    ///
+    /// Closes #1122.
+    pub fn deposit_stake(
+        env: Env,
+        staker: Address,
+        amount: i64,
+    ) -> Result<StakeRecord, ContractError> {
+        let record = Self::stake(env.clone(), staker.clone(), amount)?;
+        Self::append_stake_history(&env, &staker, StakeAction::Deposit, amount, record.amount);
+        Ok(record)
+    }
+
+    /// Requests an unstake of `amount` token units, starting the cooldown, and
+    /// records the action in the staker's history.
+    ///
+    /// Emits a `stake_unstake_req` event.
+    ///
+    /// # Errors
+    /// See [`Self::request_unstake`].
+    ///
+    /// Closes #1122.
+    pub fn request_unstake_with_history(
+        env: Env,
+        staker: Address,
+        amount: i64,
+    ) -> Result<StakeRecord, ContractError> {
+        let record = Self::request_unstake(env.clone(), staker.clone(), amount)?;
+        Self::append_stake_history(&env, &staker, StakeAction::UnstakeRequest, amount, record.amount);
+        Ok(record)
+    }
+
+    /// Withdraws `amount` token units after the cooldown has elapsed and
+    /// records the action in the staker's history.
+    ///
+    /// Emits a `stake_withdrawn` event.
+    ///
+    /// # Errors
+    /// See [`Self::withdraw_stake`].
+    ///
+    /// Closes #1122.
+    pub fn withdraw_stake_with_history(
+        env: Env,
+        staker: Address,
+        amount: i64,
+    ) -> Result<StakeRecord, ContractError> {
+        let record = Self::withdraw_stake(env.clone(), staker.clone(), amount)?;
+        Self::append_stake_history(&env, &staker, StakeAction::Withdraw, amount, record.amount);
+        Ok(record)
+    }
+
+    /// Slashes `amount` token units from `staker`'s stake for fraud (admin
+    /// only), reducing the stake, its reputation boost, and the staker's
+    /// reputation score, and recording the penalty in history.
+    ///
+    /// Emits a `stake_slashed` event.
+    ///
+    /// # Errors
+    /// See [`Self::slash_stake`].
+    ///
+    /// Closes #1122.
+    pub fn slash_stake_for_fraud(
+        env: Env,
+        staker: Address,
+        amount: i64,
+    ) -> Result<StakeRecord, ContractError> {
+        let record = Self::slash_stake(env.clone(), staker.clone(), amount)?;
+        Self::append_stake_history(&env, &staker, StakeAction::Slash, amount, record.amount);
+
+        // Reduce the staker's reputation score by the boost lost to the slash.
+        let rec_key = Self::record_key(&staker);
+        if let Some(mut rep) = env
+            .storage()
+            .persistent()
+            .get::<(Symbol, Address), ReputationRecord>(&rec_key)
+        {
+            let lost_boost = Self::stake_boost(amount);
+            rep.score = rep.score.saturating_sub(lost_boost).max(MIN_SCORE);
+            rep.updated_at = env.ledger().timestamp();
+            env.storage().persistent().set(&rec_key, &rep);
+            env.storage().persistent().extend_ttl(&rec_key, TTL_MAX, TTL_MAX);
+        }
+        Ok(record)
+    }
+
+    /// Funds the global staking reward pool with `amount` token units (admin
+    /// only). Rewards are later distributed from this pool via
+    /// [`Self::distribute_rewards`].
+    ///
+    /// Emits a `reward_pool_funded` event.
+    ///
+    /// # Errors
+    /// - [`ContractError::InvalidStakeAmount`] if `amount <= 0`.
+    ///
+    /// Closes #1122.
+    pub fn fund_reward_pool(
+        env: Env,
+        admin: Address,
+        amount: i64,
+    ) -> Result<i64, ContractError> {
+        Self::require_admin_caller(&env, &admin)?;
+        if amount <= 0 {
+            return Err(ContractError::InvalidStakeAmount);
+        }
+        let pool = Self::reward_pool(&env).saturating_add(amount);
+        env.storage().instance().set(&REWARD_POOL, &pool);
+        env.events().publish(
+            (REWARD_POOL, symbol_short!("funded")),
+            (EVENT_VERSION, admin, amount, pool),
+        );
+        Ok(pool)
+    }
+
+    /// Returns the current balance of the global staking reward pool.
+    pub fn get_reward_pool(env: Env) -> i64 {
+        Self::reward_pool(&env)
+    }
+
+    /// Distributes `total` token units from the reward pool across `stakers`
+    /// proportionally to their effective (own + delegated) stake (admin only).
+    ///
+    /// Each staker's share is `total * effective_stake / total_effective_stake`,
+    /// rounded down. The remainder stays in the pool. Each credited staker has
+    /// the reward recorded in its history.
+    ///
+    /// Emits a `rewards_distributed` event.
+    ///
+    /// # Errors
+    /// - [`ContractError::InvalidStakeAmount`] if `total <= 0`.
+    /// - [`ContractError::InsufficientRewardPool`] if `total` exceeds the pool.
+    ///
+    /// Closes #1122.
+    pub fn distribute_rewards(
+        env: Env,
+        admin: Address,
+        stakers: Vec<Address>,
+        total: i64,
+    ) -> Result<i64, ContractError> {
+        Self::require_admin_caller(&env, &admin)?;
+        if total <= 0 {
+            return Err(ContractError::InvalidStakeAmount);
+        }
+        let pool = Self::reward_pool(&env);
+        if total > pool {
+            return Err(ContractError::InsufficientRewardPool);
+        }
+
+        // Sum effective stake across the supplied stakers.
+        let mut total_effective: i64 = 0;
+        for staker in stakers.iter() {
+            total_effective = total_effective
+                .saturating_add(Self::effective_stake(&env, &staker));
+        }
+        if total_effective <= 0 {
+            return Err(ContractError::NoStake);
+        }
+
+        let mut distributed: i64 = 0;
+        for staker in stakers.iter() {
+            let effective = Self::effective_stake(&env, &staker);
+            if effective <= 0 {
+                continue;
+            }
+            let share = (total as i128)
+                .saturating_mul(effective as i128)
+                .checked_div(total_effective as i128)
+                .unwrap_or(0) as i64;
+            if share <= 0 {
+                continue;
+            }
+            let key = Self::stake_key(&staker);
+            if let Some(mut record) = env
+                .storage()
+                .persistent()
+                .get::<_, StakeRecord>(&key)
+            {
+                record.total_rewards = record.total_rewards.saturating_add(share);
+                env.storage().persistent().set(&key, &record);
+                env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+                Self::append_stake_history(
+                    &env,
+                    &staker,
+                    StakeAction::Reward,
+                    share,
+                    record.amount,
+                );
+            }
+            distributed = distributed.saturating_add(share);
+        }
+
+        let remaining = pool.saturating_sub(distributed);
+        env.storage().instance().set(&REWARD_POOL, &remaining);
+
+        let mut stats = Self::staking_stats(&env);
+        stats.total_rewards = stats.total_rewards.saturating_add(distributed);
+        env.storage().instance().set(&STAKE_STATS, &stats);
+
+        env.events().publish(
+            (REWARD_POOL, symbol_short!("distrib")),
+            (EVENT_VERSION, admin, distributed, remaining),
+        );
+        Ok(distributed)
+    }
+
+    /// Delegates `amount` token units of `delegator`'s stake to `delegate`,
+    /// so the delegate's effective stake (and reputation multiplier) grows.
+    ///
+    /// The delegator must have at least `amount` staked. Delegation does not
+    /// move tokens; it only aggregates stake for multiplier and reward
+    /// purposes.
+    ///
+    /// Emits a `stake_delegated` event.
+    ///
+    /// # Errors
+    /// - [`ContractError::SelfDelegation`] if `delegator == delegate`.
+    /// - [`ContractError::InvalidStakeAmount`] if `amount <= 0`.
+    /// - [`ContractError::NoStake`] if the delegator has no stake.
+    /// - [`ContractError::InsufficientStake`] if `amount` exceeds the balance.
+    /// - [`ContractError::TooManyDelegators`] if the delegate is at capacity.
+    ///
+    /// Closes #1122.
+    pub fn delegate_stake(
+        env: Env,
+        delegator: Address,
+        delegate: Address,
+        amount: i64,
+    ) -> Result<Delegation, ContractError> {
+        delegator.require_auth();
+        Self::require_not_paused(&env)?;
+        if delegator == delegate {
+            return Err(ContractError::SelfDelegation);
+        }
+        if amount <= 0 {
+            return Err(ContractError::InvalidStakeAmount);
+        }
+
+        let stake_key = Self::stake_key(&delegator);
+        let stake: StakeRecord = env
+            .storage()
+            .persistent()
+            .get(&stake_key)
+            .ok_or(ContractError::NoStake)?;
+        if amount > stake.amount {
+            return Err(ContractError::InsufficientStake);
+        }
+
+        let deleg_key = Self::delegation_key(&delegator, &delegate);
+        let existing: Option<Delegation> = env.storage().persistent().get(&deleg_key);
+        let since = env.ledger().sequence();
+
+        if existing.is_none() {
+            let mut delegators = Self::delegators_of(&env, &delegate);
+            if delegators.len() >= MAX_DELEGATORS {
+                return Err(ContractError::TooManyDelegators);
+            }
+            delegators.push_back(delegator.clone());
+            let list_key = Self::delegators_key(&delegate);
+            env.storage().persistent().set(&list_key, &delegators);
+            env.storage().persistent().extend_ttl(&list_key, TTL_MAX, TTL_MAX);
+        }
+
+        let new_amount = existing
+            .as_ref()
+            .map(|d| d.amount)
+            .unwrap_or(0)
+            .saturating_add(amount);
+        let delegation = Delegation {
+            delegator: delegator.clone(),
+            delegate: delegate.clone(),
+            amount: new_amount,
+            since: existing.as_ref().map(|d| d.since).unwrap_or(since),
+        };
+        env.storage().persistent().set(&deleg_key, &delegation);
+        env.storage().persistent().extend_ttl(&deleg_key, TTL_MAX, TTL_MAX);
+
+        Self::append_stake_history(&env, &delegator, StakeAction::Delegate, amount, stake.amount);
+
+        env.events().publish(
+            (DELEGATION, symbol_short!("delegated")),
+            (EVENT_VERSION, delegator, delegate, new_amount),
+        );
+        Ok(delegation)
+    }
+
+    /// Removes up to `amount` token units of `delegator`'s delegation to
+    /// `delegate`. If `amount` is greater than or equal to the delegated
+    /// amount, the delegation is removed entirely.
+    ///
+    /// Emits a `stake_undelegated` event.
+    ///
+    /// # Errors
+    /// - [`ContractError::NoDelegation`] if no delegation exists.
+    /// - [`ContractError::InvalidStakeAmount`] if `amount <= 0`.
+    ///
+    /// Closes #1122.
+    pub fn undelegate_stake(
+        env: Env,
+        delegator: Address,
+        delegate: Address,
+        amount: i64,
+    ) -> Result<(), ContractError> {
+        delegator.require_auth();
+        Self::require_not_paused(&env)?;
+        if amount <= 0 {
+            return Err(ContractError::InvalidStakeAmount);
+        }
+
+        let deleg_key = Self::delegation_key(&delegator, &delegate);
+        let mut delegation: Delegation = env
+            .storage()
+            .persistent()
+            .get(&deleg_key)
+            .ok_or(ContractError::NoDelegation)?;
+
+        let removed = amount.min(delegation.amount);
+        delegation.amount = delegation.amount.saturating_sub(removed);
+
+        if delegation.amount == 0 {
+            env.storage().persistent().remove(&deleg_key);
+            Self::remove_delegator(&env, &delegate, &delegator);
+        } else {
+            env.storage().persistent().set(&deleg_key, &delegation);
+            env.storage().persistent().extend_ttl(&deleg_key, TTL_MAX, TTL_MAX);
+        }
+
+        let balance = Self::get_stake(env.clone(), delegator.clone()).amount;
+        Self::append_stake_history(&env, &delegator, StakeAction::Undelegate, removed, balance);
+
+        env.events().publish(
+            (DELEGATION, symbol_short!("undelegd")),
+            (EVENT_VERSION, delegator, delegate, removed),
+        );
+        Ok(())
+    }
+
+    /// Returns the delegation record from `delegator` to `delegate`, if any.
+    pub fn get_delegation(env: Env, delegator: Address, delegate: Address) -> Option<Delegation> {
+        let key = Self::delegation_key(&delegator, &delegate);
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+        }
+        env.storage().persistent().get(&key)
+    }
+
+    /// Returns the total amount delegated *to* `delegate` by all delegators.
+    pub fn get_delegated_to(env: Env, delegate: Address) -> i64 {
+        let delegators = Self::delegators_of(&env, &delegate);
+        let mut total: i64 = 0;
+        for delegator in delegators.iter() {
+            let key = Self::delegation_key(&delegator, &delegate);
+            if let Some(d) = env.storage().persistent().get::<_, Delegation>(&key) {
+                total = total.saturating_add(d.amount);
+            }
+        }
+        total
+    }
+
+    /// Returns the effective stake for `staker`: its own stake plus all stake
+    /// delegated to it.
+    pub fn get_effective_stake(env: Env, staker: Address) -> i64 {
+        Self::effective_stake(&env, &staker)
+    }
+
+    /// Returns the reputation multiplier (in basis points, 10_000 = 1x) derived
+    /// from `staker`'s effective stake, bounded by [`MAX_STAKE_BOOST`].
+    pub fn get_reputation_multiplier(env: Env, staker: Address) -> i64 {
+        let boost = Self::stake_boost(Self::effective_stake(&env, &staker));
+        10_000i64.saturating_add(boost.saturating_mul(10))
+    }
+
+    /// Returns the staking history for `staker`, most recent last.
+    pub fn get_stake_history(env: Env, staker: Address) -> Vec<StakeHistoryEntry> {
+        let key = Self::stake_history_key(&staker);
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+        }
+        env.storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
     // ── Anti-sybil ────────────────────────────────────────────────────────────
 
     pub fn passes_sybil_check(
@@ -1544,6 +1991,83 @@ impl Reputation {
 
     fn stake_key(staker: &Address) -> (Symbol, Address) {
         (STAKE, staker.clone())
+    }
+
+    fn stake_history_key(staker: &Address) -> (Symbol, Address) {
+        (STAKE_HIST, staker.clone())
+    }
+
+    fn delegation_key(delegator: &Address, delegate: &Address) -> (Symbol, Address, Address) {
+        (DELEGATION, delegator.clone(), delegate.clone())
+    }
+
+    fn delegators_key(delegate: &Address) -> (Symbol, Address) {
+        (DELEGATORS, delegate.clone())
+    }
+
+    fn delegators_of(env: &Env, delegate: &Address) -> Vec<Address> {
+        let key = Self::delegators_key(delegate);
+        env.storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env))
+    }
+
+    fn remove_delegator(env: &Env, delegate: &Address, delegator: &Address) {
+        let list_key = Self::delegators_key(delegate);
+        let delegators = Self::delegators_of(env, delegate);
+        let mut updated = Vec::new(env);
+        for d in delegators.iter() {
+            if &d != delegator {
+                updated.push_back(d);
+            }
+        }
+        env.storage().persistent().set(&list_key, &updated);
+        env.storage().persistent().extend_ttl(&list_key, TTL_MAX, TTL_MAX);
+    }
+
+    fn reward_pool(env: &Env) -> i64 {
+        env.storage().instance().get(&REWARD_POOL).unwrap_or(0)
+    }
+
+    /// Own stake plus all stake delegated to `staker`.
+    fn effective_stake(env: &Env, staker: &Address) -> i64 {
+        let own = env
+            .storage()
+            .persistent()
+            .get::<_, StakeRecord>(&Self::stake_key(staker))
+            .map(|r| r.amount)
+            .unwrap_or(0);
+        let delegated = Self::get_delegated_to(env.clone(), staker.clone());
+        own.saturating_add(delegated)
+    }
+
+    /// Appends an entry to `staker`'s staking history, trimming the oldest
+    /// entries once [`MAX_STAKE_HISTORY`] is reached.
+    fn append_stake_history(
+        env: &Env,
+        staker: &Address,
+        action: StakeAction,
+        amount: i64,
+        balance_after: i64,
+    ) {
+        let key = Self::stake_history_key(staker);
+        let mut history: Vec<StakeHistoryEntry> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env));
+        if history.len() >= MAX_STAKE_HISTORY {
+            history.remove(0);
+        }
+        history.push_back(StakeHistoryEntry {
+            action,
+            amount,
+            balance_after,
+            ledger: env.ledger().sequence(),
+        });
+        env.storage().persistent().set(&key, &history);
+        env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
     }
 
     /// Computes the bounded reputation boost for a staked `amount`.
@@ -2441,5 +2965,152 @@ mod tests {
         // No auth mocked for a non-admin caller path: require_admin will fail.
         let result = client.try_slash_stake(&staker, &10);
         assert!(result.is_ok() || result.is_err());
+    }
+
+    // ── Staking extensions (#1122) ─────────────────────────────────────────────
+
+    #[test]
+    fn test_deposit_stake_records_history() {
+        let (env, _admin, client) = setup();
+        let staker = Address::generate(&env);
+        client.deposit_stake(&staker, &300);
+        let history = client.get_stake_history(&staker);
+        assert_eq!(history.len(), 1);
+        let entry = history.get(0).unwrap();
+        assert_eq!(entry.action, StakeAction::Deposit);
+        assert_eq!(entry.amount, 300);
+        assert_eq!(entry.balance_after, 300);
+    }
+
+    #[test]
+    fn test_unstake_and_withdraw_with_history() {
+        let (env, _admin, client) = setup();
+        let staker = Address::generate(&env);
+        client.deposit_stake(&staker, &100);
+        client.request_unstake_with_history(&staker, &100);
+        env.ledger()
+            .with_mut(|li| li.sequence_number += STAKE_COOLDOWN_LEDGERS + 1);
+        client.withdraw_stake_with_history(&staker, &100);
+
+        let history = client.get_stake_history(&staker);
+        assert_eq!(history.len(), 3);
+        assert_eq!(history.get(1).unwrap().action, StakeAction::UnstakeRequest);
+        assert_eq!(history.get(2).unwrap().action, StakeAction::Withdraw);
+        assert_eq!(history.get(2).unwrap().balance_after, 0);
+    }
+
+    #[test]
+    fn test_slash_for_fraud_reduces_reputation() {
+        let (env, _admin, client) = setup();
+        let reporter = Address::generate(&env);
+        let staker = Address::generate(&env);
+        client.add_reporter(&reporter);
+        let reason = String::from_str(&env, "activity");
+        client.submit_score(&reporter, &staker, &100, &reason);
+        client.deposit_stake(&staker, &100);
+
+        client.slash_stake_for_fraud(&staker, &40);
+        let rec = client.get_stake(&staker);
+        assert_eq!(rec.amount, 60);
+        assert_eq!(rec.total_penalties, 40);
+        assert_eq!(client.get_reputation(&staker).score, 60);
+    }
+
+    #[test]
+    fn test_reward_pool_funding_and_distribution() {
+        let (env, admin, client) = setup();
+        let staker_a = Address::generate(&env);
+        let staker_b = Address::generate(&env);
+        client.deposit_stake(&staker_a, &100);
+        client.deposit_stake(&staker_b, &300);
+
+        client.fund_reward_pool(&admin, &400);
+        assert_eq!(client.get_reward_pool(), 400);
+
+        let mut stakers = Vec::new(&env);
+        stakers.push_back(staker_a.clone());
+        stakers.push_back(staker_b.clone());
+        let distributed = client.distribute_rewards(&admin, &stakers, &400);
+        assert_eq!(distributed, 400);
+
+        assert_eq!(client.get_stake(&staker_a).total_rewards, 100);
+        assert_eq!(client.get_stake(&staker_b).total_rewards, 300);
+        assert_eq!(client.get_reward_pool(), 0);
+    }
+
+    #[test]
+    fn test_distribute_rewards_rejects_over_pool() {
+        let (env, admin, client) = setup();
+        let staker = Address::generate(&env);
+        client.deposit_stake(&staker, &100);
+        client.fund_reward_pool(&admin, &50);
+        let mut stakers = Vec::new(&env);
+        stakers.push_back(staker.clone());
+        assert_eq!(
+            client.try_distribute_rewards(&admin, &stakers, &100),
+            Err(Ok(ContractError::InsufficientRewardPool))
+        );
+    }
+
+    #[test]
+    fn test_delegation_aggregates_effective_stake() {
+        let (env, _admin, client) = setup();
+        let delegator = Address::generate(&env);
+        let delegate = Address::generate(&env);
+        client.deposit_stake(&delegator, &200);
+        client.deposit_stake(&delegate, &100);
+
+        client.delegate_stake(&delegator, &delegate, &200);
+        assert_eq!(client.get_delegated_to(&delegate), 200);
+        assert_eq!(client.get_effective_stake(&delegate), 300);
+
+        let d = client.get_delegation(&delegator, &delegate).unwrap();
+        assert_eq!(d.amount, 200);
+
+        client.undelegate_stake(&delegator, &delegate, &200);
+        assert_eq!(client.get_delegated_to(&delegate), 0);
+        assert!(client.get_delegation(&delegator, &delegate).is_none());
+    }
+
+    #[test]
+    fn test_delegation_rejects_self() {
+        let (env, _admin, client) = setup();
+        let staker = Address::generate(&env);
+        client.deposit_stake(&staker, &100);
+        assert_eq!(
+            client.try_delegate_stake(&staker, &staker, &50),
+            Err(Ok(ContractError::SelfDelegation))
+        );
+    }
+
+    #[test]
+    fn test_delegation_rejects_excess_amount() {
+        let (env, _admin, client) = setup();
+        let delegator = Address::generate(&env);
+        let delegate = Address::generate(&env);
+        client.deposit_stake(&delegator, &100);
+        assert_eq!(
+            client.try_delegate_stake(&delegator, &delegate, &101),
+            Err(Ok(ContractError::InsufficientStake))
+        );
+    }
+
+    #[test]
+    fn test_reputation_multiplier_grows_with_stake() {
+        let (env, _admin, client) = setup();
+        let staker = Address::generate(&env);
+        assert_eq!(client.get_reputation_multiplier(&staker), 10_000);
+        client.deposit_stake(&staker, &100);
+        assert_eq!(client.get_reputation_multiplier(&staker), 11_000);
+    }
+
+    #[test]
+    fn test_stake_history_is_bounded() {
+        let (env, _admin, client) = setup();
+        let staker = Address::generate(&env);
+        for _ in 0..(MAX_STAKE_HISTORY + 5) {
+            client.deposit_stake(&staker, &1);
+        }
+        assert_eq!(client.get_stake_history(&staker).len(), MAX_STAKE_HISTORY);
     }
 }

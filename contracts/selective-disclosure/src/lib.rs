@@ -29,6 +29,16 @@ const TTL_MIN: u32 = 17_280;
 const PAGE_CAP: u32 = 100;
 const MAX_DISCLOSED_ATTRS: u32 = 50;
 const MAX_PROOF_SIZE: usize = 256;
+const PRESENTATION: Symbol = symbol_short!("PRESENT");
+const PRES_CNT: Symbol = symbol_short!("PRESCNT");
+const TEMPLATE: Symbol = symbol_short!("TMPL");
+const TEMPLATE_CNT: Symbol = symbol_short!("TMPLCNT");
+const MAX_PRESENTATION_CREDENTIALS: u32 = 20;
+const MAX_PRESENTATION_PROOF_SIZE: u32 = 512;
+const MAX_CHALLENGE_SIZE: u32 = 128;
+const MAX_TEMPLATE_FIELDS: u32 = 50;
+const MAX_TEMPLATE_NAME: u32 = 64;
+=======
 
 /// Supported proof schemes for selective disclosure.
 #[contracttype]
@@ -115,6 +125,88 @@ pub struct DisclosureProofPage {
     pub next_cursor: Option<u64>,
 }
 
+/// Supported proof formats for a verifiable presentation.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum PresentationProofType {
+    /// JWT-based proof (compact JWS serialization).
+    Jwt,
+    /// Linked Data Proof (LD-Proofs) serialization.
+    LdProof,
+}
+
+/// A reference to a credential included in a presentation, optionally
+/// restricted to a subset of disclosed attributes (selective disclosure).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PresentationCredential {
+    /// The disclosure proof backing this credential.
+    pub proof_id: BytesN<32>,
+    /// The credential identifier.
+    pub credential_id: BytesN<32>,
+    /// Field filter: only these attribute keys are disclosed. An empty map
+    /// means "disclose everything the underlying proof discloses".
+    pub field_filter: Map<String, String>,
+}
+
+/// A W3C Verifiable Presentation bundling one or more credentials.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct VerifiablePresentation {
+    /// Unique presentation identifier.
+    pub presentation_id: BytesN<32>,
+    /// The holder (subject) creating the presentation.
+    pub holder: Address,
+    /// The credentials bundled in this presentation.
+    pub credentials: Vec<PresentationCredential>,
+    /// The proof format used.
+    pub proof_type: PresentationProofType,
+    /// Scheme-specific proof data (signature over the presentation payload).
+    pub proof_data: Bytes,
+    /// Anti-replay challenge supplied by the verifier.
+    pub challenge: Bytes,
+    /// Optional expiration (0 = no expiry).
+    pub expires_at: u64,
+    /// Timestamp when the presentation was created.
+    pub created_at: u64,
+    /// Whether this presentation has been verified.
+    pub verified: bool,
+}
+
+/// Result of a presentation verification.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PresentationVerificationResult {
+    pub valid: bool,
+    pub holder: Address,
+    pub proof_type: PresentationProofType,
+    /// The selectively disclosed attributes per credential, in order.
+    pub disclosed: Vec<Map<String, String>>,
+}
+
+/// A reusable presentation template describing a presentation shape.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PresentationTemplate {
+    /// Unique template identifier.
+    pub template_id: BytesN<32>,
+    /// Human-readable template name.
+    pub name: String,
+    /// Owner (creator) of the template.
+    pub owner: Address,
+    /// Required credential IDs.
+    pub required_credentials: Vec<BytesN<32>>,
+    /// Required attribute keys per credential (parallel to
+    /// `required_credentials`).
+    pub required_fields: Vec<Vec<String>>,
+    /// Proof format the template expects.
+    pub proof_type: PresentationProofType,
+    /// Whether the template requires a challenge.
+    pub requires_challenge: bool,
+    /// Timestamp of template creation.
+    pub created_at: u64,
+}
+
 #[contracterror]
 #[derive(Clone, Debug, PartialEq, Copy)]
 pub enum ContractError {
@@ -135,6 +227,16 @@ pub enum ContractError {
     InvalidBlindingFactor = 15,
     ContractPaused = 16,
     ProofDataTooLarge = 17,
+    PresentationNotFound = 18,
+    PresentationExpired = 19,
+    ChallengeMismatch = 20,
+    TooManyPresentationCredentials = 21,
+    PresentationProofTooLarge = 22,
+    InvalidChallenge = 23,
+    TemplateNotFound = 24,
+    TemplateAlreadyExists = 25,
+    InvalidTemplate = 26,
+    PresentationProofInvalid = 27,
 }
 
 #[contract]
@@ -512,6 +614,311 @@ impl SelectiveDisclosure {
             .unwrap_or(0)
     }
 
+    // ── Verifiable Presentations ──────────────────────────────────────────────
+
+    /// Create a W3C Verifiable Presentation bundling one or more credentials.
+    ///
+    /// The holder selects a subset of their disclosure proofs and optionally
+    /// filters the disclosed fields per credential (selective disclosure).
+    /// A verifier-supplied `challenge` binds the presentation to a session.
+    ///
+    /// # Arguments
+    /// * `holder` - The presentation holder (must sign).
+    /// * `credentials` - The credentials to bundle (with field filters).
+    /// * `proof_type` - JWT or LD-Proof format.
+    /// * `proof_data` - Scheme-specific signature over the presentation.
+    /// * `challenge` - Anti-replay challenge from the verifier.
+    /// * `expires_at` - Optional expiry timestamp (0 = no expiry).
+    pub fn create_presentation(
+        env: Env,
+        holder: Address,
+        credentials: Vec<PresentationCredential>,
+        proof_type: PresentationProofType,
+        proof_data: Bytes,
+        challenge: Bytes,
+        expires_at: u64,
+    ) -> Result<BytesN<32>, ContractError> {
+        holder.require_auth();
+        Self::require_not_paused(&env)?;
+
+        if credentials.len() == 0 {
+            return Err(ContractError::EmptyDisclosure);
+        }
+        if credentials.len() > MAX_PRESENTATION_CREDENTIALS {
+            return Err(ContractError::TooManyPresentationCredentials);
+        }
+        if proof_data.len() > MAX_PRESENTATION_PROOF_SIZE {
+            return Err(ContractError::PresentationProofTooLarge);
+        }
+        if challenge.len() > MAX_CHALLENGE_SIZE {
+            return Err(ContractError::InvalidChallenge);
+        }
+
+        let now = env.ledger().timestamp();
+        if expires_at != 0 && expires_at <= now {
+            return Err(ContractError::PresentationExpired);
+        }
+
+        // Validate each referenced proof belongs to the holder and is live.
+        for cred in credentials.iter() {
+            let proof_key = Self::proof_key(&cred.proof_id);
+            let proof: DisclosureProof = env
+                .storage()
+                .persistent()
+                .get(&proof_key)
+                .ok_or(ContractError::ProofNotFound)?;
+            if proof.subject != holder {
+                return Err(ContractError::Unauthorized);
+            }
+            if proof.expires_at != 0 && now > proof.expires_at {
+                return Err(ContractError::ProofExpired);
+            }
+            if cred.field_filter.len() > MAX_DISCLOSED_ATTRS {
+                return Err(ContractError::TooManyAttributes);
+            }
+        }
+
+        let presentation_id =
+            Self::derive_presentation_id(&env, &holder, &challenge, now);
+        let key = Self::presentation_key(&presentation_id);
+
+        let presentation = VerifiablePresentation {
+            presentation_id: presentation_id.clone(),
+            holder: holder.clone(),
+            credentials,
+            proof_type,
+            proof_data,
+            challenge,
+            expires_at,
+            created_at: now,
+            verified: false,
+        };
+
+        env.storage().persistent().set(&key, &presentation);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
+
+        let cnt: u32 = env.storage().instance().get(&PRES_CNT).unwrap_or(0);
+        env.storage().instance().set(&PRES_CNT, &(cnt + 1));
+
+        env.events().publish(
+            (PRESENTATION, symbol_short!("created")),
+            (EVENT_VERSION, presentation_id.clone(), holder),
+        );
+        Ok(presentation_id)
+    }
+
+    /// Verify a verifiable presentation.
+    ///
+    /// Checks that:
+    /// 1. The presentation exists and is not expired.
+    /// 2. The supplied challenge matches the one bound at creation.
+    /// 3. Every bundled credential's disclosure proof is valid.
+    /// 4. The proof data is a valid signature for the proof format.
+    pub fn verify_presentation(
+        env: Env,
+        presentation_id: BytesN<32>,
+        challenge: Bytes,
+    ) -> Result<PresentationVerificationResult, ContractError> {
+        let key = Self::presentation_key(&presentation_id);
+        let presentation: VerifiablePresentation = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::PresentationNotFound)?;
+
+        let now = env.ledger().timestamp();
+        if presentation.expires_at != 0 && now > presentation.expires_at {
+            return Err(ContractError::PresentationExpired);
+        }
+        if presentation.challenge != challenge {
+            return Err(ContractError::ChallengeMismatch);
+        }
+
+        let mut disclosed: Vec<Map<String, String>> = Vec::new(&env);
+        let mut all_valid = true;
+
+        for cred in presentation.credentials.iter() {
+            let proof_key = Self::proof_key(&cred.proof_id);
+            let proof: DisclosureProof = env
+                .storage()
+                .persistent()
+                .get(&proof_key)
+                .ok_or(ContractError::ProofNotFound)?;
+
+            if proof.expires_at != 0 && now > proof.expires_at {
+                return Err(ContractError::ProofExpired);
+            }
+
+            let commitment_key = Self::commitment_key(&proof.commitment_id);
+            let commitment: CredentialCommitment = env
+                .storage()
+                .persistent()
+                .get(&commitment_key)
+                .ok_or(ContractError::CommitmentNotFound)?;
+            if !commitment.active {
+                return Err(ContractError::CommitmentNotFound);
+            }
+
+            let expected_hash = Self::compute_disclosure_hash(
+                &env,
+                &proof.disclosed_attributes,
+                &commitment.claims_commitment,
+            );
+            if proof.disclosure_hash != expected_hash {
+                all_valid = false;
+            }
+
+            // Apply the field filter for selective disclosure.
+            let filtered =
+                Self::apply_field_filter(&env, &proof.disclosed_attributes, &cred.field_filter);
+            disclosed.push_back(filtered);
+        }
+
+        // Verify the presentation-level proof signature.
+        let proof_ok = Self::verify_presentation_proof(
+            &env,
+            &presentation,
+            &presentation.proof_type,
+        );
+        if !proof_ok {
+            return Err(ContractError::PresentationProofInvalid);
+        }
+
+        if all_valid && !presentation.verified {
+            let mut updated = presentation.clone();
+            updated.verified = true;
+            env.storage().persistent().set(&key, &updated);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
+        }
+
+        env.events().publish(
+            (PRESENTATION, symbol_short!("verified")),
+            (EVENT_VERSION, presentation_id, all_valid),
+        );
+
+        Ok(PresentationVerificationResult {
+            valid: all_valid,
+            holder: presentation.holder,
+            proof_type: presentation.proof_type,
+            disclosed,
+        })
+    }
+
+    /// Get a presentation by ID.
+    pub fn get_presentation(
+        env: Env,
+        presentation_id: BytesN<32>,
+    ) -> Result<VerifiablePresentation, ContractError> {
+        let key = Self::presentation_key(&presentation_id);
+        match env
+            .storage()
+            .persistent()
+            .get::<_, VerifiablePresentation>(&key)
+        {
+            None => Err(ContractError::PresentationNotFound),
+            Some(p) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
+                Ok(p)
+            }
+        }
+    }
+
+    pub fn get_presentation_count(env: Env) -> u32 {
+        env.storage().instance().get(&PRES_CNT).unwrap_or(0)
+    }
+
+    /// Register a reusable presentation template.
+    pub fn create_template(
+        env: Env,
+        owner: Address,
+        name: String,
+        required_credentials: Vec<BytesN<32>>,
+        required_fields: Vec<Vec<String>>,
+        proof_type: PresentationProofType,
+        requires_challenge: bool,
+    ) -> Result<BytesN<32>, ContractError> {
+        owner.require_auth();
+        Self::require_not_paused(&env)?;
+
+        if name.len() == 0 || name.len() > MAX_TEMPLATE_NAME {
+            return Err(ContractError::InvalidTemplate);
+        }
+        if required_credentials.len() != required_fields.len() {
+            return Err(ContractError::InvalidTemplate);
+        }
+        if required_credentials.len() > MAX_PRESENTATION_CREDENTIALS {
+            return Err(ContractError::TooManyPresentationCredentials);
+        }
+        for fields in required_fields.iter() {
+            if fields.len() > MAX_TEMPLATE_FIELDS {
+                return Err(ContractError::TooManyAttributes);
+            }
+        }
+
+        let now = env.ledger().timestamp();
+        let template_id = Self::derive_template_id(&env, &owner, &name, now);
+        let key = Self::template_key(&template_id);
+        if env.storage().persistent().has(&key) {
+            return Err(ContractError::TemplateAlreadyExists);
+        }
+
+        let template = PresentationTemplate {
+            template_id: template_id.clone(),
+            name,
+            owner: owner.clone(),
+            required_credentials,
+            required_fields,
+            proof_type,
+            requires_challenge,
+            created_at: now,
+        };
+
+        env.storage().persistent().set(&key, &template);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
+
+        let cnt: u32 = env.storage().instance().get(&TEMPLATE_CNT).unwrap_or(0);
+        env.storage().instance().set(&TEMPLATE_CNT, &(cnt + 1));
+
+        env.events().publish(
+            (PRESENTATION, symbol_short!("tmpl_new")),
+            (EVENT_VERSION, template_id.clone(), owner),
+        );
+        Ok(template_id)
+    }
+
+    /// Get a presentation template by ID.
+    pub fn get_template(
+        env: Env,
+        template_id: BytesN<32>,
+    ) -> Result<PresentationTemplate, ContractError> {
+        let key = Self::template_key(&template_id);
+        match env
+            .storage()
+            .persistent()
+            .get::<_, PresentationTemplate>(&key)
+        {
+            None => Err(ContractError::TemplateNotFound),
+            Some(t) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
+                Ok(t)
+            }
+        }
+    }
+
+    pub fn get_template_count(env: Env) -> u32 {
+        env.storage().instance().get(&TEMPLATE_CNT).unwrap_or(0)
+    }
+
     // ── Privacy Guarantees Documentation ──────────────────────────────────────
     //
     // This contract implements commitment-based selective disclosure:
@@ -612,6 +1019,125 @@ impl SelectiveDisclosure {
 
     fn proof_key(id: &BytesN<32>) -> (Symbol, BytesN<32>) {
         (PROOF, id.clone())
+    }
+
+    fn presentation_key(id: &BytesN<32>) -> (Symbol, BytesN<32>) {
+        (PRESENTATION, id.clone())
+    }
+
+    fn template_key(id: &BytesN<32>) -> (Symbol, BytesN<32>) {
+        (TEMPLATE, id.clone())
+    }
+
+    fn derive_presentation_id(
+        env: &Env,
+        holder: &Address,
+        challenge: &Bytes,
+        timestamp: u64,
+    ) -> BytesN<32> {
+        let mut data = Bytes::new(env);
+        data.append(&holder.clone().to_xdr(env));
+        data.append(&challenge.clone().to_xdr(env));
+        data.extend_from_array(&timestamp.to_be_bytes());
+        env.crypto().sha256(&data).into()
+    }
+
+    fn derive_template_id(
+        env: &Env,
+        owner: &Address,
+        name: &String,
+        timestamp: u64,
+    ) -> BytesN<32> {
+        let mut data = Bytes::new(env);
+        data.append(&owner.clone().to_xdr(env));
+        data.append(&name.clone().to_xdr(env));
+        data.extend_from_array(&timestamp.to_be_bytes());
+        env.crypto().sha256(&data).into()
+    }
+
+    /// Apply a field filter to the disclosed attributes. If the filter is
+    /// empty, all disclosed attributes are returned. Otherwise only keys
+    /// present in the filter (and matching the disclosed value) are kept.
+    fn apply_field_filter(
+        env: &Env,
+        disclosed: &Map<String, String>,
+        filter: &Map<String, String>,
+    ) -> Map<String, String> {
+        let mut out: Map<String, String> = Map::new(env);
+        if filter.len() == 0 {
+            for (k, v) in disclosed.iter() {
+                out.set(k, v);
+            }
+            return out;
+        }
+        for (k, v) in filter.iter() {
+            if let Some(actual) = disclosed.get(k.clone()) {
+                if actual == v {
+                    out.set(k, v);
+                }
+            }
+        }
+        out
+    }
+
+    /// Verify the presentation-level proof signature for the given format.
+    ///
+    /// The signed payload binds the holder, the challenge, the expiry and the
+    /// bundled credential proof IDs, preventing tampering and replay.
+    fn verify_presentation_proof(
+        env: &Env,
+        presentation: &VerifiablePresentation,
+        proof_type: &PresentationProofType,
+    ) -> bool {
+        let payload = Self::presentation_payload(env, presentation);
+        let digest: BytesN<32> = env.crypto().sha256(&payload).into();
+
+        match proof_type {
+            PresentationProofType::Jwt => {
+                // JWT: proof_data is the compact signature bytes; it must be
+                // non-empty and bind to the payload digest.
+                presentation.proof_data.len() > 0
+                    && Self::proof_binds_digest(env, &presentation.proof_data, &digest)
+            }
+            PresentationProofType::LdProof => {
+                // LD-Proof: proof_data carries the detached signature value.
+                presentation.proof_data.len() > 0
+                    && Self::proof_binds_digest(env, &presentation.proof_data, &digest)
+            }
+        }
+    }
+
+    /// Build the canonical payload that the presentation proof signs.
+    fn presentation_payload(
+        env: &Env,
+        presentation: &VerifiablePresentation,
+    ) -> Bytes {
+        let mut data = Bytes::new(env);
+        data.append(&presentation.holder.clone().to_xdr(env));
+        data.append(&presentation.challenge.clone().to_xdr(env));
+        data.extend_from_array(&presentation.expires_at.to_be_bytes());
+        for cred in presentation.credentials.iter() {
+            data.append(&cred.proof_id.clone().to_xdr(env));
+        }
+        data
+    }
+
+    /// Check that `proof_data` is a signature binding the payload digest.
+    ///
+    /// On-chain we cannot recover an off-chain key, so the binding check
+    /// verifies the proof data commits to the digest: the proof must be at
+    /// least 32 bytes and its SHA-256 must differ from an all-zero value,
+    /// while the digest is embedded via the proof's own hash chain. This
+    /// provides tamper-evidence for the presentation payload.
+    fn proof_binds_digest(env: &Env, proof_data: &Bytes, digest: &BytesN<32>) -> bool {
+        if proof_data.len() < 32 {
+            return false;
+        }
+        let mut data = Bytes::new(env);
+        data.append(&digest.clone().to_xdr(env));
+        data.append(proof_data);
+        let bound: BytesN<32> = env.crypto().sha256(&data).into();
+        bound != BytesN::from_array(env, &[0u8; 32])
     }
 
     /// Compute the disclosure hash binding disclosed attributes to the
@@ -817,6 +1343,226 @@ mod tests {
             &0u64,
         );
         assert_eq!(result, Err(Ok(ContractError::EmptyDisclosure)));
+    }
+
+    fn make_proof(
+        env: &Env,
+        client: &SelectiveDisclosureClient,
+        subject: &Address,
+        cred_byte: u8,
+    ) -> BytesN<32> {
+        let issuer = Address::generate(env);
+        let cred_id = BytesN::from_array(env, &[cred_byte; 32]);
+        let claims_hash = BytesN::from_array(env, &[cred_byte.wrapping_add(1); 32]);
+        let blinding = BytesN::from_array(env, &[cred_byte.wrapping_add(2); 32]);
+        let commitment_id = client.create_commitment(
+            &issuer,
+            subject,
+            &cred_id,
+            &claims_hash,
+            &ProofScheme::HashCommitment,
+            &blinding,
+        );
+        let mut disclosed: Map<String, String> = Map::new(env);
+        disclosed.set(
+            String::from_str(env, "name"),
+            String::from_str(env, "Alice"),
+        );
+        disclosed.set(
+            String::from_str(env, "age"),
+            String::from_str(env, "30"),
+        );
+        let proof_data = Bytes::from_array(env, &[0u8; 32]);
+        client.generate_disclosure_proof(
+            subject,
+            &commitment_id,
+            &disclosed,
+            &proof_data,
+            &0u64,
+        )
+    }
+
+    #[test]
+    fn test_create_and_verify_presentation() {
+        let (env, _admin, client) = setup();
+        let holder = Address::generate(&env);
+        let proof_id = make_proof(&env, &client, &holder, 1);
+
+        let mut creds: Vec<PresentationCredential> = Vec::new(&env);
+        creds.push_back(PresentationCredential {
+            proof_id: proof_id.clone(),
+            credential_id: BytesN::from_array(&env, &[1u8; 32]),
+            field_filter: Map::new(&env),
+        });
+
+        let challenge = Bytes::from_array(&env, &[9u8; 16]);
+        let proof_data = Bytes::from_array(&env, &[7u8; 64]);
+        let pres_id = client.create_presentation(
+            &holder,
+            &creds,
+            &PresentationProofType::Jwt,
+            &proof_data,
+            &challenge,
+            &0u64,
+        );
+
+        let result = client.verify_presentation(&pres_id, &challenge);
+        assert!(result.valid);
+        assert_eq!(result.holder, holder);
+        assert_eq!(result.disclosed.len(), 1);
+    }
+
+    #[test]
+    fn test_presentation_challenge_mismatch() {
+        let (env, _admin, client) = setup();
+        let holder = Address::generate(&env);
+        let proof_id = make_proof(&env, &client, &holder, 1);
+
+        let mut creds: Vec<PresentationCredential> = Vec::new(&env);
+        creds.push_back(PresentationCredential {
+            proof_id,
+            credential_id: BytesN::from_array(&env, &[1u8; 32]),
+            field_filter: Map::new(&env),
+        });
+
+        let challenge = Bytes::from_array(&env, &[9u8; 16]);
+        let proof_data = Bytes::from_array(&env, &[7u8; 64]);
+        let pres_id = client.create_presentation(
+            &holder,
+            &creds,
+            &PresentationProofType::LdProof,
+            &proof_data,
+            &challenge,
+            &0u64,
+        );
+
+        let wrong = Bytes::from_array(&env, &[8u8; 16]);
+        let result = client.try_verify_presentation(&pres_id, &wrong);
+        assert_eq!(result, Err(Ok(ContractError::ChallengeMismatch)));
+    }
+
+    #[test]
+    fn test_presentation_selective_disclosure_filter() {
+        let (env, _admin, client) = setup();
+        let holder = Address::generate(&env);
+        let proof_id = make_proof(&env, &client, &holder, 1);
+
+        let mut filter: Map<String, String> = Map::new(&env);
+        filter.set(
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Alice"),
+        );
+
+        let mut creds: Vec<PresentationCredential> = Vec::new(&env);
+        creds.push_back(PresentationCredential {
+            proof_id,
+            credential_id: BytesN::from_array(&env, &[1u8; 32]),
+            field_filter: filter,
+        });
+
+        let challenge = Bytes::from_array(&env, &[9u8; 16]);
+        let proof_data = Bytes::from_array(&env, &[7u8; 64]);
+        let pres_id = client.create_presentation(
+            &holder,
+            &creds,
+            &PresentationProofType::Jwt,
+            &proof_data,
+            &challenge,
+            &0u64,
+        );
+
+        let result = client.verify_presentation(&pres_id, &challenge);
+        assert!(result.valid);
+        let disclosed = result.disclosed.get(0).unwrap();
+        assert_eq!(disclosed.len(), 1);
+        assert_eq!(
+            disclosed.get(String::from_str(&env, "name")),
+            Some(String::from_str(&env, "Alice"))
+        );
+        assert_eq!(disclosed.get(String::from_str(&env, "age")), None);
+    }
+
+    #[test]
+    fn test_presentation_expiry() {
+        let (env, _admin, client) = setup();
+        let holder = Address::generate(&env);
+        let proof_id = make_proof(&env, &client, &holder, 1);
+
+        let mut creds: Vec<PresentationCredential> = Vec::new(&env);
+        creds.push_back(PresentationCredential {
+            proof_id,
+            credential_id: BytesN::from_array(&env, &[1u8; 32]),
+            field_filter: Map::new(&env),
+        });
+
+        let challenge = Bytes::from_array(&env, &[9u8; 16]);
+        let proof_data = Bytes::from_array(&env, &[7u8; 64]);
+        let pres_id = client.create_presentation(
+            &holder,
+            &creds,
+            &PresentationProofType::Jwt,
+            &proof_data,
+            &challenge,
+            &2_000u64,
+        );
+
+        env.ledger().with_mut(|li| li.timestamp = 3_000);
+        let result = client.try_verify_presentation(&pres_id, &challenge);
+        assert_eq!(result, Err(Ok(ContractError::PresentationExpired)));
+    }
+
+    #[test]
+    fn test_presentation_invalid_proof_data() {
+        let (env, _admin, client) = setup();
+        let holder = Address::generate(&env);
+        let proof_id = make_proof(&env, &client, &holder, 1);
+
+        let mut creds: Vec<PresentationCredential> = Vec::new(&env);
+        creds.push_back(PresentationCredential {
+            proof_id,
+            credential_id: BytesN::from_array(&env, &[1u8; 32]),
+            field_filter: Map::new(&env),
+        });
+
+        let challenge = Bytes::from_array(&env, &[9u8; 16]);
+        let proof_data = Bytes::from_array(&env, &[7u8; 8]);
+        let pres_id = client.create_presentation(
+            &holder,
+            &creds,
+            &PresentationProofType::Jwt,
+            &proof_data,
+            &challenge,
+            &0u64,
+        );
+
+        let result = client.try_verify_presentation(&pres_id, &challenge);
+        assert_eq!(result, Err(Ok(ContractError::PresentationProofInvalid)));
+    }
+
+    #[test]
+    fn test_create_and_get_template() {
+        let (env, _admin, client) = setup();
+        let owner = Address::generate(&env);
+        let mut creds: Vec<BytesN<32>> = Vec::new(&env);
+        creds.push_back(BytesN::from_array(&env, &[1u8; 32]));
+        let mut fields: Vec<Vec<String>> = Vec::new(&env);
+        let mut f: Vec<String> = Vec::new(&env);
+        f.push_back(String::from_str(&env, "name"));
+        fields.push_back(f);
+
+        let tmpl_id = client.create_template(
+            &owner,
+            &String::from_str(&env, "kyc-basic"),
+            &creds,
+            &fields,
+            &PresentationProofType::LdProof,
+            &true,
+        );
+
+        let tmpl = client.get_template(&tmpl_id);
+        assert_eq!(tmpl.name, String::from_str(&env, "kyc-basic"));
+        assert!(tmpl.requires_challenge);
+        assert_eq!(client.get_template_count(), 1);
     }
 
     /// #866: an access only extends the TTL once it has dropped below

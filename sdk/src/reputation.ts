@@ -53,6 +53,24 @@ export interface ScoreHistoryEntry {
   submittedAt: number;
 }
 
+export interface StakeRecord {
+  holder: string;
+  staked: bigint;
+  pendingUnstake: bigint;
+  /** Reputation multiplier in basis points (10_000 = 1x). */
+  multiplierBps: number;
+  updatedAt: number;
+}
+
+export interface StakingHistoryEntry {
+  holder: string;
+  /** One of: deposit, request_unstake, withdraw, slash, reward, delegate, revoke_delegation. */
+  action: string;
+  amount: bigint;
+  counterparty?: string;
+  timestamp: number;
+}
+
 /**
  * Client for the reputation contract.
  *
@@ -542,6 +560,329 @@ export class ReputationClient extends BaseClient {
     ) as { items: ScoreHistoryEntry[]; next_cursor: number | null };
 
     return { items: raw.items, nextCursor: raw.next_cursor ?? null };
+  }
+
+  /**
+   * Deposit tokens into the reputation staking pool for a credential holder.
+   *
+   * @param holderKeypair Keypair of the credential holder depositing the stake.
+   * @param amount        Amount of tokens to stake (in the token's smallest unit).
+   */
+  async depositStake(
+    holderKeypair: Keypair,
+    amount: bigint,
+    options?: CallOptions
+  ): Promise<SorobanResponse<WriteResult>> {
+    return this.submitStakeTx(
+      holderKeypair,
+      'deposit_stake',
+      [
+        nativeToScVal(holderKeypair.publicKey(), { type: 'address' }),
+        nativeToScVal(amount, { type: 'i128' }),
+      ],
+      'reputation.depositStake',
+      options
+    );
+  }
+
+  /**
+   * Request to unstake. The stake enters a cooldown period before it can be withdrawn.
+   *
+   * @param holderKeypair Keypair of the credential holder.
+   * @param amount        Amount of tokens to unstake.
+   */
+  async requestUnstake(
+    holderKeypair: Keypair,
+    amount: bigint,
+    options?: CallOptions
+  ): Promise<SorobanResponse<WriteResult>> {
+    return this.submitStakeTx(
+      holderKeypair,
+      'request_unstake',
+      [
+        nativeToScVal(holderKeypair.publicKey(), { type: 'address' }),
+        nativeToScVal(amount, { type: 'i128' }),
+      ],
+      'reputation.requestUnstake',
+      options
+    );
+  }
+
+  /**
+   * Withdraw a previously requested unstake after the cooldown period has elapsed.
+   *
+   * @param holderKeypair Keypair of the credential holder.
+   * @param amount        Amount of tokens to withdraw.
+   */
+  async withdrawStake(
+    holderKeypair: Keypair,
+    amount: bigint,
+    options?: CallOptions
+  ): Promise<SorobanResponse<WriteResult>> {
+    return this.submitStakeTx(
+      holderKeypair,
+      'withdraw_stake',
+      [
+        nativeToScVal(holderKeypair.publicKey(), { type: 'address' }),
+        nativeToScVal(amount, { type: 'i128' }),
+      ],
+      'reputation.withdrawStake',
+      options
+    );
+  }
+
+  /**
+   * Slash a holder's stake for proven fraud. Caller must be authorized (admin/arbiter).
+   *
+   * @param callerKeypair Keypair of the authorized caller performing the slash.
+   * @param holderAddress Address of the credential holder being slashed.
+   * @param amount        Amount of tokens to slash.
+   * @param reason        Human-readable reason for the slash.
+   */
+  async slashStake(
+    callerKeypair: Keypair,
+    holderAddress: string,
+    amount: bigint,
+    reason: string,
+    options?: CallOptions
+  ): Promise<SorobanResponse<WriteResult>> {
+    validateStellarAddress(holderAddress);
+    return this.submitStakeTx(
+      callerKeypair,
+      'slash_stake',
+      [
+        nativeToScVal(callerKeypair.publicKey(), { type: 'address' }),
+        nativeToScVal(holderAddress, { type: 'address' }),
+        nativeToScVal(amount, { type: 'i128' }),
+        nativeToScVal(reason, { type: 'string' }),
+      ],
+      'reputation.slashStake',
+      options
+    );
+  }
+
+  /**
+   * Distribute accumulated staking rewards to stakers. Caller must be authorized.
+   *
+   * @param callerKeypair Keypair of the authorized caller distributing rewards.
+   * @param amount        Total reward amount to distribute.
+   */
+  async distributeRewards(
+    callerKeypair: Keypair,
+    amount: bigint,
+    options?: CallOptions
+  ): Promise<SorobanResponse<WriteResult>> {
+    return this.submitStakeTx(
+      callerKeypair,
+      'distribute_rewards',
+      [
+        nativeToScVal(callerKeypair.publicKey(), { type: 'address' }),
+        nativeToScVal(amount, { type: 'i128' }),
+      ],
+      'reputation.distributeRewards',
+      options
+    );
+  }
+
+  /**
+   * Delegate a portion of a holder's stake to another address.
+   *
+   * @param holderKeypair  Keypair of the credential holder delegating the stake.
+   * @param delegateAddress Address receiving the delegated stake.
+   * @param amount         Amount of tokens to delegate.
+   */
+  async delegateStake(
+    holderKeypair: Keypair,
+    delegateAddress: string,
+    amount: bigint,
+    options?: CallOptions
+  ): Promise<SorobanResponse<WriteResult>> {
+    validateStellarAddress(delegateAddress);
+    return this.submitStakeTx(
+      holderKeypair,
+      'delegate_stake',
+      [
+        nativeToScVal(holderKeypair.publicKey(), { type: 'address' }),
+        nativeToScVal(delegateAddress, { type: 'address' }),
+        nativeToScVal(amount, { type: 'i128' }),
+      ],
+      'reputation.delegateStake',
+      options
+    );
+  }
+
+  /**
+   * Revoke a previously created stake delegation.
+   *
+   * @param holderKeypair   Keypair of the credential holder.
+   * @param delegateAddress Address whose delegation is being revoked.
+   * @param amount          Amount of delegated tokens to revoke.
+   */
+  async revokeDelegation(
+    holderKeypair: Keypair,
+    delegateAddress: string,
+    amount: bigint,
+    options?: CallOptions
+  ): Promise<SorobanResponse<WriteResult>> {
+    validateStellarAddress(delegateAddress);
+    return this.submitStakeTx(
+      holderKeypair,
+      'revoke_delegation',
+      [
+        nativeToScVal(holderKeypair.publicKey(), { type: 'address' }),
+        nativeToScVal(delegateAddress, { type: 'address' }),
+        nativeToScVal(amount, { type: 'i128' }),
+      ],
+      'reputation.revokeDelegation',
+      options
+    );
+  }
+
+  /**
+   * Get the current stake record (staked amount, pending unstake, multiplier) for a holder.
+   */
+  async getStake(
+    callerAddress: string,
+    holderAddress: string,
+    options?: CallOptions
+  ): Promise<StakeRecord> {
+    validateStellarAddress(callerAddress);
+    validateStellarAddress(holderAddress);
+    const account = new Account(callerAddress, "0");
+    const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
+
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        this.contract.call(
+          'get_stake',
+          nativeToScVal(holderAddress, { type: 'address' })
+        )
+      )
+      .setTimeout(timeout)
+      .build();
+
+    const result = await retryWithBackoff(() =>
+      this.server.simulateTransaction(tx)
+    );
+    if (SorobanRpc.Api.isSimulationError(result)) {
+      const errMsg: string = (result as { error: string }).error ?? '';
+      const contractErr = ContractError.extract(errMsg, REPUTATION_ERRORS);
+      if (contractErr) throw contractErr;
+      if (
+        errMsg.includes('not found') ||
+        errMsg.includes('no stake') ||
+        errMsg.includes('MissingValue') ||
+        errMsg.includes('KeyNotFound')
+      ) {
+        return {
+          holder: holderAddress,
+          staked: 0n,
+          pendingUnstake: 0n,
+          multiplierBps: 10_000,
+          updatedAt: 0,
+        };
+      }
+      throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, 'CONTRACT_ERROR');
+    }
+
+    return scValToNative(
+      (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!
+        .retval
+    ) as StakeRecord;
+  }
+
+  /**
+   * Get one page of staking history entries for a holder.
+   */
+  async getStakingHistory(
+    callerAddress: string,
+    holderAddress: string,
+    options?: PaginationOptions
+  ): Promise<Page<StakingHistoryEntry>> {
+    validateStellarAddress(callerAddress);
+    validateStellarAddress(holderAddress);
+    const account = new Account(callerAddress, "0");
+    const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
+    const cursorArg = options?.cursor === undefined
+      ? nativeToScVal(null, { type: 'option' })
+      : nativeToScVal({ Some: options.cursor }, {
+          type: { Some: ['u64'] } as never,
+        });
+
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        this.contract.call(
+          'list_staking_history',
+          nativeToScVal(holderAddress, { type: 'address' }),
+          cursorArg,
+          nativeToScVal(options?.limit ?? 0, { type: 'u32' })
+        )
+      )
+      .setTimeout(timeout)
+      .build();
+
+    const result = await retryWithBackoff(() => this.server.simulateTransaction(tx));
+    if (SorobanRpc.Api.isSimulationError(result)) {
+      const errMsg = result.error ?? '';
+      const contractErr = ContractError.extract(errMsg, REPUTATION_ERRORS);
+      if (contractErr) throw contractErr;
+      throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, 'CONTRACT_ERROR');
+    }
+
+    const raw = scValToNative(
+      (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
+    ) as { items: StakingHistoryEntry[]; next_cursor: number | null };
+
+    return { items: raw.items, nextCursor: raw.next_cursor ?? null };
+  }
+
+  /**
+   * Shared helper that builds, prepares, signs and submits a staking-related
+   * contract call, then polls until the transaction is confirmed.
+   */
+  private async submitStakeTx(
+    signerKeypair: Keypair,
+    method: string,
+    args: ReturnType<typeof nativeToScVal>[],
+    operation: string,
+    options?: CallOptions
+  ): Promise<SorobanResponse<WriteResult>> {
+    const account = await this.server.getAccount(signerKeypair.publicKey());
+    const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
+
+    const builder = new SorobanTransactionBuilder(account, this.config);
+    builder.addContractCall(this.config.reputationId, method, ...args);
+
+    const tx = builder.build(timeout);
+    const prepared = await retryWithBackoff(() =>
+      this.server.prepareTransaction(tx)
+    );
+    this.debug('sdk.simulation_result', { operation: `${operation}.prepare`, success: true });
+    const estimatedFee = parseInt(prepared.fee, 10);
+    const estimatedFeeXlm = (estimatedFee / 10_000_000).toFixed(7);
+    prepared.sign(signerKeypair);
+
+    const result = await retryWithBackoff(() =>
+      this.server.sendTransaction(prepared)
+    );
+    this.debug('sdk.submission_outcome', { operation: `${operation}.send`, status: result.status });
+    if (result.status !== 'PENDING') {
+      throw new SorobanIdentityError(`Transaction failed: ${result.status}`, 'CONTRACT_ERROR');
+    }
+
+    const txHash = result.hash;
+    await pollTransactionStatus(this.server, txHash, {
+      maxRetries: this.config.maxRetries ?? this.config.pollingRetries,
+      retryIntervalMs: this.config.retryIntervalMs ?? this.config.pollingIntervalMs,
+      exponentialBackoff: this.config.pollingExponentialBackoff,
+    });
+    return { data: { estimatedFee, estimatedFeeXlm }, txHash };
   }
 
   /**

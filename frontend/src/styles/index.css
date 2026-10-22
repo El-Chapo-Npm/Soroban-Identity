@@ -17,6 +17,228 @@
 @import "./touch.css";
 @import "./transitions.css";
 
+/* ── Custom theming engine (#1107) ───────────────────────────────────────────
+   The theme generator writes these custom properties onto :root (or a scoped
+   [data-theme-scope] element). Every component token below falls back to the
+   built-in palette, so a missing or partial theme never breaks the UI. */
+
+:root {
+  --theme-primary: #7c3aed;
+  --theme-primary-contrast: #ffffff;
+  --theme-accent: #7c3aed;
+  --theme-accent-contrast: #ffffff;
+  --theme-bg: #ffffff;
+  --theme-surface: #f8fafc;
+  --theme-text: #0f172a;
+  --theme-muted: #475569;
+  --theme-border: #e2e8f0;
+  --theme-logo: none;
+
+  /* Cascade the theme into the tokens the rest of the app already uses. */
+  --accent: var(--theme-accent, #7c3aed);
+  --accent-contrast: var(--theme-accent-contrast, #ffffff);
+  --primary: var(--theme-primary, #7c3aed);
+  --primary-contrast: var(--theme-primary-contrast, #ffffff);
+  --bg: var(--theme-bg, #ffffff);
+  --surface: var(--theme-surface, #f8fafc);
+  --text: var(--theme-text, #0f172a);
+  --muted: var(--theme-muted, #475569);
+  --border: var(--theme-border, #e2e8f0);
+}
+
+[data-theme-scope] {
+  --accent: var(--theme-accent, #7c3aed);
+  --accent-contrast: var(--theme-accent-contrast, #ffffff);
+  --primary: var(--theme-primary, #7c3aed);
+  --primary-contrast: var(--theme-primary-contrast, #ffffff);
+  --bg: var(--theme-bg, #ffffff);
+  --surface: var(--theme-surface, #f8fafc);
+  --text: var(--theme-text, #0f172a);
+  --muted: var(--theme-muted, #475569);
+  --border: var(--theme-border, #e2e8f0);
+}
+
+.theme-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.theme-editor__field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.875rem;
+}
+
+.theme-editor__field input[type="color"] {
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: none;
+  cursor: pointer;
+}
+
+.theme-editor__field input[type="text"],
+.theme-editor__field input[type="file"] {
+  flex: 1;
+  min-height: 44px;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.theme-editor__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.theme-editor__actions button {
+  min-height: 44px;
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--primary);
+  border-radius: 0.5rem;
+  background: var(--primary);
+  color: var(--primary-contrast);
+  font: inherit;
+  cursor: pointer;
+}
+
+.theme-editor__actions button[data-variant="ghost"] {
+  background: transparent;
+  color: var(--primary);
+}
+
+.theme-editor__actions button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.theme-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 0.75rem;
+}
+
+.theme-gallery__card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.theme-gallery__card[aria-pressed="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.theme-gallery__card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.theme-gallery__swatches {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.theme-gallery__swatch {
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+}
+
+.theme-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.theme-preview__logo {
+  width: 48px;
+  height: 48px;
+  border-radius: 0.5rem;
+  object-fit: contain;
+  background-image: var(--theme-logo);
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
+}
+
+.theme-preview__swatch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  background: var(--primary);
+  color: var(--primary-contrast);
+  font-size: 0.875rem;
+}
+
+.contrast-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.125rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.contrast-badge[data-level="pass"] {
+  background: color-mix(in srgb, #16a34a 15%, transparent);
+  color: #166534;
+}
+
+.contrast-badge[data-level="warn"] {
+  background: color-mix(in srgb, #d97706 15%, transparent);
+  color: #92400e;
+}
+
+.contrast-badge[data-level="fail"] {
+  background: color-mix(in srgb, #dc2626 15%, transparent);
+  color: #991b1b;
+}
+
+@media (prefers-color-scheme: dark) {
+  .contrast-badge[data-level="pass"] {
+    color: #86efac;
+  }
+  .contrast-badge[data-level="warn"] {
+    color: #fcd34d;
+  }
+  .contrast-badge[data-level="fail"] {
+    color: #fca5a5;
+  }
+}
+
 /* ── Voice command UI (#1046) ────────────────────────────────────────────────
    Microphone toggle, listening indicator, and permission-denied state.
    The pulse animates transform/opacity only so it stays on the compositor. */

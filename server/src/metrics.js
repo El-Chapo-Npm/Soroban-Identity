@@ -38,6 +38,13 @@ const COUNTER_DEFINITIONS = {
   query_cache_hits_total: 'Total query-result cache hits',
   query_cache_misses_total: 'Total query-result cache misses',
   query_cache_errors_total: 'Total query-result cache errors',
+  cache_hits_total: 'Total cache hits, by cache layer and data type',
+  cache_misses_total: 'Total cache misses, by cache layer and data type',
+  cache_errors_total: 'Total cache operation errors, by cache layer and data type',
+  cache_sets_total: 'Total cache writes, by cache layer and data type',
+  cache_invalidations_total: 'Total cache invalidations, by cache layer and data type',
+  cache_stampede_prevented_total: 'Total cache stampede events prevented, by cache layer and data type',
+  cache_warming_runs_total: 'Total cache warming runs, by data type and result',
 };
 
 /**
@@ -180,6 +187,28 @@ export class MetricsService {
       help: 'Query-result cache lookup latency in seconds',
       labelNames: ['outcome'],
       buckets: [0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5],
+      registers: [this.registry],
+    });
+
+    this.cacheLatency = new client.Histogram({
+      name: 'cache_operation_latency_seconds',
+      help: 'Cache operation latency in seconds, by cache layer, data type and operation',
+      labelNames: ['layer', 'data_type', 'operation'],
+      buckets: [0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1],
+      registers: [this.registry],
+    });
+
+    this.cacheHitRate = new client.Gauge({
+      name: 'cache_hit_rate',
+      help: 'Cache hit rate (0-1) by cache layer and data type, as of the last snapshot',
+      labelNames: ['layer', 'data_type'],
+      registers: [this.registry],
+    });
+
+    this.cacheEntries = new client.Gauge({
+      name: 'cache_entries',
+      help: 'Number of entries currently held in a cache layer, by layer',
+      labelNames: ['layer'],
       registers: [this.registry],
     });
 
@@ -359,6 +388,80 @@ export class MetricsService {
   }
 
   observeDdosEvent(type) { this.ddosEvents.inc({ type: type || 'unknown' }); }
+
+  /**
+   * Record a cache operation (#1118).
+   *
+   * @param {object} sample
+   * @param {'l1'|'l2'|'l3'} sample.layer
+   * @param {string} sample.dataType
+   * @param {'hit'|'miss'|'set'|'error'|'invalidate'|'stampede_prevented'} sample.outcome
+   * @param {number} [sample.durationSeconds]
+   */
+  observeCacheOperation({ layer, dataType, outcome, durationSeconds } = {}) {
+    const labels = { layer: layer || 'unknown', data_type: dataType || 'unknown' };
+    switch (outcome) {
+      case 'hit':
+        this._counters.cache_hits_total.inc(labels);
+        break;
+      case 'miss':
+        this._counters.cache_misses_total.inc(labels);
+        break;
+      case 'set':
+        this._counters.cache_sets_total.inc(labels);
+        break;
+      case 'invalidate':
+        this._counters.cache_invalidations_total.inc(labels);
+        break;
+      case 'stampede_prevented':
+        this._counters.cache_stampede_prevented_total.inc(labels);
+        break;
+      default:
+        this._counters.cache_errors_total.inc(labels);
+        break;
+    }
+    if (durationSeconds !== undefined && Number.isFinite(durationSeconds)) {
+      this.cacheLatency.observe(
+        { layer: labels.layer, data_type: labels.data_type, operation: outcome || 'unknown' },
+        durationSeconds,
+      );
+    }
+  }
+
+  /**
+   * Record the outcome of a cache warming run (#1118).
+   * @param {object} sample
+   * @param {string} sample.dataType
+   * @param {'success'|'failure'} sample.result
+   */
+  observeCacheWarming({ dataType, result } = {}) {
+    this._counters.cache_warming_runs_total.inc({ data_type: dataType || 'unknown', result: result || 'unknown' });
+  }
+
+  /**
+   * Publish a cache statistics snapshot (#1118).
+   *
+   * @param {object} snapshot
+   * @param {Record<string, { hits?: number, misses?: number, entries?: number }>} [snapshot.layers]
+   *   Per-layer counters keyed by layer name.
+   * @param {Record<string, { hits?: number, misses?: number }>} [snapshot.dataTypes]
+   *   Per-data-type counters keyed by data type name.
+   */
+  updateCacheStats({ layers = {}, dataTypes = {} } = {}) {
+    for (const [layer, stats] of Object.entries(layers)) {
+      const hits = Number(stats?.hits ?? 0);
+      const misses = Number(stats?.misses ?? 0);
+      const total = hits + misses;
+      this.cacheHitRate.set({ layer, data_type: '*' }, total > 0 ? hits / total : 0);
+      if (stats?.entries !== undefined) this.cacheEntries.set({ layer }, Number(stats.entries));
+    }
+    for (const [dataType, stats] of Object.entries(dataTypes)) {
+      const hits = Number(stats?.hits ?? 0);
+      const misses = Number(stats?.misses ?? 0);
+      const total = hits + misses;
+      this.cacheHitRate.set({ layer: '*', data_type: dataType }, total > 0 ? hits / total : 0);
+    }
+  }
 
   /**
    * Record a rejected request whose nonce had already been used (#1052).

@@ -71,6 +71,56 @@ export interface VerifiablePresentation {
   proof?: PresentationProof;
   /** Unix timestamp (ms) when the presentation was created. */
   created: number;
+  /** Optional challenge (nonce) the presentation is bound to. */
+  challenge?: string;
+  /** Unix timestamp (ms) after which the presentation is no longer valid. */
+  expiresAt?: number;
+}
+
+/**
+ * Supported proof formats for a {@link VerifiablePresentation}.
+ *
+ * - `DataIntegrityProof` — W3C LD-Proofs style detached signature.
+ * - `JwtProof2020` — JWT-encoded proof (`jws` holds the compact JWT).
+ */
+export type PresentationProofFormat = 'DataIntegrityProof' | 'JwtProof2020';
+
+/**
+ * Options controlling presentation creation.
+ */
+export interface CreatePresentationOptions {
+  /** Skip verification of the supplied proof signature. */
+  skipProofVerification?: boolean;
+  /** Challenge (nonce) to bind the presentation to. */
+  challenge?: string;
+  /** Presentation expiry as a Unix timestamp (ms). */
+  expiresAt?: number;
+  /** Proof format to emit. Defaults to `DataIntegrityProof`. */
+  proofFormat?: PresentationProofFormat;
+}
+
+/**
+ * Options controlling presentation verification.
+ */
+export interface VerifyPresentationOptions {
+  /** Expected challenge; when set the presentation must carry the same value. */
+  challenge?: string;
+  /** Current time in ms used for expiry checks. Defaults to `Date.now()`. */
+  now?: number;
+}
+
+/**
+ * A reusable presentation template describing which claims to disclose.
+ */
+export interface PresentationTemplate {
+  /** Template name. */
+  name: string;
+  /** Claim fields to disclose. */
+  fieldsToDisclose: string[];
+  /** Optional proof format to use. */
+  proofFormat?: PresentationProofFormat;
+  /** Optional presentation lifetime in ms from creation. */
+  ttlMs?: number;
 }
 
 // ── Verification result ──────────────────────────────────────────────────────
@@ -89,7 +139,10 @@ export type PresentationVerifyFailReason =
   | 'INVALID_TYPE'
   | 'MISSING_CREDENTIALS'
   | 'INCOMPLETE_CREDENTIAL'
-  | 'MISSING_CLAIMS';
+  | 'MISSING_CLAIMS'
+  | 'CHALLENGE_MISMATCH'
+  | 'EXPIRED'
+  | 'INVALID_PROOF';
 
 /**
  * Result from {@link PresentationClient.verifyPresentation}.
@@ -165,7 +218,7 @@ export class PresentationClient {
       /** Client used to resolve the holder's DID and obtain their public key. */
       identityClient: DidResolverLike;
     },
-    opts?: { skipProofVerification?: boolean }
+    opts?: CreatePresentationOptions
   ): Promise<VerifiablePresentation> {
     if (proofInput && !holderAddress) {
       throw new SorobanIdentityError(
@@ -205,14 +258,17 @@ export class PresentationClient {
       holder: holderAddress ? `did:stellar:${holderAddress}` : undefined,
       verifiableCredential: [vc],
       created: Date.now(),
+      challenge: opts?.challenge,
+      expiresAt: opts?.expiresAt,
     };
 
     if (proofInput) {
+      const proofFormat: PresentationProofFormat = opts?.proofFormat ?? 'DataIntegrityProof';
       const proof: PresentationProof = {
-        type: 'DataIntegrityProof',
+        type: proofFormat === 'JwtProof2020' ? 'JwtProof2020' : 'DataIntegrityProof',
         created: vp.created,
         proofPurpose: 'authentication',
-        cryptosuite: 'eddsa-2022',
+        cryptosuite: proofFormat === 'JwtProof2020' ? 'jwt-2020' : 'eddsa-2022',
         verificationMethod: holderAddress ? `did:stellar:${holderAddress}#key-1` : undefined,
         jws: proofInput.jws,
       };
@@ -277,7 +333,10 @@ export class PresentationClient {
    * }
    * ```
    */
-  verifyPresentation(presentation: VerifiablePresentation): PresentationVerifyResult {
+  verifyPresentation(
+    presentation: VerifiablePresentation,
+    opts?: VerifyPresentationOptions
+  ): PresentationVerifyResult {
     if (!Array.isArray(presentation['@context']) || !presentation['@context'].includes(W3C_VC_CONTEXT_V2)) {
       return { valid: false, reason: 'INVALID_CONTEXT' };
     }
@@ -298,7 +357,61 @@ export class PresentationClient {
       }
     }
 
+    if (opts?.challenge !== undefined && presentation.challenge !== opts.challenge) {
+      return { valid: false, reason: 'CHALLENGE_MISMATCH' };
+    }
+
+    const now = opts?.now ?? Date.now();
+    if (typeof presentation.expiresAt === 'number' && presentation.expiresAt > 0 && now >= presentation.expiresAt) {
+      return { valid: false, reason: 'EXPIRED' };
+    }
+
+    if (presentation.proof) {
+      const proofType = presentation.proof.type;
+      if (proofType !== 'DataIntegrityProof' && proofType !== 'JwtProof2020') {
+        return { valid: false, reason: 'INVALID_PROOF' };
+      }
+      if (!presentation.proof.jws) {
+        return { valid: false, reason: 'INVALID_PROOF' };
+      }
+    }
+
     return { valid: true };
+  }
+
+  /**
+   * Create a presentation from a reusable {@link PresentationTemplate}.
+   *
+   * @param template         Template describing disclosed fields and options.
+   * @param credential       Full on-chain credential.
+   * @param holderAddress    Optional Stellar address of the presenting party.
+   * @param proofInput       Optional proof input (see {@link PresentationClient.createPresentation}).
+   * @param opts             Additional creation options; template values are used as defaults.
+   */
+  async createPresentationFromTemplate(
+    template: PresentationTemplate,
+    credential: Credential,
+    holderAddress?: string,
+    proofInput?: {
+      jws: string;
+      identityClient: DidResolverLike;
+    },
+    opts?: CreatePresentationOptions
+  ): Promise<VerifiablePresentation> {
+    const merged: CreatePresentationOptions = {
+      ...opts,
+      proofFormat: opts?.proofFormat ?? template.proofFormat,
+    };
+    if (merged.expiresAt === undefined && template.ttlMs !== undefined) {
+      merged.expiresAt = Date.now() + template.ttlMs;
+    }
+    return this.createPresentation(
+      credential,
+      template.fieldsToDisclose,
+      holderAddress,
+      proofInput,
+      merged
+    );
   }
 
   /**

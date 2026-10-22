@@ -1,3 +1,17 @@
+Looking at this task, I need to wire in cache manager and metering/billing functionality. However, the current file doesn't import these modules. Let me analyze what's needed:
+
+1. Import cache manager, metering, and billing modules
+2. Initialize cache manager with config and Redis client
+3. Attach cache to request context
+4. Use cache for DID resolution and query caching
+5. Register cache stats/purge routes
+6. Start warming scheduler
+7. Wire metering middleware
+8. Wire billing routes (usage dashboard, invoices)
+
+Since the specific module files aren't shown, I'll need to make reasonable assumptions about their APIs based on the issue requirements. Let me implement this carefully while preserving all existing functionality.
+
+```javascript
 import { URL } from "node:url";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
@@ -102,6 +116,8 @@ import { openTelemetryHttpMiddleware } from "./tracing/index.js";
 import { EventStore, EventReplayer, createEvent, EventTypes, handleEventSourcingRoutes } from "./events/index.js";
 import { handleMockApiRequest } from "./mock-api.js";
 import { collectHealth, collectReadiness } from "./health.js";
+import { CacheManager, CACHE_TTL, cacheKey } from "./cache/index.js";
+import { MeteringService, meteringMiddleware, handleBillingRoutes } from "./billing/index.js";
 const SERVER_VERSION = "0.1.0";
 const MIN_SDK_VERSION = "0.1.0";
 const SERVER_FEATURES = [
@@ -116,6 +132,9 @@ const SERVER_FEATURES = [
   "job_queue",
   "graceful_shutdown",
   "hateoas",
+  "multi_layer_cache",
+  "usage_metering",
+  "billing",
 ];
 
 /** Top-level fields selectable via `?fields=` on a credential resource. */
@@ -163,6 +182,8 @@ export function createApp({
   deprecationRegistry = null,
   ddosProtection = null,
   sessionKeyRegistry = null,
+  cacheManager = null,
+  meteringService = null,
 }) {
   // Expose the key service on config so http-utils.requireAuth can validate
   // issued API keys instead of falling back to the single admin key.
@@ -249,6 +270,40 @@ export function createApp({
   void eventStore.init();
   const eventReplayer = new EventReplayer(eventStore);
 
+  // #1118: multi-layer caching strategy. L1 is in-memory (LRU), L2 is Redis
+  // when available, L3 is CDN via response headers. The manager owns the
+  // warming scheduler and the invalidation pipeline.
+  const cache =
+    cacheManager ??
+    new CacheManager({
+      config,
+      redisClient,
+      metrics,
+      logger,
+    });
+  // Start the warming scheduler (no-op when disabled in config).
+  if (typeof cache.startWarming === "function") {
+    try {
+      cache.startWarming();
+    } catch (error) {
+      logger.warn({ error: error.message }, "Failed to start cache warming scheduler");
+    }
+  }
+
+  // #1119: API usage metering and billing. The service tracks per-endpoint
+  // calls, enforces quotas, and generates invoices. When no service is
+  // supplied it is created from config so the routes always exist.
+  const metering =
+    meteringService ??
+    new MeteringService({
+      config,
+      apiKeyService,
+      emailTransport,
+      logger,
+      metrics,
+    });
+  const meter = meteringMiddleware({ service: metering, config });
+
   return async function app(req, res) {
     const startTime = Date.now();
     const url = new URL(
@@ -293,6 +348,10 @@ export function createApp({
     // metrics endpoint, carries X-Correlation-ID.
     const correlationId = correlationMiddleware(req, res, { path: pathname });
     const requestId = correlationId;
+
+    // #1118: attach the cache manager to the request so handlers can read
+    // through it without threading it through every call site.
+    req.cache = cache;
 
     const handler = async () => {
     // Distributed Tracing with OpenTelemetry (#801)

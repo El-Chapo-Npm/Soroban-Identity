@@ -19,6 +19,17 @@ pub use suspension::{CredentialStatus, SuspensionReason, SuspensionRecord};
 mod bundle;
 pub use bundle::{BundleVerificationResult, CredentialBundle};
 
+mod revocation;
+pub use revocation::{
+    RevocationBitmapStats, RevocationProof, RevocationStats, RevocationStatus,
+};
+
+mod presentation;
+pub use presentation::{
+    PresentationChallenge, PresentationProofFormat, PresentationRecord, PresentationTemplate,
+    PresentationVerificationResult,
+};
+
 mod oracle;
 pub use oracle::{
     DataFeedSchema, OracleConfig, OracleNode, OracleRequest, OracleResponse,
@@ -255,6 +266,24 @@ pub enum ContractError {
     OracleRequestAlreadyFulfilled = 59,
     /// Issue #1124: the caller is not an authorized oracle node for this feed.
     UnauthorizedOracle = 60,
+    /// Issue #1121: the revocation bitmap page index is out of range.
+    InvalidRevocationPage = 61,
+    /// Issue #1121: the requested revocation proof could not be produced.
+    RevocationProofNotFound = 62,
+    /// Issue #1123: the verifiable presentation was not found.
+    PresentationNotFound = 63,
+    /// Issue #1123: the presentation contains no credentials.
+    EmptyPresentation = 64,
+    /// Issue #1123: the presentation challenge is missing, expired, or mismatched.
+    InvalidPresentationChallenge = 65,
+    /// Issue #1123: the presentation has expired.
+    PresentationExpired = 66,
+    /// Issue #1123: the presentation proof format is unsupported.
+    UnsupportedPresentationProof = 67,
+    /// Issue #1123: the presentation failed verification.
+    PresentationVerificationFailed = 68,
+    /// Issue #1123: the presentation template was not found.
+    PresentationTemplateNotFound = 69,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -1545,6 +1574,204 @@ impl CredentialManager {
             };
         }
         current == expected
+    }
+
+    // ── Issue #1121: bitmap-based credential revocation list ─────────────────
+
+    /// Revokes a batch of credentials, recording each one in the issuer's
+    /// bitmap-based revocation list. Returns the number of credentials newly
+    /// revoked (already-revoked entries are skipped).
+    ///
+    /// Emits a `revbatch` event summarising the operation.
+    pub fn revoke_credentials_batch(
+        env: Env,
+        issuer: Address,
+        credential_ids: Vec<BytesN<32>>,
+        reason: RevocationReason,
+    ) -> Result<u32, ContractError> {
+        issuer.require_auth();
+        Self::require_not_paused(&env)?;
+        Self::require_issuer(&env, &issuer)?;
+        if credential_ids.len() == 0 || credential_ids.len() > MAX_VERIFY_BATCH {
+            return Err(ContractError::BatchTooLarge);
+        }
+
+        let mut revoked_count: u32 = 0;
+        for credential_id in credential_ids.iter() {
+            let key = Self::cred_key(&credential_id);
+            let mut cred: Credential = match env.storage().persistent().get(&key) {
+                Some(c) => c,
+                None => continue,
+            };
+            if cred.issuer != issuer || cred.revoked {
+                continue;
+            }
+            cred.revoked = true;
+            env.storage().persistent().set(&key, &cred);
+            revocation::mark_revoked(&env, &issuer, &credential_id, reason as u32);
+            revoked_count += 1;
+        }
+
+        env.events().publish(
+            (CRED, symbol_short!("revbatch")),
+            (
+                EVENT_VERSION,
+                issuer,
+                credential_ids.len(),
+                revoked_count,
+                reason as u32,
+            ),
+        );
+        Ok(revoked_count)
+    }
+
+    /// Returns whether `credential_id` appears in the issuer's bitmap-based
+    /// revocation list.
+    pub fn is_revoked_bitmap(
+        env: Env,
+        issuer: Address,
+        credential_id: BytesN<32>,
+    ) -> bool {
+        revocation::is_revoked(&env, &issuer, &credential_id)
+    }
+
+    /// Generates a Merkle-style revocation proof for `credential_id` from the
+    /// issuer's bitmap-based revocation list.
+    pub fn get_revocation_proof(
+        env: Env,
+        issuer: Address,
+        credential_id: BytesN<32>,
+    ) -> Result<RevocationProof, ContractError> {
+        revocation::build_proof(&env, &issuer, &credential_id)
+            .ok_or(ContractError::RevocationProofNotFound)
+    }
+
+    /// Verifies a revocation proof against the issuer's current bitmap state.
+    pub fn verify_revocation_proof(
+        env: Env,
+        issuer: Address,
+        proof: RevocationProof,
+    ) -> bool {
+        revocation::verify_proof(&env, &issuer, &proof)
+    }
+
+    /// Returns aggregate revocation statistics for `issuer`.
+    pub fn get_revocation_stats(env: Env, issuer: Address) -> RevocationStats {
+        revocation::stats(&env, &issuer)
+    }
+
+    /// Returns low-level bitmap page statistics for `issuer`.
+    pub fn get_revocation_bitmap_stats(
+        env: Env,
+        issuer: Address,
+    ) -> RevocationBitmapStats {
+        revocation::bitmap_stats(&env, &issuer)
+    }
+
+    // ── Issue #1123: verifiable presentations ────────────────────────────────
+
+    /// Creates a verifiable presentation bundling `credential_ids` under
+    /// `holder`. The presentation is stored and its id returned.
+    ///
+    /// Emits a `presnew` event.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_presentation(
+        env: Env,
+        holder: Address,
+        credential_ids: Vec<BytesN<32>>,
+        proof_format: PresentationProofFormat,
+        challenge: Option<BytesN<32>>,
+        expires_at: u64,
+        disclosed_claims: Vec<String>,
+    ) -> Result<BytesN<32>, ContractError> {
+        holder.require_auth();
+        Self::require_not_paused(&env)?;
+        if credential_ids.len() == 0 {
+            return Err(ContractError::EmptyPresentation);
+        }
+        let now = env.ledger().timestamp();
+        if expires_at != 0 && expires_at <= now {
+            return Err(ContractError::PresentationExpired);
+        }
+        let presentation_id = presentation::create(
+            &env,
+            &holder,
+            &credential_ids,
+            proof_format,
+            challenge,
+            expires_at,
+            disclosed_claims,
+        );
+        env.events().publish(
+            (CRED, symbol_short!("presnew")),
+            (EVENT_VERSION, presentation_id.clone(), holder, credential_ids.len()),
+        );
+        Ok(presentation_id)
+    }
+
+    /// Returns the stored presentation record for `presentation_id`.
+    pub fn get_presentation(
+        env: Env,
+        presentation_id: BytesN<32>,
+    ) -> Result<PresentationRecord, ContractError> {
+        presentation::get(&env, &presentation_id)
+            .ok_or(ContractError::PresentationNotFound)
+    }
+
+    /// Verifies a stored presentation, checking expiry, challenge, and the
+    /// revocation status of every bundled credential.
+    ///
+    /// Emits a `presvrfy` event.
+    pub fn verify_presentation(
+        env: Env,
+        presentation_id: BytesN<32>,
+        challenge: Option<BytesN<32>>,
+    ) -> Result<PresentationVerificationResult, ContractError> {
+        let result = presentation::verify(&env, &presentation_id, challenge)?;
+        env.events().publish(
+            (CRED, symbol_short!("presvrfy")),
+            (EVENT_VERSION, presentation_id, result.valid),
+        );
+        Ok(result)
+    }
+
+    /// Registers a reusable presentation template owned by `holder`.
+    ///
+    /// Emits a `prestmpl` event.
+    pub fn register_presentation_template(
+        env: Env,
+        holder: Address,
+        template_id: BytesN<32>,
+        name: String,
+        proof_format: PresentationProofFormat,
+        required_claims: Vec<String>,
+        validity_secs: u64,
+    ) -> Result<(), ContractError> {
+        holder.require_auth();
+        Self::require_not_paused(&env)?;
+        presentation::register_template(
+            &env,
+            &holder,
+            &template_id,
+            name,
+            proof_format,
+            required_claims,
+            validity_secs,
+        );
+        env.events().publish(
+            (CRED, symbol_short!("prestmpl")),
+            (EVENT_VERSION, template_id, holder),
+        );
+        Ok(())
+    }
+
+    /// Returns the stored presentation template for `template_id`.
+    pub fn get_presentation_template(
+        env: Env,
+        template_id: BytesN<32>,
+    ) -> Result<PresentationTemplate, ContractError> {
+        presentation::get_template(&env, &template_id)
+            .ok_or(ContractError::PresentationTemplateNotFound)
     }
 
     /// Revoke a credential. Equivalent to

@@ -12,6 +12,7 @@ import { handleError } from "../utils/handleError";
 import { useWalletContext } from "../context/WalletContext";
 import { useToast } from "../context/ToastContext";
 import TemplateSelector from "../templates/TemplateSelector";
+import BrowserExtensionBanner from "./BrowserExtensionBanner";
 import { type CredentialTemplate, validateClaimsAgainstTemplate } from "../templates/credentialTemplates";
 import { exportCredentialsAsCSV, downloadExport } from "../utils/exportCredentials";
 import {
@@ -23,6 +24,8 @@ import {
   type ExportTemplate,
 } from "../export";
 import LoadingFallback from "./LoadingFallback";
+import AdvancedSearch, { type AdvancedSearchHandle } from "./AdvancedSearch";
+import type { SearchResult } from "../search/searchEngine";
 
 // ── Lazy-loaded components for code-splitting (#854) ─────────────────────────
 // These credential components are loaded on-demand to reduce initial bundle size
@@ -312,6 +315,17 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
   const [searchAddress, setSearchAddress] = useState("");
   const [lastCheckedAt, setLastCheckedAt] = useState<number | null>(null);
   const [verifyCheckedAt, setVerifyCheckedAt] = useState<number | null>(null);
+
+  // ── Advanced search (#1104) ─────────────────────────────────────────────
+  // `searchResults` holds the ranked IDs produced by the advanced search
+  // engine (null = no active query). Filters are applied on top of this set.
+  const advancedSearchRef = useRef<AdvancedSearchHandle>(null);
+  const [searchResults, setSearchResults] = useState<SearchResult<Credential>[] | null>(null);
+  const searchResultIds = searchResults ? new Set(searchResults.map((r) => r.item.id)) : null;
+  const searchHighlights = new Map<string, string[]>(
+    (searchResults ?? []).map((r) => [r.item.id, r.highlights]),
+  );
+  const hasActiveSearch = searchResults !== null;
 
   // Import/Export state
   const [showImportModal, setShowImportModal] = useState(false);
@@ -815,10 +829,15 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
 
   const displayCredentials = fetchedCredentials ?? [];
 
+  // Search narrows the set first; the type/expiry filters then refine it.
+  const searchedCredentials = searchResultIds
+    ? displayCredentials.filter((c) => searchResultIds.has(c.id))
+    : displayCredentials;
+
   const filteredCredentials =
     activeFilter === "All"
-      ? displayCredentials
-      : displayCredentials.filter((c) => c.credentialType === activeFilter);
+      ? searchedCredentials
+      : searchedCredentials.filter((c) => c.credentialType === activeFilter);
 
   const filteredByExpiry = filteredCredentials.filter((c) => {
     if (activeExpiryFilter === "All") return true;
@@ -857,9 +876,30 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
     setActiveFilter("All");
     setActiveExpiryFilter("All");
     setSearchAddress("");
+    setSearchResults(null);
+    advancedSearchRef.current?.clear();
     setPage(1);
     updatePaginationParams(1, pageSize);
   };
+
+  // ── #1104: Advanced search wiring ───────────────────────────────────────
+  const handleAdvancedSearchResults = (results: SearchResult<Credential>[] | null) => {
+    setSearchResults(results);
+    setPage(1);
+    updatePaginationParams(1, pageSize);
+  };
+
+  // Ctrl/Cmd+K focuses the advanced search input.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        advancedSearchRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   // ── #738: RPC rate-limit-aware transaction helper ─────────────────────────
   // Wraps an async RPC call in an exponential-backoff retry loop so transient
@@ -980,6 +1020,7 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
 
   return (
     <>
+      <BrowserExtensionBanner credentials={displayCredentials} />
       {/* Filter bar */}
       <div className="card">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
@@ -1099,6 +1140,13 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
             />
           </Suspense>
         )}
+
+        {/* Advanced search (#1104) */}
+        <AdvancedSearch
+          ref={advancedSearchRef}
+          items={displayCredentials}
+          onResultsChange={handleAdvancedSearchResults}
+        />
 
         {/* Subject search */}
         <div style={{ display: "flex", gap: "0.5rem", marginBottom: "1rem" }}>
@@ -1277,7 +1325,7 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
               </button>
             );
           })}
-          {(activeFilter !== "All" || activeExpiryFilter !== "All" || searchAddress.trim() !== "") && (
+          {(activeFilter !== "All" || activeExpiryFilter !== "All" || searchAddress.trim() !== "" || hasActiveSearch) && (
             <button
               type="button"
               onClick={handleResetFilters}
@@ -1302,7 +1350,9 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
           <CredentialEmptyState searchedAddress={searchedAddress} />
         ) : sortedCredentials.length === 0 ? (
           <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>
-            No credentials match the selected filters.
+            {hasActiveSearch
+              ? "No credentials match your search and filters."
+              : "No credentials match the selected filters."}
           </p>
         ) : (
           <>
@@ -1426,6 +1476,28 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
                     ) : (
                       <p style={{ margin: 0, color: "var(--text-muted)", fontSize: "0.8rem" }}>No claims</p>
                     )}
+                    {searchHighlights.get(cred.id)?.length ? (
+                      <p
+                        style={{ margin: "0.5rem 0 0", fontSize: "0.75rem", color: "var(--text-muted)" }}
+                        aria-label="Search match highlights"
+                      >
+                        Matches:{" "}
+                        {searchHighlights.get(cred.id)!.map((h, i) => (
+                          <mark
+                            key={`${h}-${i}`}
+                            style={{
+                              background: "var(--card-bg-accent)",
+                              color: "var(--accent-light)",
+                              borderRadius: "0.2rem",
+                              padding: "0 0.2rem",
+                              marginRight: "0.25rem",
+                            }}
+                          >
+                            {h}
+                          </mark>
+                        ))}
+                      </p>
+                    ) : null}
                     {/* Credential lifecycle timeline — closes #707 */}
                     <CredentialTimeline credential={cred} />
                   </div>

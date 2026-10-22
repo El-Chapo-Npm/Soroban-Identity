@@ -8,6 +8,9 @@ import { useKeyboardShortcutsContext } from "./context/KeyboardShortcutsContext"
 import ViewTransition from "./components/ViewTransition";
 import VoiceCommandButton from "./components/VoiceCommandButton";
 import { useVoiceCommands, type VoiceCommand } from "./hooks/useVoiceCommands";
+import { CollaborationProvider } from "./collaboration/CollaborationProvider";
+import CollaborationPanel from "./collaboration/CollaborationPanel";
+import { COLLABORATION_CONFIG } from "./config/collaboration";
 
 // Tab panels are route-like application surfaces. Keep the initial identity
 // route small and fetch the credentials route only when it is needed.
@@ -16,10 +19,7 @@ const CredentialsPanel = lazy(() => import("./components/CredentialsPanel"));
 const IssuerDashboard = lazy(() => import("./pages/IssuerDashboard"));
 const CredentialRecipientVerify = lazy(() => import("./components/CredentialRecipientVerify"));
 const NetworkStatistics = lazy(() => import("./components/NetworkStatistics"));
-const ActivityFeed = lazy(() => import("./components/ActivityFeed"));
-const CredentialComparison = lazy(() => import("./components/CredentialComparison"));
-const SharedCredentialVerify = lazy(() => import("./components/SharedCredentialVerify"));
-const BiometricDeviceManager = lazy(() => import("./components/BiometricDeviceManager"));
+const CustomizableDashboard = lazy(() => import("./components/CustomizableDashboard"));
 
 const preloadCredentialsPanel = () => {
   void import("./components/CredentialsPanel");
@@ -30,17 +30,8 @@ const preloadCredentialRecipientVerify = () => {
 const preloadNetworkStatistics = () => {
   void import("./components/NetworkStatistics");
 };
-const preloadActivityFeed = () => {
-  void import("./components/ActivityFeed");
-};
-const preloadCredentialComparison = () => {
-  void import("./components/CredentialComparison");
-};
-const preloadSharedCredentialVerify = () => {
-  void import("./components/SharedCredentialVerify");
-};
-const preloadBiometricDeviceManager = () => {
-  void import("./components/BiometricDeviceManager");
+const preloadCustomizableDashboard = () => {
+  void import("./components/CustomizableDashboard");
 };
 import WalletButton from "./components/WalletButton";
 import QRScanner from "./components/QRScanner";
@@ -80,7 +71,7 @@ export enum Tab {
   Credentials = "credentials",
   IssuerAnalytics = "issuerAnalytics",
   NetworkStatistics = "networkStatistics",
-  Activity = "activity",
+  Dashboard = "dashboard",
 }
 
 const TAB_ORDER: Tab[] = [
@@ -88,7 +79,7 @@ const TAB_ORDER: Tab[] = [
   Tab.Credentials,
   Tab.IssuerAnalytics,
   Tab.NetworkStatistics,
-  Tab.Activity,
+  Tab.Dashboard,
 ];
 
 function AppContent() {
@@ -98,11 +89,8 @@ function AppContent() {
   const [verifyId, setVerifyId] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
   const [deepLinkEncrypted, setDeepLinkEncrypted] = useState<{ c: string; k: string } | null>(null);
-  // #1032: `?compare=id1,id2,id3` opens the side-by-side comparison view.
-  const [compareIds, setCompareIds] = useState<string[] | null>(null);
-  // #1030: `?share=<shortId>` opens the public shared-credential verification view.
-  const [shareId, setShareId] = useState<string | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  // Credential currently open for collaborative editing (#1105).
+  const [activeCredentialId, setActiveCredentialId] = useState<string | null>(null);
   const networkConfig = NETWORK_CONFIGS[activeNetwork];
   const wallet = useWallet(networkConfig);
   useIdleSessionTimeout(wallet.connected, wallet.disconnect);
@@ -137,6 +125,8 @@ function AppContent() {
             setTab(Tab.Credentials);
           } else if (target.includes("issuer") || target.includes("analytics")) {
             setTab(Tab.IssuerAnalytics);
+          } else if (target.includes("dashboard")) {
+            setTab(Tab.Dashboard);
           } else {
             setTab(Tab.Identity);
           }
@@ -243,6 +233,21 @@ function AppContent() {
   useOpenGraphMeta(verifyMeta);
 
   const onMainnet = isMainnet(activeNetwork);
+
+  // The credential being edited is either the one opened via a verification
+  // deep link or the one selected inside the credentials panel.
+  const collaborationCredentialId = activeCredentialId ?? verifyId ?? null;
+  const collaborationUser = useMemo(
+    () =>
+      wallet.publicKey
+        ? {
+            id: wallet.publicKey,
+            name: wallet.publicKey.slice(0, 6),
+            role: COLLABORATION_CONFIG.defaultRole,
+          }
+        : null,
+    [wallet.publicKey],
+  );
 
   // Check RPC connection health on load
   useEffect(() => {
@@ -682,8 +687,8 @@ function AppContent() {
                 ? preloadCredentialsPanel
                 : name === Tab.NetworkStatistics
                   ? preloadNetworkStatistics
-                  : name === Tab.Activity
-                    ? preloadActivityFeed
+                  : name === Tab.Dashboard
+                    ? preloadCustomizableDashboard
                     : undefined
             }
             onFocus={
@@ -691,8 +696,8 @@ function AppContent() {
                 ? preloadCredentialsPanel
                 : name === Tab.NetworkStatistics
                   ? preloadNetworkStatistics
-                  : name === Tab.Activity
-                    ? preloadActivityFeed
+                  : name === Tab.Dashboard
+                    ? preloadCustomizableDashboard
                     : undefined
             }
           >
@@ -742,7 +747,13 @@ function AppContent() {
                     onClose={() => setScanning(false)}
                   />
                 )}
-                <CredentialsPanel verifyId={verifyId} />
+                <CredentialsPanel
+                  verifyId={verifyId}
+                  onSelectCredential={(id: string) => setActiveCredentialId(id)}
+                />
+                {collaborationCredentialId && (
+                  <CollaborationPanel credentialId={collaborationCredentialId} />
+                )}
               </>
             )}
           </div>
@@ -753,7 +764,42 @@ function AppContent() {
             data-tour="panel-issuer"
             hidden={tab !== Tab.IssuerAnalytics}
           >
-            {tab === Tab.IssuerAnalytics && <IssuerDashboard />}
+            {tab === Tab.IssuerAnalytics && (
+              <IssuerDashboard onOpenCustomizableDashboard={() => setTab(Tab.Dashboard)} />
+            )}
+          </div>
+          <div
+            id={`panel-${Tab.Dashboard}`}
+            role="tabpanel"
+            aria-labelledby={`tab-${Tab.Dashboard}`}
+            data-tour="panel-dashboard"
+            hidden={tab !== Tab.Dashboard}
+          >
+            {tab === Tab.Dashboard && (
+              <CustomizableDashboard
+                wallet={wallet}
+                network={activeNetwork}
+                networkConfig={networkConfig}
+                onNavigate={(target) => {
+                  const next = (Object.values(Tab) as string[]).includes(target)
+                    ? (target as Tab)
+                    : null;
+                  if (next) {
+                    setTab(next);
+                    tabRefs.current[next]?.focus();
+                  }
+                }}
+              />
+            )}
+          </div>
+          <div
+            id={`panel-${Tab.NetworkStatistics}`}
+            role="tabpanel"
+            aria-labelledby={`tab-${Tab.NetworkStatistics}`}
+            data-tour="panel-network"
+            hidden={tab !== Tab.NetworkStatistics}
+          >
+            {tab === Tab.NetworkStatistics && <NetworkStatistics />}
           </div>
           <div
             id={`panel-${Tab.Activity}`}
@@ -789,7 +835,13 @@ function TourOverlayWrapper() {
 export default function App() {
   return (
     <TourProvider>
-      <AppContent />
+      <CollaborationProvider
+        websocketUrl={COLLABORATION_CONFIG.websocketUrl}
+        user={null}
+        defaultRole={COLLABORATION_CONFIG.defaultRole}
+      >
+        <AppContent />
+      </CollaborationProvider>
       <TourOverlayWrapper />
     </TourProvider>
   );

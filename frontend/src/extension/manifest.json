@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Soroban Identity - Credential Verifier",
+  "version": "1.0.0",
+  "description": "Verify credentials on any website, auto-fill identity forms, and sync with Soroban Identity.",
+  "permissions": [
+    "storage",
+    "contextMenus",
+    "activeTab",
+    "alarms"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Soroban Identity Verifier"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["contentScript.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

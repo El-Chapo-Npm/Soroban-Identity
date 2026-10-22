@@ -4,6 +4,9 @@ pub const REC: Symbol = symbol_short!("rec");
 pub const HIST: Symbol = symbol_short!("h");
 pub const STAKE: Symbol = symbol_short!("stake");
 pub const TOTSTK: Symbol = symbol_short!("totstk");
+pub const DELEG: Symbol = symbol_short!("deleg");
+pub const REWARD: Symbol = symbol_short!("reward");
+pub const STKHIST: Symbol = symbol_short!("stkhist");
 
 pub fn record_key(subject: &Address) -> (Symbol, Address) {
     (REC, subject.clone())
@@ -21,6 +24,31 @@ pub fn stake_key(subject: &Address) -> (Symbol, Address) {
 /// Storage key for the aggregate amount currently staked across all subjects.
 pub fn total_staked_key() -> Symbol {
     TOTSTK
+}
+
+/// Storage key for a delegation of stake from `delegator` to `delegatee`.
+pub fn delegation_key(delegator: &Address, delegatee: &Address) -> (Symbol, Address, Address) {
+    (DELEG, delegator.clone(), delegatee.clone())
+}
+
+/// Storage key for the aggregate amount delegated to `delegatee`.
+pub fn delegated_total_key(delegatee: &Address) -> (Symbol, Address) {
+    (DELEG, delegatee.clone())
+}
+
+/// Storage key for the staking rewards pool.
+pub fn reward_pool_key() -> Symbol {
+    REWARD
+}
+
+/// Storage key for a subject's accrued (unclaimed) staking rewards.
+pub fn reward_key(subject: &Address) -> (Symbol, Address) {
+    (REWARD, subject.clone())
+}
+
+/// Storage key for a subject's staking history entry at `index`.
+pub fn staking_history_key(subject: &Address, index: u32) -> (Symbol, Address, u32) {
+    (STKHIST, subject.clone(), index)
 }
 
 /// Number of ledgers a subject must wait after requesting an unstake before
@@ -61,6 +89,62 @@ pub fn slash_amount(amount: i128, bps: u32) -> i128 {
     }
     let clamped = if bps > MAX_SLASH_BPS { MAX_SLASH_BPS } else { bps };
     (amount * clamped as i128) / MAX_SLASH_BPS as i128
+}
+
+/// Reputation multiplier applied to a subject's score, expressed in basis
+/// points where [`MULTIPLIER_BASE_BPS`] represents a 1.0x multiplier.
+///
+/// The multiplier grows linearly with the stake boost so that a stake earning
+/// the full [`MAX_STAKE_BOOST`] yields a [`MAX_STAKE_MULTIPLIER_BPS`] (1.5x)
+/// multiplier. Non-positive amounts yield the base multiplier.
+pub const MULTIPLIER_BASE_BPS: u32 = 10_000;
+pub const MAX_STAKE_MULTIPLIER_BPS: u32 = 15_000;
+
+/// Computes the reputation multiplier (in basis points) for a stake `amount`.
+pub fn stake_multiplier_bps(amount: i128) -> u32 {
+    let boost = stake_boost(amount);
+    if boost <= 0 {
+        return MULTIPLIER_BASE_BPS;
+    }
+    let extra = ((MAX_STAKE_MULTIPLIER_BPS - MULTIPLIER_BASE_BPS) as i128 * boost)
+        / MAX_STAKE_BOOST;
+    MULTIPLIER_BASE_BPS + extra as u32
+}
+
+/// Applies the stake multiplier to `score`, rounding down.
+pub fn apply_stake_multiplier(score: i128, amount: i128) -> i128 {
+    if score <= 0 {
+        return 0;
+    }
+    (score * stake_multiplier_bps(amount) as i128) / MULTIPLIER_BASE_BPS as i128
+}
+
+/// Returns the effective stake for `subject`, combining its own stake with the
+/// total delegated to it. Used when computing the reputation multiplier.
+pub fn effective_stake(own_stake: i128, delegated_total: i128) -> i128 {
+    let own = if own_stake < 0 { 0 } else { own_stake };
+    let delegated = if delegated_total < 0 { 0 } else { delegated_total };
+    own + delegated
+}
+
+/// Returns `true` when an unstake requested at `requested_ledger` has passed
+/// the [`UNSTAKE_COOLDOWN_LEDGERS`] cooldown as of `current_ledger`.
+pub fn is_unstake_ready(requested_ledger: u32, current_ledger: u32) -> bool {
+    current_ledger >= requested_ledger.saturating_add(UNSTAKE_COOLDOWN_LEDGERS)
+}
+
+/// Splits a slashed `amount` between the reward pool and the burned remainder.
+///
+/// A fixed fraction of slashed stake is redistributed to stakers via the
+/// reward pool; the rest is burned. Returns `(to_reward_pool, burned)`.
+pub const SLASH_REWARD_SHARE_BPS: u32 = 5_000;
+
+pub fn split_slash(amount: i128) -> (i128, i128) {
+    if amount <= 0 {
+        return (0, 0);
+    }
+    let to_pool = (amount * SLASH_REWARD_SHARE_BPS as i128) / MAX_SLASH_BPS as i128;
+    (to_pool, amount - to_pool)
 }
 
 /// Valid inclusive bounds for a submitted reputation score.
