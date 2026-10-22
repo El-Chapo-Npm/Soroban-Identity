@@ -587,6 +587,7 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
         <input
           id="resolve-address"
           data-tour="resolve-did-input"
+          data-tour-resolve-did="resolve-did"
           placeholder="Stellar address (G…)"
           value={resolveAddress}
           onChange={(e) => setResolveAddress(e.target.value)}
@@ -691,7 +692,9 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
 
         {!resolving && resolvedAddress && (
           <>
-            <div style={{ 
+            <div
+              data-tour="did-document"
+              style={{ 
               display: 'flex', 
               alignItems: 'center', 
               gap: '0.5rem', 
@@ -990,7 +993,12 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
                 {wallet.publicKey.slice(0, 6)}…{wallet.publicKey.slice(-4)}
               </span>
             </p>
-            <button onClick={handleCreate} disabled={creating} data-tour="create-did-button">
+            <button
+              onClick={handleCreate}
+              disabled={creating}
+              data-tour="create-did-button"
+              data-tour-create-did="create-did"
+            >
               {creating ? 'Creating…' : 'Create DID'}
             </button>
             {creating && <SkeletonCard variant="identity" />}
@@ -1000,7 +1008,9 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
             Connect your Freighter wallet to create a new on-chain DID.
           </p>
         )}
-        {!creating && createResult && <pre className="result">{createResult}</pre>}
+        <div data-tour="did-status">
+          {!creating && createResult && <pre className="result">{createResult}</pre>}
+        </div>
       </div>
 
       <div className="card">

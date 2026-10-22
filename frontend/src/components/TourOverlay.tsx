@@ -6,16 +6,14 @@ import React, {
   useState,
 } from 'react';
 
-export type TourPath = 'issuer' | 'holder';
+import {
+  DEFAULT_TOUR_STEPS,
+  TOUR_STORAGE_PREFIX,
+  type TourPath,
+  type TourStep,
+} from '../tour/steps';
 
-export interface TourStep {
-  /** Value of the target element's data-tour attribute. */
-  target: string;
-  title: string;
-  description: string;
-  /** Optional placement hint for the tooltip relative to the target. */
-  placement?: 'top' | 'bottom' | 'left' | 'right';
-}
+export type { TourPath, TourStep };
 
 export interface TourOverlayProps {
   /** Which tour path to run. */
@@ -24,62 +22,13 @@ export interface TourOverlayProps {
   open: boolean;
   /** Called when the tour finishes, is skipped, or is dismissed. */
   onClose?: (reason: 'completed' | 'skipped') => void;
-  /** Optional custom step configs; defaults to built-in issuer/holder paths. */
+  /** Optional custom step configs; defaults to shared issuer/holder paths. */
   steps?: Record<TourPath, TourStep[]>;
   /** localStorage key prefix for progress persistence. */
   storageKeyPrefix?: string;
 }
 
-const DEFAULT_STEPS: Record<TourPath, TourStep[]> = {
-  issuer: [
-    {
-      target: 'create-did',
-      title: 'Create your DID',
-      description:
-        'Start by creating a decentralized identifier (DID). This is your on-chain identity used to issue credentials.',
-      placement: 'bottom',
-    },
-    {
-      target: 'issue-credential',
-      title: 'Issue a credential',
-      description:
-        'Once your DID is ready, issue verifiable credentials to holders directly from this dashboard.',
-      placement: 'bottom',
-    },
-    {
-      target: 'credentials-list',
-      title: 'Manage credentials',
-      description:
-        'Track, revoke, and review all credentials you have issued from this list.',
-      placement: 'top',
-    },
-  ],
-  holder: [
-    {
-      target: 'create-did',
-      title: 'Create your DID',
-      description:
-        'Set up your decentralized identifier (DID) to receive and hold verifiable credentials.',
-      placement: 'bottom',
-    },
-    {
-      target: 'receive-credential',
-      title: 'Receive a credential',
-      description:
-        'Accept credentials shared with you by issuers. They will appear in your wallet.',
-      placement: 'bottom',
-    },
-    {
-      target: 'credentials-list',
-      title: 'Your credentials',
-      description:
-        'View and share the credentials stored in your wallet from this list.',
-      placement: 'top',
-    },
-  ],
-};
-
-const DEFAULT_STORAGE_PREFIX = 'tour-progress';
+const DEFAULT_STORAGE_PREFIX = TOUR_STORAGE_PREFIX;
 
 interface Rect {
   top: number;
@@ -90,8 +39,8 @@ interface Rect {
 
 const PADDING = 8;
 
-function getTargetRect(target: string): Rect | null {
-  if (typeof document === 'undefined') return null;
+function getTargetRect(target: string | undefined): Rect | null {
+  if (!target || typeof document === 'undefined') return null;
   const el = document.querySelector<HTMLElement>(`[data-tour="${target}"]`);
   if (!el) return null;
   const r = el.getBoundingClientRect();
@@ -155,7 +104,7 @@ export const TourOverlay: React.FC<TourOverlayProps> = ({
   storageKeyPrefix = DEFAULT_STORAGE_PREFIX,
 }) => {
   const stepConfig = useMemo(
-    () => (steps ?? DEFAULT_STEPS)[path] ?? [],
+    () => (steps ?? DEFAULT_TOUR_STEPS)[path] ?? [],
     [steps, path],
   );
 
@@ -253,10 +202,11 @@ export const TourOverlay: React.FC<TourOverlayProps> = ({
 
   const finish = useCallback(
     (reason: 'completed' | 'skipped') => {
-      persistProgress(reason === 'completed', index);
+      const finalIndex = reason === 'completed' ? stepConfig.length : index;
+      persistProgress(reason === 'completed', finalIndex);
       onClose?.(reason);
     },
-    [index, onClose, persistProgress],
+    [index, onClose, persistProgress, stepConfig.length],
   );
 
   const handleNext = useCallback(() => {
@@ -269,6 +219,11 @@ export const TourOverlay: React.FC<TourOverlayProps> = ({
     persistProgress(false, next);
   }, [index, stepConfig.length, finish, persistProgress]);
 
+  const handleRestart = useCallback(() => {
+    setIndex(0);
+    persistProgress(false, 0);
+  }, [persistProgress]);
+
   const handleBack = useCallback(() => {
     if (index <= 0) return;
     const prev = index - 1;
@@ -280,18 +235,24 @@ export const TourOverlay: React.FC<TourOverlayProps> = ({
     finish('skipped');
   }, [finish]);
 
-  // Escape to skip.
+  // Keyboard handling: Escape skips, arrows navigate.
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
         handleSkip();
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        handleNext();
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        handleBack();
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [open, handleSkip]);
+  }, [open, handleSkip, handleNext, handleBack]);
 
   // Persist the starting step when the tour opens.
   useEffect(() => {
@@ -309,6 +270,7 @@ export const TourOverlay: React.FC<TourOverlayProps> = ({
   const isFirst = index === 0;
   const isLast = index === stepConfig.length - 1;
   const progressLabel = `Step ${index + 1} of ${stepConfig.length}`;
+  const hasTarget = Boolean(step.target) && rect !== null;
 
   return (
     <div
@@ -323,7 +285,7 @@ export const TourOverlay: React.FC<TourOverlayProps> = ({
         className="tour-overlay__backdrop"
         aria-hidden="true"
         style={
-          rect
+          hasTarget && rect
             ? {
                 position: 'fixed',
                 inset: 0,
@@ -351,7 +313,7 @@ export const TourOverlay: React.FC<TourOverlayProps> = ({
       />
 
       {/* Highlight ring around the target (non-interactive). */}
-      {rect && (
+      {hasTarget && rect && (
         <div
           className="tour-overlay__highlight"
           aria-hidden="true"
@@ -386,7 +348,7 @@ export const TourOverlay: React.FC<TourOverlayProps> = ({
           padding: '16px 18px',
           boxShadow: '0 10px 30px rgba(0, 0, 0, 0.25)',
           outline: 'none',
-          ...computeTooltipPosition(rect, step.placement),
+          ...computeTooltipPosition(hasTarget ? rect : null, step.placement),
         }}
       >
         <div
@@ -435,6 +397,22 @@ export const TourOverlay: React.FC<TourOverlayProps> = ({
             }}
           >
             Skip tour
+          </button>
+
+          <button
+            type="button"
+            onClick={handleRestart}
+            className="tour-overlay__restart"
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: '#6b7280',
+              cursor: 'pointer',
+              fontSize: 13,
+              padding: '6px 4px',
+            }}
+          >
+            Restart
           </button>
 
           <button

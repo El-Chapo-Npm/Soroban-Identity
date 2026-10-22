@@ -47,7 +47,16 @@ import {
   validateContentType,
 } from "./http-utils.js";
 import { KEY_ID_HEADER, NonceStore, verifySignedRequest } from "./request-signing.js";
-import { createNonceStore, nonceMiddleware } from "./middleware/nonce.js";
+import {
+  ENCRYPTION_ENABLED_HEADER,
+  ENCRYPTION_KEY_ID_HEADER,
+  SessionKeyRegistry,
+  decryptSensitiveRequestFields,
+  encryptSensitiveResponseFields,
+  isEncryptionEnabled,
+  negotiateSessionKey,
+  wrapResponseEncryption,
+} from "./response-encryption.js";
 import { normalizeCspReports, setSecurityHeaders } from "./security-headers.js";
 import {
   CREDENTIAL_STATUS_TYPE,
@@ -228,11 +237,13 @@ export function createApp({
   // sessions that were using them.
   const encryptionKeys =
     sessionKeyRegistry ??
-    new SessionKeyRegistry({
-      ttlSeconds: config.encryptionSessionKeyTtlSeconds,
-      rotationSeconds: config.encryptionKeyRotationSeconds,
-      maxKeys: config.encryptionMaxSessionKeys,
-    });
+    (isEncryptionEnabled(config)
+      ? new SessionKeyRegistry({
+          ttlSeconds: config.encryptionSessionKeyTtlSeconds,
+          rotationSeconds: config.encryptionKeyRotationSeconds,
+          maxKeys: config.encryptionMaxSessionKeys,
+        })
+      : null);
 
   const tenantRegistry = new TenantRegistry(config);
   void tenantRegistry.init();
@@ -242,16 +253,30 @@ export function createApp({
   // instances; falls back to an in-process store otherwise.
   const replayStore =
     replayNonceStore ??
-    createNonceStore({
-      redisClient,
-      ttlSeconds: config.nonceTtlSeconds ?? 300,
-      metrics,
-    });
-  const checkNonce = nonceMiddleware({
-    store: replayStore,
-    ttlSeconds: config.nonceTtlSeconds ?? 300,
-    metrics,
-  });
+    new NonceStore({ ttlSeconds: config.nonceTtlSeconds ?? 300 });
+  const checkNonce = async (req, res) => {
+    const nonce = req.headers["x-nonce"] ?? req.headers["x-request-nonce"] ?? null;
+    if (!nonce) {
+      return {
+        ok: false,
+        status: 400,
+        code: "MISSING_NONCE",
+        reason: "missing",
+        message: "A request nonce is required for state-changing requests.",
+      };
+    }
+    const accepted = await replayStore.consume(nonce, { scope: req.apiKeyId ?? "" });
+    if (!accepted) {
+      return {
+        ok: false,
+        status: 409,
+        code: "SIGNATURE_REPLAYED",
+        reason: "replayed",
+        message: "Request nonce has already been used.",
+      };
+    }
+    return { ok: true, serverNonce: crypto.randomUUID() };
+  };
 
   const eventStore = new EventStore({ dataDir: `${config.dataDir}/events` });
   void eventStore.init();
@@ -612,7 +637,7 @@ export function createApp({
           ? await apiKeyService.getSigningSecret(signingKeyId)
           : null;
 
-        const verdict = verifySignedRequest({
+        const verdict = await verifySignedRequest({
           headers: req.headers,
           method: req.method,
           path: req.url,
@@ -717,7 +742,7 @@ export function createApp({
 
     // #1053: resolve the tenant before quota/limit checks so per-tenant
     // budgets apply. The tenant registry is the source of truth for limits.
-    const tenant = tenantRegistry.get(tenantId) ?? null;
+    const tenant = tenantRegistry.getTenant(tenantId) ?? null;
     req.tenant = tenant;
     if (tenant) {
       const tenantLimits = tenant.limits ?? {};
