@@ -1,10 +1,10 @@
 import type { Summary } from "./metrics";
 import type { StoreData } from "./store";
 
-export type ReportName = "summary" | "dids" | "issuance" | "types" | "issuers" | "verifications" | "geography" | "events";
+export type ReportName = "summary" | "dids" | "issuance" | "types" | "issuers" | "verifications" | "verificationRates" | "geography" | "events";
 export type ReportFormat = "csv" | "json";
 
-export const REPORTS: ReportName[] = ["summary", "dids", "issuance", "types", "issuers", "verifications", "geography", "events"];
+export const REPORTS: ReportName[] = ["summary", "dids", "issuance", "types", "issuers", "verifications", "verificationRates", "geography", "events"];
 
 function csvCell(value: unknown): string {
   const s = value === null || value === undefined ? "" : String(value);
@@ -50,6 +50,20 @@ function rows(name: ReportName, summary: Summary, data: StoreData): Array<Record
         reported: d.reported,
         total: d.onchain + d.reported,
       }));
+    case "verificationRates":
+      return summary.verificationsDaily.map((d) => {
+        const total = d.onchain + d.reported;
+        const success = d.onchain;
+        const failure = d.reported;
+        return {
+          date: date(d.t),
+          success,
+          failure,
+          total,
+          success_rate: total === 0 ? 0 : Number((success / total).toFixed(4)),
+          failure_rate: total === 0 ? 0 : Number((failure / total).toFixed(4)),
+        };
+      });
     case "geography":
       return summary.geography.countries.map((c) => ({ country: c.country, dids: c.dids }));
     case "events":

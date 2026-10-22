@@ -229,6 +229,14 @@ cargo +nightly fuzz tmin fuzz_create_did artifacts/fuzz_create_did/crash-abc123
 cp artifacts/fuzz_create_did/minimized-from-abc123 seeds/fuzz_create_did/regression-issue-755
 ```
 
+## Cargo-fuzz manifest guard
+
+The fuzz crate declares `package.metadata.cargo-fuzz = true` in `Cargo.toml`.
+This marker is required by cargo-fuzz; if it is removed, commands such as
+`cargo +nightly fuzz run --fuzz-dir . fuzz_create_did ...` fail before the
+fuzz target starts and the CI crash artifact contains only the manifest error.
+Keep this metadata when editing the fuzz manifest (issue #999).
+
 ## Troubleshooting
 
 ### Out of memory

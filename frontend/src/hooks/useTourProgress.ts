@@ -233,7 +233,7 @@ export const useTourProgress = (): UseTourProgressResult => {
   );
 
   const skipTour = useCallback(() => {
-    updateProgress({ skipped: true });
+    updateProgress({ skipped: true, completed: false });
   }, [updateProgress]);
 
   const completeTour = useCallback(() => {
@@ -262,6 +262,27 @@ export const useTourProgress = (): UseTourProgressResult => {
     resetProgress,
     setPath,
   };
+};
+
+/**
+ * Derive completion-rate metrics from tour progress for analytics.
+ * Returns a ratio in the range [0, 1] based on the number of completed
+ * steps relative to the expected step count for the active path.
+ */
+export const getCompletionRate = (
+  progress: TourProgress,
+  totalSteps: number,
+): number => {
+  if (progress.completed) {
+    return 1;
+  }
+
+  if (!Number.isFinite(totalSteps) || totalSteps <= 0) {
+    return 0;
+  }
+
+  const completedCount = progress.completedSteps.length;
+  return Math.min(1, Math.max(0, completedCount / totalSteps));
 };
 
 export default useTourProgress;

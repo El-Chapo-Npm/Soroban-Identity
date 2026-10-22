@@ -55,6 +55,9 @@ export function didRoom(subject) {
 /** Room every connection may join to receive all events. */
 export const GLOBAL_ROOM = 'all';
 
+/** Room clients join to receive analytics summary updates. */
+export const ANALYTICS_ROOM = 'analytics';
+
 /**
  * Per-connection token bucket for inbound messages.
  *
@@ -265,6 +268,36 @@ export class WebSocketHub {
     this._polling = false;
     this._nextLedger = 0;
     this._closed = false;
+    this._analyticsUnsubscribe = null;
+  }
+
+  /**
+   * Subscribe to an analytics store so summary changes are pushed to clients.
+   *
+   * The store may expose either `onChange(listener)` (returning an unsubscribe
+   * function) or an EventEmitter-style `on('change', listener)`.
+   *
+   * @param {object} store
+   * @returns {this}
+   */
+  attachAnalytics(store) {
+    if (!store) return this;
+    const listener = (summary) => {
+      try {
+        this.emitAnalyticsSummary(summary);
+      } catch (error) {
+        logger.error({ error: error.message }, 'Failed to broadcast analytics summary');
+      }
+    };
+
+    if (typeof store.onChange === 'function') {
+      const off = store.onChange(listener);
+      this._analyticsUnsubscribe = typeof off === 'function' ? off : null;
+    } else if (typeof store.on === 'function') {
+      store.on('change', listener);
+      this._analyticsUnsubscribe = () => store.off?.('change', listener);
+    }
+    return this;
   }
 
   /** Number of live connections. */
@@ -436,6 +469,7 @@ export class WebSocketHub {
   _roomsFromMessage(message) {
     const rooms = new Set();
     if (message.all === true) rooms.add(GLOBAL_ROOM);
+    if (message.analytics === true) rooms.add(ANALYTICS_ROOM);
     if (typeof message.did === 'string' && message.did.trim()) rooms.add(didRoom(message.did));
     if (Array.isArray(message.dids)) {
       for (const value of message.dids) {
@@ -495,6 +529,29 @@ export class WebSocketHub {
   /** Announce a DID update. */
   emitDidEvent(action, did, details = {}) {
     return this.broadcast({ type: 'did.updated', action, did, ...details });
+  }
+
+  /**
+   * Push an analytics summary to clients subscribed to the analytics room.
+   *
+   * The summary is delivered only to `ANALYTICS_ROOM` members (not the global
+   * room) so clients that only care about credential events are not woken for
+   * every dashboard refresh.
+   *
+   * @param {object} summary - Analytics summary payload from the analytics store
+   * @returns {number} Number of connections the update reached.
+   */
+  emitAnalyticsSummary(summary) {
+    const payload = {
+      type: 'analytics.summary',
+      summary,
+      ts: new Date().toISOString(),
+    };
+    let delivered = 0;
+    for (const socket of this.registry.membersOf(ANALYTICS_ROOM)) {
+      if (this._send(socket, payload)) delivered += 1;
+    }
+    return delivered;
   }
 
   _startHeartbeat() {
@@ -557,6 +614,14 @@ export class WebSocketHub {
     this._closed = true;
     if (this._heartbeatTimer) clearInterval(this._heartbeatTimer);
     if (this._pollTimer) clearInterval(this._pollTimer);
+    if (this._analyticsUnsubscribe) {
+      try {
+        this._analyticsUnsubscribe();
+      } catch (error) {
+        logger.warn({ error: error.message }, 'Failed to detach analytics listener');
+      }
+      this._analyticsUnsubscribe = null;
+    }
     if (this._server && this._onUpgrade) this._server.off('upgrade', this._onUpgrade);
     for (const ws of this.wss.clients) ws.close(1001, 'server_shutdown');
     await new Promise((resolve) => this.wss.close(resolve));
@@ -586,6 +651,8 @@ function subjectFromEvent(event) {
  * @param {import('node:http').Server} deps.server
  * @returns {WebSocketHub}
  */
-export function createWebSocketServer({ server, ...deps }) {
-  return new WebSocketHub(deps).attach(server);
+export function createWebSocketServer({ server, analytics, ...deps }) {
+  const hub = new WebSocketHub(deps).attach(server);
+  if (analytics) hub.attachAnalytics(analytics);
+  return hub;
 }

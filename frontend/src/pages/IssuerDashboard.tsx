@@ -434,6 +434,7 @@ export const IssuerDashboard: React.FC<IssuerAnalyticsProps> = ({
       <div
         ref={dashboardRef}
         className="issuer-dashboard-container"
+        data-tour="issuer-dashboard"
         style={{
           display: "flex",
           flexDirection: "column",
@@ -443,6 +444,7 @@ export const IssuerDashboard: React.FC<IssuerAnalyticsProps> = ({
         }}
       >
         <div
+          data-tour="issuer-dashboard-header"
           style={{
             display: "flex",
             flexWrap: "wrap",
@@ -464,6 +466,7 @@ export const IssuerDashboard: React.FC<IssuerAnalyticsProps> = ({
             </p>
           </div>
           <button
+            data-tour="issuer-exit-customize"
             onClick={() => handleToggleCustomizable(false)}
             style={{
               padding: "0.45rem 1rem",
@@ -479,10 +482,12 @@ export const IssuerDashboard: React.FC<IssuerAnalyticsProps> = ({
           </button>
         </div>
 
-        <CustomizableDashboard
-          storageKey={`issuer-dashboard-layout:${issuer}`}
-          widgets={widgetLibrary}
-        />
+        <div data-tour="issuer-customizable-dashboard">
+          <CustomizableDashboard
+            storageKey={`issuer-dashboard-layout:${issuer}`}
+            widgets={widgetLibrary}
+          />
+        </div>
       </div>
     );
   }
@@ -491,6 +496,7 @@ export const IssuerDashboard: React.FC<IssuerAnalyticsProps> = ({
     <div
       ref={dashboardRef}
       className="issuer-dashboard-container"
+      data-tour="issuer-dashboard"
       style={{
         // Padding is responsive; see .issuer-dashboard-container in styles/layout.css.
         display: "flex",
@@ -502,6 +508,7 @@ export const IssuerDashboard: React.FC<IssuerAnalyticsProps> = ({
     >
       {/* Dashboard Header & Controls */}
       <div
+        data-tour="issuer-dashboard-header"
         style={{
           display: "flex",
           flexWrap: "wrap",
@@ -531,7 +538,10 @@ export const IssuerDashboard: React.FC<IssuerAnalyticsProps> = ({
         {/* Controls: Date range & Export */}
         <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.75rem" }}>
           {/* Preset Buttons */}
-          <div style={{ display: "flex", borderRadius: "0.375rem", overflow: "hidden", border: "1px solid #cbd5e1" }}>
+          <div
+            data-tour="issuer-date-range"
+            style={{ display: "flex", borderRadius: "0.375rem", overflow: "hidden", border: "1px solid #cbd5e1" }}
+          >
             {(["7d", "30d", "90d", "all", "custom"] as DatePreset[]).map((p) => (
               <button
                 key={p}
@@ -571,6 +581,7 @@ export const IssuerDashboard: React.FC<IssuerAnalyticsProps> = ({
 
           {/* Customize Dashboard Button */}
           <button
+            data-tour="issuer-customize-dashboard"
             onClick={() => handleToggleCustomizable(true)}
             style={{
               display: "flex",
@@ -590,6 +601,7 @@ export const IssuerDashboard: React.FC<IssuerAnalyticsProps> = ({
 
           {/* PDF Export Button */}
           <button
+            data-tour="issuer-export-pdf"
             onClick={handleExportPDF}
             disabled={isExporting}
             style={{
@@ -612,6 +624,7 @@ export const IssuerDashboard: React.FC<IssuerAnalyticsProps> = ({
 
       {/* Key Metric Cards */}
       <div
+        data-tour="issuer-key-metrics"
         style={{
           display: "grid",
           gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
@@ -716,6 +729,7 @@ export const IssuerDashboard: React.FC<IssuerAnalyticsProps> = ({
 
       {/* Charts Row 1: Time Series & Pie Distribution */}
       <div
+        data-tour="issuer-charts-row-1"
         style={{
           display: "grid",
           gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))",
@@ -724,6 +738,7 @@ export const IssuerDashboard: React.FC<IssuerAnalyticsProps> = ({
       >
         {/* Issuance Over Time */}
         <div
+          data-tour="issuer-issuance-over-time"
           style={{
             background: "var(--card-bg, #ffffff)",
             padding: "1.25rem",
@@ -803,6 +818,7 @@ export const IssuerDashboard: React.FC<IssuerAnalyticsProps> = ({
 
         {/* Credential Type Distribution Pie */}
         <div
+          data-tour="issuer-credential-type-distribution"
           style={{
             background: "var(--card-bg, #ffffff)",
             padding: "1.25rem",
@@ -839,6 +855,7 @@ export const IssuerDashboard: React.FC<IssuerAnalyticsProps> = ({
 
       {/* Charts Row 2: Verification Heatmap & Reputation Score Trend */}
       <div
+        data-tour="issuer-charts-row-2"
         style={{
           display: "grid",
           gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))",
@@ -847,6 +864,7 @@ export const IssuerDashboard: React.FC<IssuerAnalyticsProps> = ({
       >
         {/* Verification Heatmap by Day/Hour */}
         <div
+          data-tour="issuer-verification-heatmap"
           style={{
             background: "var(--card-bg, #ffffff)",
             padding: "1.25rem",
@@ -858,104 +876,4 @@ export const IssuerDashboard: React.FC<IssuerAnalyticsProps> = ({
             <h2 style={{ fontSize: "1.1rem", fontWeight: 600, margin: 0 }}>
               Verification Heatmap (Day & Hour)
             </h2>
-            <div style={{ fontSize: "0.75rem", color: "var(--text-muted, #64748b)" }}>
-              Intensity = Verification volume
-            </div>
-          </div>
-
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.75rem" }}>
-              <thead>
-                <tr>
-                  <th style={{ padding: "0.35rem", textAlign: "left" }}>Day</th>
-                  {heatmapData.hours.map((h) => (
-                    <th key={h} style={{ padding: "0.35rem", textAlign: "center" }}>
-                      {h}:00
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {heatmapData.days.map((day) => (
-                  <tr key={day}>
-                    <td style={{ padding: "0.35rem", fontWeight: 600 }}>{day}</td>
-                    {heatmapData.hours.map((h) => {
-                      const count = heatmapData.data[day]?.[h] || 0;
-                      return (
-                        <td
-                          key={h}
-                          style={{
-                            padding: "0.35rem",
-                            textAlign: "center",
-                          }}
-                        >
-                          <div
-                            title={`${day} @ ${h}:00 - ${count} verifications`}
-                            style={{
-                              backgroundColor: getHeatmapColor(count),
-                              color: count > 30 ? "#fff" : "#1e293b",
-                              padding: "0.35rem 0.2rem",
-                              borderRadius: "0.25rem",
-                              fontWeight: 500,
-                              cursor: "default",
-                            }}
-                          >
-                            {count}
-                          </div>
-                        </td>
-                      );
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        {/* Reputation Score Trend */}
-        <div
-          style={{
-            background: "var(--card-bg, #ffffff)",
-            padding: "1.25rem",
-            borderRadius: "0.75rem",
-            boxShadow: "0 1px 3px rgba(0,0,0,0.1)",
-          }}
-        >
-          <h2 style={{ fontSize: "1.1rem", fontWeight: 600, margin: "0 0 1rem" }}>
-            Reputation Score Trend Line
-          </h2>
-          <div style={{ width: "100%", height: 260 }}>
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={reputationTrendData} margin={{ top: 10, right: 20, left: -20, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} opacity={0.3} />
-                <XAxis dataKey="date" fontSize={11} />
-                <YAxis domain={[60, 100]} fontSize={11} />
-                <Tooltip />
-                <Legend />
-                <Line
-                  type="monotone"
-                  dataKey="score"
-                  name="Reputation Score"
-                  stroke="#10b981"
-                  strokeWidth={2.5}
-                  dot={{ r: 3 }}
-                  activeDot={{ r: 6 }}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="confidence"
-                  name="Confidence %"
-                  stroke="#6366f1"
-                  strokeWidth={1.5}
-                  strokeDasharray="4 4"
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-export default IssuerDashboard;
+            <div style={{ fontSize:

@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
-# Required by cargo-fuzz when the fuzz manifest is selected explicitly or via
-# the current working directory.
+# Keep cargo-fuzz from treating this as a regular Cargo manifest. Without this
+# marker, the nightly crash job exits before running the target and uploads a
+# misleading crash artifact (issue #999).
 [package.metadata]
 cargo-fuzz = true
 
