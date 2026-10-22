@@ -36,6 +36,21 @@ pub const MAX_DOMAIN_LEN: u32 = 256;
 /// Maximum length (in bytes) of a presentation template name.
 pub const MAX_TEMPLATE_NAME_LEN: u32 = 64;
 
+/// Maximum number of W3C context URIs in a presentation.
+pub const MAX_W3C_CONTEXT_URIS: u32 = 10;
+
+/// Maximum length (in bytes) of a single W3C context URI.
+pub const MAX_W3C_CONTEXT_LEN: u32 = 256;
+
+/// Maximum number of W3C type assertions in a presentation.
+pub const MAX_W3C_TYPES: u32 = 10;
+
+/// Maximum length (in bytes) of a W3C type assertion.
+pub const MAX_W3C_TYPE_LEN: u32 = 128;
+
+/// Maximum length (in bytes) of a verifier DID.
+pub const MAX_VERIFIER_DID_LEN: u32 = 256;
+
 /// Represents a group of credentials bundled together into a single verifiable unit (#1058).
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -148,6 +163,7 @@ pub struct FieldFilter {
 }
 
 /// A W3C Verifiable Presentation bundling credentials with selective disclosure (#1123).
+/// Enhanced to support full W3C Verifiable Presentations specification for credential bundling.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct VerifiablePresentation {
@@ -171,6 +187,12 @@ pub struct VerifiablePresentation {
     pub proof: PresentationProof,
     /// Optional template this presentation was instantiated from.
     pub template_id: Option<BytesN<32>>,
+    /// W3C context URIs (e.g., "https://www.w3.org/ns/credentials/v2")
+    pub w3c_context: Vec<Bytes>,
+    /// W3C type assertions (e.g., "VerifiablePresentation")
+    pub w3c_type: Vec<Bytes>,
+    /// Optional verifier DID this presentation is intended for
+    pub verifier: Option<Bytes>,
 }
 
 /// Result of verifying a verifiable presentation (#1123).
@@ -260,10 +282,11 @@ fn verify_challenge(
     Ok(())
 }
 
-/// Create a new verifiable presentation from a subset of a bundle's credentials (#1123).
+/// Create a new W3C Verifiable Presentation from a subset of a bundle's credentials (#1123).
 ///
 /// Supports selective disclosure by allowing the holder to present only a subset of
 /// the bundle's credentials and, per credential, only a subset of fields.
+/// Enhanced to support full W3C VP specification with context, type, and verifier fields.
 pub fn create_presentation(
     env: &Env,
     holder: Address,
@@ -276,6 +299,9 @@ pub fn create_presentation(
     proof_type: PresentationProofType,
     verification_method: BytesN<32>,
     signature: BytesN<64>,
+    w3c_context: Vec<Bytes>,
+    w3c_type: Vec<Bytes>,
+    verifier: Option<Bytes>,
 ) -> Result<BytesN<32>, ContractError> {
     holder.require_auth();
     CredentialManager::require_not_paused(env)?;
@@ -285,6 +311,39 @@ pub fn create_presentation(
     }
     if domain.len() > MAX_DOMAIN_LEN {
         return Err(ContractError::PresentationDomainTooLong);
+    }
+
+    // Validate W3C context
+    if w3c_context.is_empty() {
+        return Err(ContractError::W3cContextRequired);
+    }
+    if w3c_context.len() > MAX_W3C_CONTEXT_URIS {
+        return Err(ContractError::TooManyW3cContexts);
+    }
+    for ctx in w3c_context.iter() {
+        if ctx.is_empty() || ctx.len() > MAX_W3C_CONTEXT_LEN {
+            return Err(ContractError::InvalidW3cContext);
+        }
+    }
+
+    // Validate W3C type
+    if w3c_type.is_empty() {
+        return Err(ContractError::W3cTypeRequired);
+    }
+    if w3c_type.len() > MAX_W3C_TYPES {
+        return Err(ContractError::TooManyW3cTypes);
+    }
+    for t in w3c_type.iter() {
+        if t.is_empty() || t.len() > MAX_W3C_TYPE_LEN {
+            return Err(ContractError::InvalidW3cType);
+        }
+    }
+
+    // Validate verifier DID if present
+    if let Some(ref v) = verifier {
+        if v.is_empty() || v.len() > MAX_VERIFIER_DID_LEN {
+            return Err(ContractError::InvalidVerifierDid);
+        }
     }
 
     let bundle = get_bundle(env, bundle_id)?;
@@ -356,6 +415,9 @@ pub fn create_presentation(
             purpose: Bytes::new(env),
         },
         template_id: None,
+        w3c_context,
+        w3c_type,
+        verifier,
     };
 
     // Verify the proof before persisting so invalid presentations are rejected.

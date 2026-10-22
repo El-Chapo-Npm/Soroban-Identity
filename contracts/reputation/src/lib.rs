@@ -740,6 +740,10 @@ impl Reputation {
     /// Returns the subject's reputation record with `score` decayed for time
     /// elapsed since `updated_at`; the stored raw score is untouched. With no
     /// decay configured (the default) this is the raw accumulated score.
+    ///
+    /// The returned `score` also includes any stake boost earned by the subject
+    /// via [`Self::stake`] / [`Self::deposit_stake`]. Credential holders who
+    /// have staked tokens will therefore see a higher effective score here.
     pub fn get_reputation(env: Env, subject: Address) -> ReputationRecord {
         let key = Self::record_key(&subject);
         if env.storage().persistent().has(&key) {
@@ -754,8 +758,46 @@ impl Reputation {
                 reporter_count: 0,
                 updated_at: 0,
             });
+        // Apply time-based decay first, then add the staking boost on top so
+        // that credential holders who stake tokens earn a higher effective
+        // reputation score (closes the stake-to-reputation feature).
         record.score = Self::decayed_score(&env, &record);
+        let effective = Self::effective_stake(&env, &subject);
+        let boost = Self::stake_boost(effective);
+        record.score = record.score.saturating_add(boost).clamp(MIN_SCORE, i64::MAX);
         record
+    }
+
+    /// Returns the reputation record split into its two components:
+    /// - `base_score`: the decayed activity score without staking.
+    /// - `stake_boost`: the bonus earned from staked tokens.
+    /// - `total_score`: their sum (equals `get_reputation.score`).
+    ///
+    /// Useful for UIs that want to display the staking contribution separately.
+    pub fn get_boosted_reputation(
+        env: Env,
+        subject: Address,
+    ) -> (ReputationRecord, i64, i64) {
+        let key = Self::record_key(&subject);
+        if env.storage().persistent().has(&key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_MAX, TTL_MAX);
+        }
+        let mut record: ReputationRecord =
+            env.storage().persistent().get(&key).unwrap_or(ReputationRecord {
+                subject: subject.clone(),
+                score: 0,
+                reporter_count: 0,
+                updated_at: 0,
+            });
+        let base = Self::decayed_score(&env, &record);
+        let effective = Self::effective_stake(&env, &subject);
+        let boost = Self::stake_boost(effective);
+        let total = base.saturating_add(boost).clamp(MIN_SCORE, i64::MAX);
+        record.score = total;
+        // (full record with total score, base-only score, boost-only portion)
+        (record, base, boost)
     }
 
     pub fn get_history(
@@ -1031,9 +1073,12 @@ impl Reputation {
         env.storage().persistent().set(&key, &record);
         env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
 
-        if is_new_staker {
+        {
             let mut stats = Self::staking_stats(&env);
-            stats.total_stakers += 1;
+            if is_new_staker {
+                stats.total_stakers += 1;
+            }
+            stats.total_staked = stats.total_staked.saturating_add(amount);
             env.storage().instance().set(&STAKE_STATS, &stats);
         }
 
@@ -1133,6 +1178,14 @@ impl Reputation {
 
         env.storage().persistent().set(&key, &record);
         env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+
+        // Update aggregate stats: reduce total_staked.
+        let mut stats = Self::staking_stats(&env);
+        stats.total_staked = stats.total_staked.saturating_sub(amount);
+        if record.amount == 0 {
+            stats.total_stakers = stats.total_stakers.saturating_sub(1);
+        }
+        env.storage().instance().set(&STAKE_STATS, &stats);
 
         env.events().publish(
             (STAKE, symbol_short!("withdrawn")),
