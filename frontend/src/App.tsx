@@ -519,6 +519,7 @@ function AppContent() {
               </span>
             </span>
           )}
+          <TourRestartButton />
           <VoiceCommandButton voice={voice} />
           <button
             type="button"
@@ -886,6 +887,27 @@ function TourOverlayWrapper() {
       path={path}
       onClose={(reason) => (reason === 'skipped' ? skip() : complete())}
     />
+  );
+}
+
+// Header entry point for the guided tour (#1034). Lets users restart the
+// walkthrough at any time; the overlay itself lives at the app root so it can
+// highlight elements across tabs.
+function TourRestartButton() {
+  const { t } = useTranslation();
+  const { status, path, restart } = useTour();
+  return (
+    <button
+      type="button"
+      className="tour-restart-btn"
+      data-tour="tour-restart"
+      onClick={() => restart(path)}
+      disabled={status === 'active'}
+      aria-label={t('tour.restart', 'Restart tour')}
+      title={t('tour.restart', 'Restart tour')}
+    >
+      <span aria-hidden="true">🧭</span> {t('tour.restart', 'Restart tour')}
+    </button>
   );
 }
 
