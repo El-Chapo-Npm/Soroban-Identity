@@ -1,48 +1,164 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import type { Credential } from "../../../sdk/src/types";
-import {
-  generateEncryptionKey,
-  encryptCredentialData,
-  trackShareEvent,
-} from "../utils/credentialCrypto";
+import { trackShareEvent } from "../utils/credentialCrypto";
 import { useToast } from "../context/ToastContext";
 import SocialShare from "./SocialShare";
+import { useOpenGraphMeta } from "../hooks/useOpenGraphMeta";
+
+type PrivacyMode = "public" | "private" | "selective";
 
 interface CredentialShareProps {
   credential: Credential;
   onClose?: () => void;
 }
 
+const API_BASE_URL = (import.meta as { env?: Record<string, string> }).env?.VITE_API_URL ?? "";
+
+/**
+ * Renders a shareable preview card (credential type + verification URL) to a
+ * PNG data URL using an offscreen canvas.
+ */
+const generatePreviewImage = (credential: Credential, verificationUrl: string): string => {
+  const width = 1200;
+  const height = 630;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return "";
+
+  // Background
+  const gradient = ctx.createLinearGradient(0, 0, width, height);
+  gradient.addColorStop(0, "#1e3a8a");
+  gradient.addColorStop(1, "#2563eb");
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, width, height);
+
+  // Card
+  ctx.fillStyle = "rgba(255, 255, 255, 0.08)";
+  ctx.fillRect(60, 60, width - 120, height - 120);
+
+  // Title
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 64px system-ui, sans-serif";
+  ctx.textBaseline = "top";
+  ctx.fillText("Verified Credential", 120, 140);
+
+  // Credential type
+  ctx.font = "bold 48px system-ui, sans-serif";
+  ctx.fillStyle = "#bfdbfe";
+  ctx.fillText(credential.credentialType || "Credential", 120, 260);
+
+  // Verification URL
+  ctx.font = "32px system-ui, sans-serif";
+  ctx.fillStyle = "#e0e7ff";
+  const displayUrl =
+    verificationUrl.length > 70 ? `${verificationUrl.slice(0, 67)}...` : verificationUrl;
+  ctx.fillText(displayUrl, 120, 380);
+
+  // Footer
+  ctx.font = "28px system-ui, sans-serif";
+  ctx.fillStyle = "#c7d2fe";
+  ctx.fillText("Verify authenticity at the link above", 120, 470);
+
+  return canvas.toDataURL("image/png");
+};
+
 export const CredentialShare: React.FC<CredentialShareProps> = ({ credential, onClose }) => {
   const toast = useToast();
   const [expiryHours, setExpiryHours] = useState<number>(24);
   const [shareUrl, setShareUrl] = useState<string>("");
+  const [shortUrl, setShortUrl] = useState<string>("");
+  const [previewImage, setPreviewImage] = useState<string>("");
   const [generating, setGenerating] = useState<boolean>(false);
   const [copied, setCopied] = useState<boolean>(false);
-  const [privacyMode, setPrivacyMode] = useState<"link-only" | "credential-summary">("link-only");
+  const [privacyMode, setPrivacyMode] = useState<PrivacyMode>("private");
+
+  const effectiveShareUrl = shortUrl || shareUrl;
+
+  useOpenGraphMeta({
+    title: `Verified Credential: ${credential.credentialType || "Credential"}`,
+    description:
+      privacyMode === "public"
+        ? `View and verify this ${credential.credentialType || "credential"} shared securely.`
+        : "Verify the authenticity of this shared credential.",
+    url: effectiveShareUrl,
+    image: previewImage,
+    type: "website",
+  });
+
+  useEffect(() => {
+    if (!effectiveShareUrl) {
+      setPreviewImage("");
+      return;
+    }
+    try {
+      setPreviewImage(generatePreviewImage(credential, effectiveShareUrl));
+    } catch (err) {
+      console.error("Failed to generate preview image:", err);
+      setPreviewImage("");
+    }
+  }, [effectiveShareUrl, credential]);
+
+  const requestShortLink = async (longUrl: string): Promise<string> => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/share/shorten`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: longUrl,
+          credentialId: credential.id,
+          privacyMode,
+          expiryHours,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`Shorten request failed with status ${response.status}`);
+      }
+      const data = (await response.json()) as { shortUrl?: string; url?: string };
+      return data.shortUrl ?? data.url ?? "";
+    } catch (err) {
+      console.error("Failed to create short link:", err);
+      return "";
+    }
+  };
 
   const handleGenerateLink = async () => {
     setGenerating(true);
     try {
-      const { key, keyString } = await generateEncryptionKey();
-      const expiryMs = expiryHours * 60 * 60 * 1000;
-      const encryptedData = await encryptCredentialData(credential, key, expiryMs);
-
       // Deep link format: app.com/verify?c=<ciphertext>&k=<key>
       const url = new URL(window.location.origin + window.location.pathname);
-      url.searchParams.set("c", encryptedData);
-      url.searchParams.set("k", keyString);
+      url.searchParams.set("verify", credential.id);
 
-      const generatedLink = url.toString();
+      if (privacyMode === "private") {
+        // Private: encrypt the raw claims; only link holders can decrypt.
+        const { key, keyString } = await generateEncryptionKey();
+        const expiryMs = expiryHours * 60 * 60 * 1000;
+        const encryptedData = await encryptCredentialData(credential, key, expiryMs);
+        url.searchParams.set("c", encryptedData);
+        url.searchParams.set("k", keyString);
+      } else if (privacyMode === "selective") {
+        // Selective: include only the credential type, never the claims.
+        url.searchParams.set("type", credential.credentialType || "");
+      }
+      // Public: verification URL only; the verifier resolves the credential.
+
       setShareUrl(generatedLink);
+
+      const short = await requestShortLink(generatedLink);
+      setShortUrl(short);
 
       trackShareEvent("credential_share_link_created", {
         credentialId: credential.id,
         credentialType: credential.credentialType,
         expiryHours,
+        privacyMode,
+        shortLink: Boolean(short),
       });
 
-      toast.success("Shareable encrypted link generated!");
+      toast.success(
+        short ? "Shareable short link generated!" : "Shareable encrypted link generated!"
+      );
     } catch (err: unknown) {
       console.error("Failed to generate share link:", err);
       toast.error("Failed to encrypt credential.");
@@ -52,12 +168,22 @@ export const CredentialShare: React.FC<CredentialShareProps> = ({ credential, on
   };
 
   const handleCopy = async () => {
-    if (!shareUrl) return;
+    if (!effectiveShareUrl) return;
     try {
-      await navigator.clipboard.writeText(shareUrl);
+      await navigator.clipboard.writeText(effectiveShareUrl);
       setCopied(true);
       trackShareEvent("credential_share_link_copied", {
         credentialId: credential.id,
+        privacyMode,
+      });
+      privacyAudit.log({
+        action: "share_copied",
+        credentialId: credential.id,
+        credentialType: credential.credentialType,
+        visibility,
+        disclosedAttributes,
+        verifierId: verifierId.trim() || undefined,
+        expiryHours,
       });
       toast.success("Link copied to clipboard!");
       setTimeout(() => setCopied(false), 2500);
@@ -65,6 +191,20 @@ export const CredentialShare: React.FC<CredentialShareProps> = ({ credential, on
       console.error("Copy failed:", err);
       toast.error("Failed to copy to clipboard.");
     }
+  };
+
+  const handleRevoke = () => {
+    privacyAudit.log({
+      action: "share_revoked",
+      credentialId: credential.id,
+      credentialType: credential.credentialType,
+      visibility,
+      disclosedAttributes,
+      verifierId: verifierId.trim() || undefined,
+      expiryHours,
+    });
+    setShareUrl("");
+    toast.success("Share link revoked.");
   };
 
   return (
@@ -162,6 +302,81 @@ export const CredentialShare: React.FC<CredentialShareProps> = ({ credential, on
 
         <div style={{ marginBottom: "1.25rem" }}>
           <label
+            htmlFor="visibility-select"
+            style={{
+              display: "block",
+              fontSize: "0.85rem",
+              fontWeight: 500,
+              marginBottom: "0.35rem",
+            }}
+          >
+            Visibility:
+          </label>
+          <select
+            id="visibility-select"
+            value={visibility}
+            onChange={(e) => setVisibility(e.target.value as CredentialVisibility)}
+            style={{
+              width: "100%",
+              padding: "0.5rem",
+              borderRadius: "0.375rem",
+              border: "1px solid var(--border-input, #cbd5e1)",
+              backgroundColor: "var(--card-bg, #ffffff)",
+              color: "var(--text, #1e293b)",
+            }}
+          >
+            <option value="private">Private — only you</option>
+            <option value="custom">Custom — selected attributes only</option>
+            <option value="public">Public — anyone with the link</option>
+          </select>
+        </div>
+
+        <div style={{ marginBottom: "1.25rem" }}>
+          <label
+            htmlFor="verifier-input"
+            style={{
+              display: "block",
+              fontSize: "0.85rem",
+              fontWeight: 500,
+              marginBottom: "0.35rem",
+            }}
+          >
+            Trusted verifier (optional):
+          </label>
+          <input
+            id="verifier-input"
+            type="text"
+            value={verifierId}
+            onChange={(e) => setVerifierId(e.target.value)}
+            placeholder="Verifier ID or DID"
+            style={{
+              width: "100%",
+              padding: "0.5rem",
+              borderRadius: "0.375rem",
+              border: "1px solid var(--border-input, #cbd5e1)",
+              backgroundColor: "var(--card-bg, #ffffff)",
+              color: "var(--text, #1e293b)",
+            }}
+          />
+          {whitelistWarning && (
+            <p
+              role="alert"
+              style={{ fontSize: "0.75rem", color: "#b45309", margin: "0.35rem 0 0" }}
+            >
+              ⚠ This verifier is not on your trusted whitelist. Sharing outside the whitelist is
+              not recommended.
+            </p>
+          )}
+        </div>
+
+        <SelectiveDisclosure
+          attributes={availableAttributes}
+          selected={disclosedAttributes}
+          onChange={setDisclosedAttributes}
+        />
+
+        <div style={{ marginBottom: "1.25rem" }}>
+          <label
             htmlFor="expiry-select"
             style={{
               display: "block",
@@ -196,25 +411,76 @@ export const CredentialShare: React.FC<CredentialShareProps> = ({ credential, on
 
         {!shareUrl ? (
           <>
-            <label
+            <fieldset
               style={{
-                display: "flex",
-                gap: "0.5rem",
-                alignItems: "center",
-                marginBottom: "1rem",
-                fontSize: "0.85rem",
+                border: "none",
+                padding: 0,
+                margin: "0 0 1rem 0",
               }}
             >
-              <input
-                type="checkbox"
-                checked={privacyMode === "credential-summary"}
-                onChange={(event) =>
-                  setPrivacyMode(event.target.checked ? "credential-summary" : "link-only")
-                }
-                style={{ width: "auto", margin: 0 }}
-              />
-              Include the credential type in social-share text (claims are never shared)
-            </label>
+              <legend
+                style={{
+                  fontSize: "0.85rem",
+                  fontWeight: 500,
+                  marginBottom: "0.35rem",
+                  padding: 0,
+                }}
+              >
+                Privacy
+              </legend>
+              {(
+                [
+                  {
+                    value: "public",
+                    label: "Public",
+                    hint: "Share the verification link and credential type openly.",
+                  },
+                  {
+                    value: "private",
+                    label: "Private",
+                    hint: "Encrypt the claims; only link holders can decrypt.",
+                  },
+                  {
+                    value: "selective",
+                    label: "Selective",
+                    hint: "Share only the credential type; claims stay hidden.",
+                  },
+                ] as { value: PrivacyMode; label: string; hint: string }[]
+              ).map((option) => (
+                <label
+                  key={option.value}
+                  style={{
+                    display: "flex",
+                    gap: "0.5rem",
+                    alignItems: "flex-start",
+                    marginBottom: "0.5rem",
+                    fontSize: "0.85rem",
+                    cursor: "pointer",
+                  }}
+                >
+                  <input
+                    type="radio"
+                    name="privacy-mode"
+                    value={option.value}
+                    checked={privacyMode === option.value}
+                    onChange={() => setPrivacyMode(option.value)}
+                    style={{ width: "auto", margin: "0.15rem 0 0 0" }}
+                  />
+                  <span>
+                    <strong>{option.label}</strong>
+                    <span
+                      style={{
+                        display: "block",
+                        fontSize: "0.75rem",
+                        color: "var(--text-muted, #64748b)",
+                      }}
+                    >
+                      {option.hint}
+                    </span>
+                  </span>
+                </label>
+              ))}
+            </fieldset>
             <button
               type="button"
               onClick={handleGenerateLink}
@@ -251,7 +517,7 @@ export const CredentialShare: React.FC<CredentialShareProps> = ({ credential, on
               <input
                 type="text"
                 readOnly
-                value={shareUrl}
+                value={effectiveShareUrl}
                 style={{
                   flex: 1,
                   padding: "0.5rem",
@@ -286,7 +552,11 @@ export const CredentialShare: React.FC<CredentialShareProps> = ({ credential, on
               </span>
               <button
                 type="button"
-                onClick={() => setShareUrl("")}
+                onClick={() => {
+                  setShareUrl("");
+                  setShortUrl("");
+                  setPreviewImage("");
+                }}
                 style={{
                   background: "none",
                   border: "none",
@@ -296,11 +566,37 @@ export const CredentialShare: React.FC<CredentialShareProps> = ({ credential, on
                   textDecoration: "underline",
                 }}
               >
-                Create new link
+                Revoke &amp; create new link
               </button>
             </div>
+            {previewImage && (
+              <div style={{ marginTop: "1rem" }}>
+                <div
+                  style={{
+                    fontSize: "0.85rem",
+                    fontWeight: 500,
+                    marginBottom: "0.35rem",
+                  }}
+                >
+                  Preview Image:
+                </div>
+                <img
+                  src={previewImage}
+                  alt={`Shareable preview for ${credential.credentialType || "credential"}`}
+                  style={{
+                    width: "100%",
+                    borderRadius: "0.375rem",
+                    border: "1px solid var(--border-input, #cbd5e1)",
+                  }}
+                />
+              </div>
+            )}
             <div style={{ marginTop: "1rem" }}>
-              <SocialShare url={shareUrl} credential={credential} privacyMode={privacyMode} />
+              <SocialShare
+                url={effectiveShareUrl}
+                credential={credential}
+                privacyMode={privacyMode}
+              />
             </div>
           </div>
         )}

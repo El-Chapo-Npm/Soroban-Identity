@@ -128,24 +128,56 @@ export async function exportComparisonAsImage(
   }
 }
 
+export const MAX_COMPARISON_CREDENTIALS = 4;
+
 export function buildComparisonLink(options: ComparisonLinkOptions): string {
-  const base = options.baseUrl || (typeof window !== "undefined" ? window.location.origin : "");
+  const base =
+    options.baseUrl ||
+    (typeof window !== "undefined"
+      ? `${window.location.origin}${window.location.pathname}`
+      : "");
   const params = new URLSearchParams();
-  params.set("compare", options.ids.join(","));
+  params.set("compare", options.ids.slice(0, MAX_COMPARISON_CREDENTIALS).join(","));
   return `${base}?${params.toString()}`;
+}
+
+function copyWithExecCommand(text: string): boolean {
+  if (typeof document === "undefined") return false;
+  try {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.top = "-9999px";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(textarea);
+    return ok;
+  } catch {
+    return false;
+  }
 }
 
 export function copyComparisonLink(ids: string[]): Promise<boolean> {
   const url = buildComparisonLink({ ids });
   if (typeof navigator !== "undefined" && navigator.clipboard) {
-    return navigator.clipboard.writeText(url).then(() => true).catch(() => false);
+    return navigator.clipboard
+      .writeText(url)
+      .then(() => true)
+      .catch(() => copyWithExecCommand(url));
   }
-  return Promise.resolve(false);
+  return Promise.resolve(copyWithExecCommand(url));
 }
 
 export function readComparisonFromLink(search = typeof window !== "undefined" ? window.location.search : ""): string[] {
   const params = new URLSearchParams(search);
   const compare = params.get("compare");
   if (!compare) return [];
-  return compare.split(",").filter((id) => id.trim().length > 0);
+  return compare
+    .split(",")
+    .map((id) => id.trim())
+    .filter((id) => id.length > 0)
+    .slice(0, MAX_COMPARISON_CREDENTIALS);
 }

@@ -1,17 +1,3 @@
-Looking at this task, I need to wire in cache manager and metering/billing functionality. However, the current file doesn't import these modules. Let me analyze what's needed:
-
-1. Import cache manager, metering, and billing modules
-2. Initialize cache manager with config and Redis client
-3. Attach cache to request context
-4. Use cache for DID resolution and query caching
-5. Register cache stats/purge routes
-6. Start warming scheduler
-7. Wire metering middleware
-8. Wire billing routes (usage dashboard, invoices)
-
-Since the specific module files aren't shown, I'll need to make reasonable assumptions about their APIs based on the issue requirements. Let me implement this carefully while preserving all existing functionality.
-
-```javascript
 import { URL } from "node:url";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
@@ -61,7 +47,16 @@ import {
   validateContentType,
 } from "./http-utils.js";
 import { KEY_ID_HEADER, NonceStore, verifySignedRequest } from "./request-signing.js";
-import { createNonceStore, nonceMiddleware } from "./middleware/nonce.js";
+import {
+  ENCRYPTION_ENABLED_HEADER,
+  ENCRYPTION_KEY_ID_HEADER,
+  SessionKeyRegistry,
+  decryptSensitiveRequestFields,
+  encryptSensitiveResponseFields,
+  isEncryptionEnabled,
+  negotiateSessionKey,
+  wrapResponseEncryption,
+} from "./response-encryption.js";
 import { normalizeCspReports, setSecurityHeaders } from "./security-headers.js";
 import {
   CREDENTIAL_STATUS_TYPE,
@@ -118,6 +113,7 @@ import { handleMockApiRequest } from "./mock-api.js";
 import { collectHealth, collectReadiness } from "./health.js";
 import { CacheManager, CACHE_TTL, cacheKey } from "./cache/index.js";
 import { MeteringService, meteringMiddleware, handleBillingRoutes } from "./billing/index.js";
+import { createRequestDeduplication } from "./middleware/dedupe.js";
 const SERVER_VERSION = "0.1.0";
 const MIN_SDK_VERSION = "0.1.0";
 const SERVER_FEATURES = [
@@ -241,11 +237,13 @@ export function createApp({
   // sessions that were using them.
   const encryptionKeys =
     sessionKeyRegistry ??
-    new SessionKeyRegistry({
-      ttlSeconds: config.encryptionSessionKeyTtlSeconds,
-      rotationSeconds: config.encryptionKeyRotationSeconds,
-      maxKeys: config.encryptionMaxSessionKeys,
-    });
+    (isEncryptionEnabled(config)
+      ? new SessionKeyRegistry({
+          ttlSeconds: config.encryptionSessionKeyTtlSeconds,
+          rotationSeconds: config.encryptionKeyRotationSeconds,
+          maxKeys: config.encryptionMaxSessionKeys,
+        })
+      : null);
 
   const tenantRegistry = new TenantRegistry(config);
   void tenantRegistry.init();
@@ -255,16 +253,30 @@ export function createApp({
   // instances; falls back to an in-process store otherwise.
   const replayStore =
     replayNonceStore ??
-    createNonceStore({
-      redisClient,
-      ttlSeconds: config.nonceTtlSeconds ?? 300,
-      metrics,
-    });
-  const checkNonce = nonceMiddleware({
-    store: replayStore,
-    ttlSeconds: config.nonceTtlSeconds ?? 300,
-    metrics,
-  });
+    new NonceStore({ ttlSeconds: config.nonceTtlSeconds ?? 300 });
+  const checkNonce = async (req, res) => {
+    const nonce = req.headers["x-nonce"] ?? req.headers["x-request-nonce"] ?? null;
+    if (!nonce) {
+      return {
+        ok: false,
+        status: 400,
+        code: "MISSING_NONCE",
+        reason: "missing",
+        message: "A request nonce is required for state-changing requests.",
+      };
+    }
+    const accepted = await replayStore.consume(nonce, { scope: req.apiKeyId ?? "" });
+    if (!accepted) {
+      return {
+        ok: false,
+        status: 409,
+        code: "SIGNATURE_REPLAYED",
+        reason: "replayed",
+        message: "Request nonce has already been used.",
+      };
+    }
+    return { ok: true, serverNonce: crypto.randomUUID() };
+  };
 
   const eventStore = new EventStore({ dataDir: `${config.dataDir}/events` });
   void eventStore.init();
@@ -303,6 +315,9 @@ export function createApp({
       metrics,
     });
   const meter = meteringMiddleware({ service: metering, config });
+  const dedupe = createRequestDeduplication({
+    ttlMs: config.requestDeduplicationTtlMs ?? 5000,
+  });
 
   return async function app(req, res) {
     const startTime = Date.now();
@@ -622,7 +637,7 @@ export function createApp({
           ? await apiKeyService.getSigningSecret(signingKeyId)
           : null;
 
-        const verdict = verifySignedRequest({
+        const verdict = await verifySignedRequest({
           headers: req.headers,
           method: req.method,
           path: req.url,
@@ -727,7 +742,7 @@ export function createApp({
 
     // #1053: resolve the tenant before quota/limit checks so per-tenant
     // budgets apply. The tenant registry is the source of truth for limits.
-    const tenant = tenantRegistry.get(tenantId) ?? null;
+    const tenant = tenantRegistry.getTenant(tenantId) ?? null;
     req.tenant = tenant;
     if (tenant) {
       const tenantLimits = tenant.limits ?? {};
@@ -2295,7 +2310,7 @@ export function createApp({
 
         return notFound(res);
     };
-    return requestContextStore.run({ requestId, correlationId, tenantId }, handler).catch((error) => {
+    return dedupe(req, res, () => requestContextStore.run({ requestId, correlationId, tenantId }, handler), config).catch((error) => {
         if (error.name === "SorobanError" || error.name === "SorobanUnavailableError") {
           const isUnavailable = error.name === "SorobanUnavailableError" || error.category === "rpc_unavailable";
           const statusCode = isUnavailable ? 503 : 500;

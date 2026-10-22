@@ -77,28 +77,85 @@ export const COLLAB_CONFIG: CollaborationConfig = (() => {
   };
 })();
 
-// Analytics configuration. The dashboard and real-time stream hook resolve
-// their endpoints from here. VITE_ANALYTICS_URL defaults to the analytics
-// server base URL; VITE_ANALYTICS_WS_URL is optional and, when absent, the
-// dashboard falls back to polling.
-export interface AnalyticsConfig {
-  baseUrl: string;
-  wsUrl: string | undefined;
-  realtimeEnabled: boolean;
+// Credential privacy configuration. Visibility controls who can see a
+// credential; attribute policies control which attributes are disclosed.
+export type CredentialVisibility = 'public' | 'private' | 'custom';
+
+export type AttributeDisclosure = 'visible' | 'hidden' | 'redacted';
+
+export interface AttributePolicy {
+  attribute: string;
+  disclosure: AttributeDisclosure;
 }
 
-const DEFAULT_ANALYTICS_URL = 'http://localhost:4000/api/analytics';
+export interface PrivacyPolicyTemplate {
+  id: string;
+  name: string;
+  description: string;
+  visibility: CredentialVisibility;
+  // Attribute names that are disclosed under this template. Any attribute on
+  // the credential not listed here is hidden.
+  disclosedAttributes: string[];
+  // Optional default lifetime (in hours) for sharing links created from this
+  // template. Undefined means no expiry by default.
+  defaultShareExpiryHours?: number;
+}
 
-export const ANALYTICS_CONFIG: AnalyticsConfig = (() => {
-  const baseUrl =
-    import.meta.env.VITE_ANALYTICS_URL || DEFAULT_ANALYTICS_URL;
-  const wsUrl = import.meta.env.VITE_ANALYTICS_WS_URL || undefined;
+export const PRIVACY_POLICY_TEMPLATES: PrivacyPolicyTemplate[] = [
+  {
+    id: 'minimal-disclosure',
+    name: 'Minimal disclosure',
+    description:
+      'Reveal only the credential holder name. All other attributes stay hidden.',
+    visibility: 'private',
+    disclosedAttributes: ['name'],
+  },
+  {
+    id: 'kyc-verifier',
+    name: 'KYC verifier',
+    description:
+      'Share identity and verification attributes with a trusted KYC verifier.',
+    visibility: 'custom',
+    disclosedAttributes: ['name', 'dateOfBirth', 'nationality', 'verificationLevel'],
+    defaultShareExpiryHours: 24,
+  },
+  {
+    id: 'public-profile',
+    name: 'Public profile',
+    description: 'Make the credential publicly visible with all attributes shown.',
+    visibility: 'public',
+    disclosedAttributes: ['*'],
+  },
+];
+
+export interface AppliedPrivacyPolicy {
+  visibility: CredentialVisibility;
+  attributePolicies: AttributePolicy[];
+}
+
+// Resolves a template against a credential's attribute names, producing the
+// visibility and per-attribute disclosure policies consumed by the UI.
+export function applyTemplate(
+  template: PrivacyPolicyTemplate,
+  credential: { attributes: Record<string, unknown> | string[] }
+): AppliedPrivacyPolicy {
+  const attributeNames = Array.isArray(credential.attributes)
+    ? credential.attributes
+    : Object.keys(credential.attributes);
+
+  const discloseAll = template.disclosedAttributes.includes('*');
+  const disclosed = new Set(template.disclosedAttributes);
+
+  const attributePolicies: AttributePolicy[] = attributeNames.map((attribute) => ({
+    attribute,
+    disclosure: discloseAll || disclosed.has(attribute) ? 'visible' : 'hidden',
+  }));
+
   return {
-    baseUrl,
-    wsUrl,
-    realtimeEnabled: Boolean(wsUrl),
+    visibility: template.visibility,
+    attributePolicies,
   };
-})();
+}
 
 // Returns config for the active network, resolved from VITE_NETWORK / VITE_*_RPC_URL
 // / VITE_*_IDENTITY_REGISTRY_ID env vars defined in .env.example.
@@ -108,6 +165,6 @@ export function getAppConfig() {
     tourEnabled: TOUR_ENABLED,
     search: SEARCH_CONFIG,
     collaboration: COLLAB_CONFIG,
-    analytics: ANALYTICS_CONFIG,
+    privacyPolicyTemplates: PRIVACY_POLICY_TEMPLATES,
   };
 }

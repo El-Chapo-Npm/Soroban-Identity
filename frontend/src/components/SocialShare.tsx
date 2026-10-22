@@ -1,13 +1,16 @@
 import { useMemo } from "react";
 import type { Credential } from "../../../sdk/src/types";
 import { trackShareEvent } from "../utils/credentialCrypto";
+import { buildPlatformUrl, trackSocialShare } from "../utils/socialShare";
 
 type SharePlatform = "native" | "x" | "linkedin" | "facebook" | "whatsapp";
+
+type PrivacyMode = "link-only" | "credential-summary" | "public" | "private" | "selective";
 
 interface SocialShareProps {
   url: string;
   credential: Pick<Credential, "id" | "credentialType">;
-  privacyMode?: "link-only" | "credential-summary";
+  privacyMode?: PrivacyMode;
 }
 
 const platformLabels: Record<Exclude<SharePlatform, "native">, string> = {
@@ -25,7 +28,7 @@ export default function SocialShare({
 }: SocialShareProps) {
   const shareText = useMemo(
     () =>
-      privacyMode === "credential-summary"
+      privacyMode === "credential-summary" || privacyMode === "public"
         ? `Verify my ${credential.credentialType} credential on Soroban Identity`
         : "Verify this credential on Soroban Identity",
     [credential.credentialType, privacyMode]
@@ -35,21 +38,19 @@ export default function SocialShare({
     if (platform === "native" && navigator.share) {
       await navigator.share({ title: "Credential verification", text: shareText, url });
     } else if (platform !== "native") {
-      const encodedUrl = encodeURIComponent(url);
-      const encodedText = encodeURIComponent(shareText);
-      const targets: Record<Exclude<SharePlatform, "native">, string> = {
-        x: `https://twitter.com/intent/tweet?text=${encodedText}&url=${encodedUrl}`,
-        linkedin: `https://www.linkedin.com/sharing/share-offsite/?url=${encodedUrl}`,
-        facebook: `https://www.facebook.com/sharer/sharer.php?u=${encodedUrl}`,
-        whatsapp: `https://wa.me/?text=${encodedText}%20${encodedUrl}`,
-      };
-      window.open(targets[platform], "_blank", "noopener,noreferrer,width=640,height=640");
+      const target = buildPlatformUrl(platform, { url, text: shareText });
+      window.open(target, "_blank", "noopener,noreferrer,width=640,height=640");
     }
     trackShareEvent("credential_social_share", {
       platform,
       credentialType: credential.credentialType,
       privacyMode,
       // Deliberately omit credential ID, claims, and the encryption key.
+    });
+    trackSocialShare({
+      platform,
+      credentialType: credential.credentialType,
+      privacyMode,
     });
   };
 

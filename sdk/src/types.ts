@@ -1346,3 +1346,127 @@ export interface PresentationTemplate {
   /** Default lifetime in seconds for presentations created from this template. */
   expiresInSeconds?: number;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Credential privacy controls (#1101)                                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Granularity of a credential's visibility (#1101).
+ *
+ * - `public` — anyone holding the credential id may view it.
+ * - `private` — only the subject (and issuer) may view it.
+ * - `custom` — visibility is governed by per-attribute policies and the
+ *   verifier whitelist; see {@link AttributePolicy} and
+ *   {@link VerifierWhitelistEntry}.
+ */
+export type Visibility = "public" | "private" | "custom";
+
+/** Every visibility option, in display order — use this for pickers. */
+export const VISIBILITY_OPTIONS: readonly Visibility[] = ["public", "private", "custom"];
+
+/** True when `value` is a supported {@link Visibility}. */
+export function isVisibility(value: unknown): value is Visibility {
+  return typeof value === "string" && (VISIBILITY_OPTIONS as readonly string[]).includes(value);
+}
+
+/**
+ * Attribute-level privacy policy for a single claim (#1101).
+ *
+ * When `disclosed` is `false` the attribute is omitted entirely from shared
+ * credentials. When `redaction` is set the attribute is still included but its
+ * value is replaced with the redaction marker (e.g. `"***"`), allowing a
+ * verifier to see that the claim exists without learning its value.
+ */
+export interface AttributePolicy {
+  /** Claim key this policy applies to. */
+  attribute: string;
+  /** `true` when the attribute value may be shared with verifiers. */
+  disclosed: boolean;
+  /** Optional replacement value used when the attribute is redacted. */
+  redaction?: string;
+}
+
+/**
+ * A trusted verifier allowed to view `custom`-visibility credentials (#1101).
+ */
+export interface VerifierWhitelistEntry {
+  /** Stellar address of the trusted verifier. */
+  address: string;
+  /** Human-readable label for the verifier (e.g. `"Acme Bank"`). */
+  label: string;
+  /** Unix timestamp (seconds) when the verifier was added to the whitelist. */
+  addedAt: number;
+}
+
+/**
+ * A time-limited sharing link for a credential (#1101).
+ *
+ * The `token` is an opaque bearer value embedded in the share URL; possession
+ * of the token grants access to the disclosed attributes until `expiresAt`.
+ */
+export interface ShareLink {
+  /** Unique share link identifier. */
+  id: string;
+  /** Credential the link grants access to. */
+  credentialId: string;
+  /** Opaque bearer token embedded in the share URL. */
+  token: string;
+  /** Unix timestamp (seconds) after which the link is invalid. `0` = no expiry. */
+  expiresAt: number;
+  /** Claim keys disclosed through this link. Empty means all disclosed attributes. */
+  disclosedAttributes: string[];
+  /** Unix timestamp (seconds) when the link was created. */
+  createdAt: number;
+}
+
+/** Kind of privacy-relevant action recorded in the audit log (#1101). */
+export type PrivacyAuditAction =
+  | "visibility_changed"
+  | "attribute_policy_changed"
+  | "verifier_added"
+  | "verifier_removed"
+  | "share_link_created"
+  | "share_link_revoked"
+  | "credential_shared"
+  | "credential_viewed";
+
+/**
+ * A single entry in the privacy audit log (#1101).
+ *
+ * Records who changed or accessed a credential's privacy settings so the
+ * subject can review disclosure history.
+ */
+export interface PrivacyAuditEntry {
+  /** Unique audit entry identifier. */
+  id: string;
+  /** Credential the action relates to. */
+  credentialId: string;
+  /** Action that was performed. */
+  action: PrivacyAuditAction;
+  /** Address of the party that performed the action. */
+  actor: string;
+  /** Unix timestamp (seconds) when the action occurred. */
+  timestamp: number;
+  /** Additional action-specific details (e.g. previous visibility, verifier address). */
+  metadata: Record<string, string>;
+}
+
+/**
+ * A reusable privacy policy template (#1101).
+ *
+ * Templates bundle a visibility level, attribute policies and a default share
+ * expiry so users can apply a consistent privacy posture across credentials.
+ */
+export interface PrivacyPolicyTemplate {
+  /** Template identifier. */
+  id: string;
+  /** Human-readable template name. */
+  name: string;
+  /** Visibility applied by this template. */
+  visibility: Visibility;
+  /** Attribute-level policies applied by this template. */
+  attributePolicies: AttributePolicy[];
+  /** Default share-link lifetime in hours. `0` means links never expire. */
+  defaultExpiryHours: number;
+}

@@ -20,7 +20,8 @@ const IssuerDashboard = lazy(() => import("./pages/IssuerDashboard"));
 const CredentialRecipientVerify = lazy(() => import("./components/CredentialRecipientVerify"));
 const NetworkStatistics = lazy(() => import("./components/NetworkStatistics"));
 const CustomizableDashboard = lazy(() => import("./components/CustomizableDashboard"));
-const CredentialAnalytics = lazy(() => import("./pages/CredentialAnalytics"));
+const PrivacySettings = lazy(() => import("./components/privacy/PrivacySettings"));
+const { isShareLinkExpired } = await import("./components/privacy/shareLinks");
 
 const preloadCredentialsPanel = () => {
   void import("./components/CredentialsPanel");
@@ -34,8 +35,8 @@ const preloadNetworkStatistics = () => {
 const preloadCustomizableDashboard = () => {
   void import("./components/CustomizableDashboard");
 };
-const preloadCredentialAnalytics = () => {
-  void import("./pages/CredentialAnalytics");
+const preloadPrivacySettings = () => {
+  void import("./components/privacy/PrivacySettings");
 };
 import WalletButton from "./components/WalletButton";
 import QRScanner from "./components/QRScanner";
@@ -77,6 +78,7 @@ export enum Tab {
   NetworkStatistics = "networkStatistics",
   CredentialAnalytics = "credentialAnalytics",
   Dashboard = "dashboard",
+  Privacy = "privacy",
 }
 
 const TAB_ORDER: Tab[] = [
@@ -86,6 +88,7 @@ const TAB_ORDER: Tab[] = [
   Tab.NetworkStatistics,
   Tab.CredentialAnalytics,
   Tab.Dashboard,
+  Tab.Privacy,
 ];
 
 function AppContent() {
@@ -95,6 +98,8 @@ function AppContent() {
   const [verifyId, setVerifyId] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
   const [deepLinkEncrypted, setDeepLinkEncrypted] = useState<{ c: string; k: string } | null>(null);
+  // Set when a shared credential link is past its expiry (#1101).
+  const [deepLinkExpired, setDeepLinkExpired] = useState(false);
   // Credential currently open for collaborative editing (#1105).
   const [activeCredentialId, setActiveCredentialId] = useState<string | null>(null);
   const networkConfig = NETWORK_CONFIGS[activeNetwork];
@@ -208,9 +213,31 @@ function AppContent() {
     const verifyParam = urlParams.get("verify");
     const cParam = urlParams.get("c");
     const kParam = urlParams.get("k");
+    const expParam = urlParams.get("exp");
+
+    const compareParam = urlParams.get("compare");
+    const shareParam = urlParams.get("share");
+
+    if (compareParam) {
+      const ids = compareParam
+        .split(",")
+        .map((id) => id.trim())
+        .filter(Boolean);
+      if (ids.length > 0) setCompareIds(ids);
+    }
+
+    if (shareParam) {
+      setShareId(shareParam.trim());
+    }
 
     if (cParam && kParam) {
-      setDeepLinkEncrypted({ c: cParam, k: kParam });
+      // Time-limited sharing (#1101): refuse to decrypt claims from a link
+      // whose expiry has passed.
+      if (isShareLinkExpired(expParam)) {
+        setDeepLinkExpired(true);
+      } else {
+        setDeepLinkEncrypted({ c: cParam, k: kParam });
+      }
       setTab(Tab.Credentials);
     } else if (verifyParam) {
       setVerifyId(verifyParam);
@@ -493,6 +520,18 @@ function AppContent() {
             </span>
           )}
           <VoiceCommandButton voice={voice} />
+          <button
+            type="button"
+            className="settings-toggle"
+            aria-label={t("a11y.settings", "Settings")}
+            aria-expanded={settingsOpen}
+            aria-controls="settings-panel"
+            onClick={() => setSettingsOpen((v) => !v)}
+            onMouseEnter={preloadBiometricDeviceManager}
+            onFocus={preloadBiometricDeviceManager}
+          >
+            <span aria-hidden="true">⚙</span>
+          </button>
           <WalletButton />
         </div>
         <div
@@ -503,6 +542,38 @@ function AppContent() {
       </header>
 
       <OfflineIndicator />
+
+      {settingsOpen && (
+        <section
+          id="settings-panel"
+          aria-label={t("a11y.settings", "Settings")}
+          className="settings-panel"
+        >
+          <Suspense fallback={<LoadingFallback />}>
+            <BiometricDeviceManager />
+          </Suspense>
+        </section>
+      )}
+
+      {shareId && (
+        <Suspense fallback={<LoadingFallback />}>
+          <SharedCredentialVerify
+            shortId={shareId}
+            network={activeNetwork}
+            onClose={() => setShareId(null)}
+          />
+        </Suspense>
+      )}
+
+      {compareIds && (
+        <Suspense fallback={<LoadingFallback />}>
+          <CredentialComparison
+            credentialIds={compareIds}
+            network={activeNetwork}
+            onClose={() => setCompareIds(null)}
+          />
+        </Suspense>
+      )}
 
       {uninitializedContracts.length > 0 && (
         <div
@@ -636,10 +707,10 @@ function AppContent() {
                 ? preloadCredentialsPanel
                 : name === Tab.NetworkStatistics
                   ? preloadNetworkStatistics
-                  : name === Tab.CredentialAnalytics
-                    ? preloadCredentialAnalytics
-                    : name === Tab.Dashboard
-                      ? preloadCustomizableDashboard
+                  : name === Tab.Dashboard
+                    ? preloadCustomizableDashboard
+                    : name === Tab.Privacy
+                      ? preloadPrivacySettings
                       : undefined
             }
             onFocus={
@@ -647,10 +718,10 @@ function AppContent() {
                 ? preloadCredentialsPanel
                 : name === Tab.NetworkStatistics
                   ? preloadNetworkStatistics
-                  : name === Tab.CredentialAnalytics
-                    ? preloadCredentialAnalytics
-                    : name === Tab.Dashboard
-                      ? preloadCustomizableDashboard
+                  : name === Tab.Dashboard
+                    ? preloadCustomizableDashboard
+                    : name === Tab.Privacy
+                      ? preloadPrivacySettings
                       : undefined
             }
           >
@@ -681,6 +752,24 @@ function AppContent() {
           >
             {tab === Tab.Credentials && (
               <>
+                {deepLinkExpired && (
+                  <div
+                    role="alert"
+                    aria-label="Shared credential link expired"
+                    style={{
+                      background: "var(--warning-bg, #fff3cd)",
+                      color: "var(--warning-text, #856404)",
+                      border: "1px solid var(--warning-border, #ffc107)",
+                      borderRadius: "0.5rem",
+                      padding: "0.6rem 1rem",
+                      marginBottom: "1rem",
+                      fontSize: "0.9rem",
+                    }}
+                  >
+                    <span aria-hidden="true">⚠</span> This shared credential link has expired and can no
+                    longer be opened. Ask the sender for a new link.
+                  </div>
+                )}
                 {deepLinkEncrypted && (
                   <CredentialRecipientVerify
                     ciphertext={deepLinkEncrypted.c}
@@ -768,6 +857,17 @@ function AppContent() {
             hidden={tab !== Tab.NetworkStatistics}
           >
             {tab === Tab.NetworkStatistics && <NetworkStatistics />}
+          </div>
+          <div
+            id={`panel-${Tab.Activity}`}
+            role="tabpanel"
+            aria-labelledby={`tab-${Tab.Activity}`}
+            data-tour="panel-activity"
+            hidden={tab !== Tab.Activity}
+          >
+            {tab === Tab.Activity && (
+              <ActivityFeed network={activeNetwork} publicKey={wallet.publicKey} />
+            )}
           </div>
           </ViewTransition>
           </Suspense>

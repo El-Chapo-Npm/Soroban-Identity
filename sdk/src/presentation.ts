@@ -1,7 +1,9 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { Keypair } from '@stellar/stellar-sdk';
-import type { Credential, DidDocument } from './types';
+import type { Credential, DidDocument, PrivacyPolicyTemplate } from './types';
 import { SorobanIdentityError } from './errors';
+
+export type { PrivacyPolicyTemplate };
 
 /** Minimal interface — satisfied by {@link IdentityClient}. */
 interface DidResolverLike {
@@ -437,4 +439,54 @@ export class PresentationClient {
     );
     return createHash('sha256').update(JSON.stringify(sorted), 'utf8').digest('hex');
   }
+}
+
+// ── Privacy helpers ──────────────────────────────────────────────────────────
+
+/**
+ * Options for {@link buildSelectivePresentation}.
+ */
+export interface BuildSelectivePresentationOptions extends CreatePresentationOptions {
+  /** Stellar address of the presenting party. */
+  holderAddress?: string;
+  /** Optional proof input (see {@link PresentationClient.createPresentation}). */
+  proofInput?: {
+    jws: string;
+    identityClient: DidResolverLike;
+  };
+  /** Optional client instance to reuse; a new one is created when omitted. */
+  client?: PresentationClient;
+}
+
+/**
+ * Build a selective-disclosure {@link VerifiablePresentation} from a
+ * credential and the set of attributes the holder chose to disclose.
+ *
+ * This is a thin convenience wrapper around
+ * {@link PresentationClient.createPresentation} intended for the frontend
+ * selective-disclosure UI. Attributes not present in the credential are
+ * silently omitted, and duplicate attribute names are de-duplicated.
+ *
+ * @param credential          Full on-chain credential.
+ * @param disclosedAttributes Claim keys to disclose.
+ * @param options             Holder address, proof input and presentation options.
+ * @returns A {@link VerifiablePresentation} containing only the disclosed claims.
+ *
+ * @example
+ * ```ts
+ * const vp = await buildSelectivePresentation(credential, ['name', 'country'], {
+ *   holderAddress,
+ *   expiresAt: Date.now() + 60 * 60 * 1000,
+ * });
+ * ```
+ */
+export async function buildSelectivePresentation(
+  credential: Credential,
+  disclosedAttributes: string[],
+  options?: BuildSelectivePresentationOptions
+): Promise<VerifiablePresentation> {
+  const client = options?.client ?? new PresentationClient();
+  const fields = Array.from(new Set(disclosedAttributes));
+  const { holderAddress, proofInput, client: _client, ...opts } = options ?? {};
+  return client.createPresentation(credential, fields, holderAddress, proofInput, opts);
 }
