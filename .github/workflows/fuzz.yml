@@ -108,6 +108,11 @@ jobs:
         if: steps.cache-cargo-fuzz.outputs.cache-hit != 'true'
         run: cargo install cargo-fuzz
 
+      # Fail before the matrix starts if fuzz/Cargo.toml loses the metadata
+      # marker cargo-fuzz requires (issue #999).
+      - name: Validate cargo-fuzz manifest
+        run: cargo fuzz list --fuzz-dir fuzz
+
       - name: Cache fuzz target build
         uses: actions/cache@v4
         with:
