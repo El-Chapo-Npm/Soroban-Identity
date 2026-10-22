@@ -41,11 +41,11 @@ pub use identity_registry::{
 };
 
 pub use credential_manager::{
-    Credential, CredentialIdsPage, CredentialStorageStats, CredentialTypeDescriptor,
-    CredentialType, ContractError as CredentialManagerError, IssuersPage,
+    ContractError as CredentialManagerError, Credential, CredentialIdsPage, CredentialStorageStats,
+    CredentialType, CredentialTypeDescriptor, IssuersPage,
 };
 
 pub use reputation::{
-    ContractError as ReputationError, DecayConfig, DecayMode, ReportersPage, ReputationRecord,
-    ReputationStorageStats, ScoreEntriesPage, ScoreEntry,
+    ContractError as ReputationError, DecayAlgorithm, DecayConfig, DecayMode, DecayParameters,
+    ReportersPage, ReputationRecord, ReputationStorageStats, ScoreEntriesPage, ScoreEntry,
 };
