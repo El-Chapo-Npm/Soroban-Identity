@@ -59,6 +59,9 @@ export interface PresentationProof {
  *
  * Created by {@link PresentationClient.createPresentation}; verified by
  * {@link PresentationClient.verifyPresentation}.
+ * 
+ * Enhanced to support full W3C Verifiable Presentations specification for
+ * credential bundling.
  */
 export interface VerifiablePresentation {
   '@context': string[];
@@ -75,6 +78,8 @@ export interface VerifiablePresentation {
   challenge?: string;
   /** Unix timestamp (ms) after which the presentation is no longer valid. */
   expiresAt?: number;
+  /** Optional verifier DID this presentation is intended for. */
+  verifierDid?: string;
 }
 
 /**
@@ -97,6 +102,12 @@ export interface CreatePresentationOptions {
   expiresAt?: number;
   /** Proof format to emit. Defaults to `DataIntegrityProof`. */
   proofFormat?: PresentationProofFormat;
+  /** W3C context URIs (defaults to W3C VC context v2). */
+  w3cContext?: string[];
+  /** W3C type assertions (defaults to ['VerifiablePresentation']). */
+  w3cType?: string[];
+  /** Optional verifier DID this presentation is intended for. */
+  verifierDid?: string;
 }
 
 /**
@@ -236,8 +247,11 @@ export class PresentationClient {
 
     const presentationId = `urn:presentation:${randomBytes(16).toString('hex')}`;
 
+    const w3cContext = opts?.w3cContext || [W3C_VC_CONTEXT_V2];
+    const w3cType = opts?.w3cType || ['VerifiablePresentation'];
+
     const vc: VerifiableCredentialSubset = {
-      '@context': [W3C_VC_CONTEXT_V2],
+      '@context': w3cContext,
       type: ['VerifiableCredential'],
       id: `urn:credential:${credential.id}`,
       issuer: `did:stellar:${credential.issuer}`,
@@ -252,14 +266,15 @@ export class PresentationClient {
     };
 
     const vp: VerifiablePresentation = {
-      '@context': [W3C_VC_CONTEXT_V2],
-      type: ['VerifiablePresentation'],
+      '@context': w3cContext,
+      type: w3cType,
       id: presentationId,
       holder: holderAddress ? `did:stellar:${holderAddress}` : undefined,
       verifiableCredential: [vc],
       created: Date.now(),
       challenge: opts?.challenge,
       expiresAt: opts?.expiresAt,
+      verifierDid: opts?.verifierDid,
     };
 
     if (proofInput) {

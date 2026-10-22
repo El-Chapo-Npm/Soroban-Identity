@@ -284,6 +284,32 @@ pub enum ContractError {
     PresentationVerificationFailed = 68,
     /// Issue #1123: the presentation template was not found.
     PresentationTemplateNotFound = 69,
+    /// W3C VP: challenge is too long (exceeds MAX_CHALLENGE_LEN).
+    PresentationChallengeTooLong = 74,
+    /// W3C VP: domain is too long (exceeds MAX_DOMAIN_LEN).
+    PresentationDomainTooLong = 75,
+    /// W3C VP: W3C context is required (must have at least one context URI).
+    W3cContextRequired = 76,
+    /// W3C VP: too many W3C context URIs (exceeds MAX_W3C_CONTEXT_URIS).
+    TooManyW3cContexts = 77,
+    /// W3C VP: invalid W3C context URI (empty or exceeds MAX_W3C_CONTEXT_LEN).
+    InvalidW3cContext = 78,
+    /// W3C VP: W3C type is required (must have at least one type assertion).
+    W3cTypeRequired = 79,
+    /// W3C VP: too many W3C type assertions (exceeds MAX_W3C_TYPES).
+    TooManyW3cTypes = 80,
+    /// W3C VP: invalid W3C type assertion (empty or exceeds MAX_W3C_TYPE_LEN).
+    InvalidW3cType = 81,
+    /// W3C VP: invalid verifier DID (empty or exceeds MAX_VERIFIER_DID_LEN).
+    InvalidVerifierDid = 82,
+    /// W3C VP: presentation is too large (exceeds MAX_PRESENTATION_SIZE).
+    PresentationTooLarge = 83,
+    /// W3C VP: invalid template name (empty or exceeds MAX_TEMPLATE_NAME_LEN).
+    InvalidTemplateName = 84,
+    /// W3C VP: presentation challenge mismatch.
+    PresentationChallengeMismatch = 85,
+    /// W3C VP: presentation domain mismatch.
+    PresentationDomainMismatch = 86,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
