@@ -146,15 +146,14 @@ jobs:
         timeout-minutes: ${{ fromJSON(steps.budget.outputs.timeout_minutes) }}
         shell: bash
         run: |
-          cd fuzz
           set -o pipefail
-          cargo +nightly fuzz run --fuzz-dir . ${{ matrix.target }} \
+          cargo +nightly fuzz run --fuzz-dir fuzz ${{ matrix.target }} \
             corpus/${{ matrix.target }} \
             -- \
             -max_total_time=${{ steps.budget.outputs.seconds }} \
             -rss_limit_mb=2048 \
             -print_final_stats=1 \
-            2>&1 | tee fuzz-output.log
+            2>&1 | tee fuzz/fuzz-output.log
 
       - name: Summarize run
         if: always()
@@ -248,8 +247,7 @@ jobs:
               `\`fuzz-crash-${target}\` artifact. To reproduce locally:`,
               '',
               '```bash',
-              'cd fuzz',
-              `cargo +nightly fuzz run --fuzz-dir . ${target} artifacts/${target}/<crash-file>`,
+              `cargo +nightly fuzz run --fuzz-dir fuzz ${target} fuzz/artifacts/${target}/<crash-file>`,
               '```',
             ].join('\n');
 
