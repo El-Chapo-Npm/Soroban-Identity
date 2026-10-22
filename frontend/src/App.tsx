@@ -201,6 +201,21 @@ function AppContent() {
     const cParam = urlParams.get("c");
     const kParam = urlParams.get("k");
 
+    const compareParam = urlParams.get("compare");
+    const shareParam = urlParams.get("share");
+
+    if (compareParam) {
+      const ids = compareParam
+        .split(",")
+        .map((id) => id.trim())
+        .filter(Boolean);
+      if (ids.length > 0) setCompareIds(ids);
+    }
+
+    if (shareParam) {
+      setShareId(shareParam.trim());
+    }
+
     if (cParam && kParam) {
       setDeepLinkEncrypted({ c: cParam, k: kParam });
       setTab(Tab.Credentials);
@@ -485,6 +500,18 @@ function AppContent() {
             </span>
           )}
           <VoiceCommandButton voice={voice} />
+          <button
+            type="button"
+            className="settings-toggle"
+            aria-label={t("a11y.settings", "Settings")}
+            aria-expanded={settingsOpen}
+            aria-controls="settings-panel"
+            onClick={() => setSettingsOpen((v) => !v)}
+            onMouseEnter={preloadBiometricDeviceManager}
+            onFocus={preloadBiometricDeviceManager}
+          >
+            <span aria-hidden="true">⚙</span>
+          </button>
           <WalletButton />
         </div>
         <div
@@ -495,6 +522,38 @@ function AppContent() {
       </header>
 
       <OfflineIndicator />
+
+      {settingsOpen && (
+        <section
+          id="settings-panel"
+          aria-label={t("a11y.settings", "Settings")}
+          className="settings-panel"
+        >
+          <Suspense fallback={<LoadingFallback />}>
+            <BiometricDeviceManager />
+          </Suspense>
+        </section>
+      )}
+
+      {shareId && (
+        <Suspense fallback={<LoadingFallback />}>
+          <SharedCredentialVerify
+            shortId={shareId}
+            network={activeNetwork}
+            onClose={() => setShareId(null)}
+          />
+        </Suspense>
+      )}
+
+      {compareIds && (
+        <Suspense fallback={<LoadingFallback />}>
+          <CredentialComparison
+            credentialIds={compareIds}
+            network={activeNetwork}
+            onClose={() => setCompareIds(null)}
+          />
+        </Suspense>
+      )}
 
       {uninitializedContracts.length > 0 && (
         <div
@@ -741,6 +800,17 @@ function AppContent() {
             hidden={tab !== Tab.NetworkStatistics}
           >
             {tab === Tab.NetworkStatistics && <NetworkStatistics />}
+          </div>
+          <div
+            id={`panel-${Tab.Activity}`}
+            role="tabpanel"
+            aria-labelledby={`tab-${Tab.Activity}`}
+            data-tour="panel-activity"
+            hidden={tab !== Tab.Activity}
+          >
+            {tab === Tab.Activity && (
+              <ActivityFeed network={activeNetwork} publicKey={wallet.publicKey} />
+            )}
           </div>
           </ViewTransition>
           </Suspense>
