@@ -8,48 +8,10 @@ import { KeyboardShortcutsProvider } from "./context/KeyboardShortcutsContext";
 import "./i18n";
 import "./index.css";
 import "./styles/index.css";
+import { initializeTheme } from "./utils/themePreference";
 
 // Initialize theme before React renders to prevent flicker
-(function initializeTheme() {
-  const THEME_STORAGE_KEY = 'theme-preference';
-  const CUSTOM_THEME_STORAGE_KEY = 'custom-theme';
-  const storedTheme = localStorage.getItem(THEME_STORAGE_KEY) as 'system' | 'light' | 'dark' | null;
-  const html = document.documentElement;
-  
-  // Remove any existing theme classes
-  html.classList.remove('light', 'dark');
-  
-  if (storedTheme === 'light') {
-    html.classList.add('light');
-  } else if (storedTheme === 'dark') {
-    html.classList.add('dark');
-  }
-  // If theme is 'system' or null, we don't add any class - CSS media query handles it
-  
-  // Set data attribute for immediate access
-  html.setAttribute('data-theme', storedTheme || 'system');
-
-  // Apply persisted custom theme CSS variables before first paint
-  try {
-    const rawCustomTheme = localStorage.getItem(CUSTOM_THEME_STORAGE_KEY);
-    if (rawCustomTheme) {
-      const customTheme = JSON.parse(rawCustomTheme) as {
-        colors?: Record<string, string>;
-      } | null;
-      if (customTheme && customTheme.colors) {
-        Object.entries(customTheme.colors).forEach(([token, value]) => {
-          if (typeof value === 'string' && value) {
-            const variableName = token.startsWith('--') ? token : `--color-${token}`;
-            html.style.setProperty(variableName, value);
-          }
-        });
-        html.setAttribute('data-custom-theme', 'true');
-      }
-    }
-  } catch {
-    // Ignore malformed stored theme data
-  }
-})();
+initializeTheme();
 
 // Initialize the animation system before React renders so CSS can gate
 // animations and the transition wrapper is ready before the first paint.
@@ -99,4 +61,3 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
 import("./serviceWorker").then((sw) => {
   sw.register();
 });
-
