@@ -182,6 +182,13 @@ export const schemas = {
       algorithm: z.enum(['AES-GCM']).optional(),
     }),
   }),
+  encryptionSession: looseObject({
+    body: looseObject({
+      clientPublicKey: z.string().min(1),
+      keyId: optionalText,
+      algorithm: z.enum(['AES-GCM']).optional(),
+    }),
+  }),
   keyExchangeResponse: looseObject({
     body: looseObject({
       keyId: z.string().min(1),

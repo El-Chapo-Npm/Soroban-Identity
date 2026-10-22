@@ -34,6 +34,7 @@ const CredentialImport = lazy(() => import("./CredentialImport"));
 const CredentialTimeline = lazy(() => import("./CredentialTimeline"));
 const CredentialShare = lazy(() => import("./CredentialShare"));
 const CredentialComparison = lazy(() => import("./CredentialComparison"));
+const PrivacySettings = lazy(() => import("./PrivacySettings"));
 const TemplateEditor = lazy(() => import("../export/TemplateEditor"));
 
 // Preload functions for hover/focus to improve perceived performance
@@ -41,6 +42,7 @@ const preloadCredentialImport = () => void import("./CredentialImport");
 const preloadCredentialTimeline = () => void import("./CredentialTimeline");
 const preloadCredentialShare = () => void import("./CredentialShare");
 const preloadCredentialComparison = () => void import("./CredentialComparison");
+const preloadPrivacySettings = () => void import("./PrivacySettings");
 const preloadTemplateEditor = () => void import("../export/TemplateEditor");
 
 type ExportFormat = "json" | "csv" | "xml" | "pdf";
@@ -58,6 +60,62 @@ type VerifyState =
 type FilterType = "All" | CredentialType;
 type ExpiryFilterType = "All" | "Active" | "Expired";
 type CredentialStatus = "active" | "expired" | "revoked";
+
+// ── #1101: Credential privacy controls ──────────────────────────────────────
+type CredentialVisibility = "public" | "private" | "custom";
+
+interface CredentialPrivacySettings {
+  visibility: CredentialVisibility;
+  /** Claim keys that are disclosed when visibility is "custom". */
+  disclosedAttributes: string[];
+  /** Trusted verifier addresses allowed to view the credential. */
+  whitelist: string[];
+  /** Optional expiry (unix seconds) for sharing links; 0 = no expiry. */
+  shareExpiry: number;
+}
+
+const PRIVACY_STORAGE_PREFIX = "credential-privacy:";
+
+const DEFAULT_PRIVACY_SETTINGS: CredentialPrivacySettings = {
+  visibility: "private",
+  disclosedAttributes: [],
+  whitelist: [],
+  shareExpiry: 0,
+};
+
+function loadPrivacySettings(credentialId: string): CredentialPrivacySettings {
+  try {
+    const raw = localStorage.getItem(`${PRIVACY_STORAGE_PREFIX}${credentialId}`);
+    if (!raw) return DEFAULT_PRIVACY_SETTINGS;
+    const parsed = JSON.parse(raw) as Partial<CredentialPrivacySettings>;
+    return {
+      visibility:
+        parsed.visibility === "public" || parsed.visibility === "custom" || parsed.visibility === "private"
+          ? parsed.visibility
+          : DEFAULT_PRIVACY_SETTINGS.visibility,
+      disclosedAttributes: Array.isArray(parsed.disclosedAttributes) ? parsed.disclosedAttributes : [],
+      whitelist: Array.isArray(parsed.whitelist) ? parsed.whitelist : [],
+      shareExpiry: typeof parsed.shareExpiry === "number" ? parsed.shareExpiry : 0,
+    };
+  } catch {
+    return DEFAULT_PRIVACY_SETTINGS;
+  }
+}
+
+function savePrivacySettings(credentialId: string, settings: CredentialPrivacySettings): void {
+  try {
+    localStorage.setItem(`${PRIVACY_STORAGE_PREFIX}${credentialId}`, JSON.stringify(settings));
+  } catch {
+    // Storage may be unavailable (private mode / quota) — privacy controls
+    // still work for the current session, so fail silently.
+  }
+}
+
+const VISIBILITY_BADGE: Record<CredentialVisibility, { label: string; icon: string; className: string }> = {
+  public: { label: "Public", icon: "🌐", className: "badge badge-green" },
+  private: { label: "Private", icon: "🔒", className: "badge badge-red" },
+  custom: { label: "Custom", icon: "🎛", className: "badge badge-yellow" },
+};
 
 const MAX_SAFE_TIMESTAMP_SECS = 8_640_000_000_000; // Max ECMAScript Date in seconds (~year 275760)
 const MAX_U64_TIMESTAMP = 18_446_744_073_709_551_615n;
@@ -338,6 +396,21 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
   const [isExporting, setIsExporting] = useState(false);
   const [selectedCredentialsForExport, setSelectedCredentialsForExport] = useState<Set<string>>(new Set());
   const [sharingCredential, setSharingCredential] = useState<Credential | null>(null);
+
+  // ── #1101: Privacy controls ─────────────────────────────────────────────
+  // Privacy settings are persisted per credential in localStorage so they
+  // survive reloads and are available to the share flow.
+  const [privacySettings, setPrivacySettings] = useState<Record<string, CredentialPrivacySettings>>({});
+  const [privacyCredential, setPrivacyCredential] = useState<Credential | null>(null);
+
+  const getPrivacySettings = (credentialId: string): CredentialPrivacySettings =>
+    privacySettings[credentialId] ?? loadPrivacySettings(credentialId);
+
+  const handleSavePrivacySettings = (credentialId: string, settings: CredentialPrivacySettings) => {
+    savePrivacySettings(credentialId, settings);
+    setPrivacySettings((prev) => ({ ...prev, [credentialId]: settings }));
+    toast.success("Privacy settings saved.");
+  };
 
   // ── Credential comparison (#1048) ───────────────────────────────────────
   // Selection is separate from the export selection so the two features don't
@@ -1022,7 +1095,7 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
     <>
       <BrowserExtensionBanner credentials={displayCredentials} />
       {/* Filter bar */}
-      <div className="card">
+      <div className="card" data-tour="credential-list">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
           <h2 style={{ margin: 0 }}>Credentials</h2>
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
@@ -1425,6 +1498,40 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
                     {getStatusLabel(status)}
                   </span>
                   <span style={getExpiryStyle(cred.expiresAt)}>{formatExpiry(cred.expiresAt)}</span>
+                  {(() => {
+                    const visibility = getPrivacySettings(cred.id).visibility;
+                    const badge = VISIBILITY_BADGE[visibility];
+                    return (
+                      <span
+                        className={badge.className}
+                        title={`Visibility: ${badge.label}`}
+                        aria-label={`Credential visibility: ${badge.label}`}
+                      >
+                        {badge.icon} {badge.label}
+                      </span>
+                    );
+                  })()}
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setPrivacyCredential(cred);
+                    }}
+                    onMouseEnter={preloadPrivacySettings}
+                    onFocus={preloadPrivacySettings}
+                    style={{
+                      background: "none",
+                      border: "none",
+                      cursor: "pointer",
+                      fontSize: "1rem",
+                      color: "var(--accent-light)",
+                      marginLeft: "auto",
+                      marginRight: "0.5rem",
+                    }}
+                    title="Configure privacy and sharing controls"
+                    aria-label={`Privacy settings for credential ${cred.id}`}
+                  >
+                    🛡
+                  </button>
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
@@ -1436,7 +1543,6 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
                       cursor: "pointer",
                       fontSize: "1rem",
                       color: "var(--accent-light)",
-                      marginLeft: "auto",
                       marginRight: "0.5rem",
                     }}
                     title="Share credential via encrypted link"
@@ -1449,7 +1555,10 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
                   </span>
                 </button>
                 {expandedCredId === cred.id && (
-                  <div style={{ padding: "0.75rem 1rem", borderTop: "1px solid var(--border-input)", background: "var(--card-bg-accent)" }}>
+                  <div
+                    data-tour="credential-details"
+                    style={{ padding: "0.75rem 1rem", borderTop: "1px solid var(--border-input)", background: "var(--card-bg-accent)" }}
+                  >
                     <dl style={{ margin: "0 0 0.75rem", fontSize: "0.8rem" }}>
                       <div style={{ display: "flex", gap: "1rem", marginBottom: "0.25rem" }}>
                         <dt style={{ fontWeight: 600, color: "var(--text-muted)", minWidth: "120px" }}>Issued</dt>
@@ -1652,7 +1761,7 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
         )}
       </div>
 
-      <div className="card">
+      <div className="card" data-tour="verify-credential">
         <h2>Verify Credential</h2>
         <label htmlFor="verify-credential-id" className="visually-hidden">
           Credential ID to verify
@@ -1697,7 +1806,7 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
         )}
       </div>
 
-      <div className="card">
+      <div className="card" data-tour="issue-credential">
         <h2>Issue Credential</h2>
         {wallet.connected ? (
           isIssuer ? (
@@ -1714,7 +1823,8 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
                 selectedTemplateId={selectedTemplate?.id}
                 onSelectTemplate={handleSelectTemplate}
               />
-              
+
+              <div data-tour="credential-form">
               <FormField
                 label="Subject Address"
                 placeholder="Subject address (G…)"
@@ -1792,6 +1902,7 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
                 error={issueErrors.expiresAt}
                 style={{ marginBottom: "1rem" }}
               />
+              </div>
 
               <button
                 data-tour="issue-credential-button"
@@ -1812,7 +1923,7 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
             </p>
           )
         ) : (
-          <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>
+          <p data-tour="credential-wallet" style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>
             Connect your Freighter wallet to issue credentials as a registered issuer.
           </p>
         )}
@@ -1859,11 +1970,24 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
         </Suspense>
       )}
 
+      {/* Privacy Settings Modal (#1101) */}
+      {privacyCredential && (
+        <Suspense fallback={<LoadingFallback />}>
+          <PrivacySettings
+            credential={privacyCredential}
+            settings={getPrivacySettings(privacyCredential.id)}
+            onSave={(settings) => handleSavePrivacySettings(privacyCredential.id, settings)}
+            onClose={() => setPrivacyCredential(null)}
+          />
+        </Suspense>
+      )}
+
       {/* Share Modal */}
       {sharingCredential && (
         <Suspense fallback={<LoadingFallback />}>
           <CredentialShare
             credential={sharingCredential}
+            privacySettings={getPrivacySettings(sharingCredential.id)}
             onClose={() => setSharingCredential(null)}
           />
         </Suspense>

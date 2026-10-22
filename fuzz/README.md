@@ -10,6 +10,11 @@ Install `cargo-fuzz`:
 cargo install cargo-fuzz
 ```
 
+The fuzz manifest is marked with `package.metadata.cargo-fuzz = true` so
+`--fuzz-dir .` can be used reliably from this directory. Keep that flag when
+reproducing a CI artifact; without it, cargo-fuzz resolves `fuzz/` relative to
+the current directory and looks for the nonexistent `fuzz/fuzz/Cargo.toml`.
+
 Requires a nightly Rust toolchain:
 
 ```bash
@@ -31,7 +36,7 @@ Exercises `identity-registry::create_did` with arbitrary metadata maps.
 **Run:**
 ```bash
 cd fuzz
-cargo +nightly fuzz run fuzz_create_did -- -max_total_time=60
+cargo +nightly fuzz run --fuzz-dir . fuzz_create_did -- -max_total_time=60
 ```
 
 ### 2. `fuzz_issue_credential`
@@ -48,7 +53,7 @@ Exercises `credential-manager::issue_credential` with arbitrary claims and expir
 **Run:**
 ```bash
 cd fuzz
-cargo +nightly fuzz run fuzz_issue_credential -- -max_total_time=60
+cargo +nightly fuzz run --fuzz-dir . fuzz_issue_credential -- -max_total_time=60
 ```
 
 ### 3. `fuzz_submit_score`
@@ -65,7 +70,7 @@ Exercises `reputation::submit_score` with boundary delta values.
 **Run:**
 ```bash
 cd fuzz
-cargo +nightly fuzz run fuzz_submit_score -- -max_total_time=60
+cargo +nightly fuzz run --fuzz-dir . fuzz_submit_score -- -max_total_time=60
 ```
 
 ## Running All Targets
@@ -108,6 +113,12 @@ including batches over the 50-id cap and both `fail_fast` modes.
 ### 5. `fuzz_revoke_and_delegate`
 
 Arbitrary revoke and delegation sequences against issued credentials.
+
+**Run:**
+```bash
+cd fuzz
+cargo +nightly fuzz run --fuzz-dir . fuzz_revoke_and_delegate -- -max_total_time=60
+```
 
 ### 6. `fuzz_resolve_external_did`
 
@@ -162,7 +173,8 @@ artifact_prefix='fuzz/artifacts/fuzz_create_did/'; Test unit written to crash-ab
 To reproduce the crash:
 
 ```bash
-cargo +nightly fuzz run fuzz_create_did fuzz/artifacts/fuzz_create_did/crash-abc123
+cd fuzz
+cargo +nightly fuzz run --fuzz-dir . fuzz_create_did artifacts/fuzz_create_did/crash-abc123
 ```
 
 ### Minimizing crashes
@@ -170,7 +182,7 @@ cargo +nightly fuzz run fuzz_create_did fuzz/artifacts/fuzz_create_did/crash-abc
 If a crash is found, you can minimize the input to the smallest test case that still triggers the issue:
 
 ```bash
-cargo +nightly fuzz tmin fuzz_create_did fuzz/artifacts/fuzz_create_did/crash-abc123
+cargo +nightly fuzz tmin --fuzz-dir . fuzz_create_did artifacts/fuzz_create_did/crash-abc123
 ```
 
 ## Coverage Reports
@@ -227,6 +239,14 @@ regression stays covered:
 cargo +nightly fuzz tmin fuzz_create_did artifacts/fuzz_create_did/crash-abc123
 cp artifacts/fuzz_create_did/minimized-from-abc123 seeds/fuzz_create_did/regression-issue-755
 ```
+
+## Cargo-fuzz manifest guard
+
+The fuzz crate declares `package.metadata.cargo-fuzz = true` in `Cargo.toml`.
+This marker is required by cargo-fuzz; if it is removed, commands such as
+`cargo +nightly fuzz run --fuzz-dir . fuzz_create_did ...` fail before the
+fuzz target starts and the CI crash artifact contains only the manifest error.
+Keep this metadata when editing the fuzz manifest (issue #999).
 
 ## Troubleshooting
 

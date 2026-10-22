@@ -1,8 +1,14 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
+import {
+  applyThemePreference,
+  getSystemThemeQuery,
+  readThemePreference,
+  THEME_CHANGE_EVENT,
+  THEME_STORAGE_KEY,
+  type ThemePreference,
+} from '../utils/themePreference';
 
-export type ThemePreference = 'system' | 'light' | 'dark';
-
-const THEME_STORAGE_KEY = 'theme-preference';
+export type { ThemePreference } from '../utils/themePreference';
 
 /**
  * Custom hook for theme management with system preference support.
@@ -13,69 +19,64 @@ const THEME_STORAGE_KEY = 'theme-preference';
  * - isDarkMode: Boolean indicating if dark mode is active (considering system preference)
  */
 export function useTheme(): [ThemePreference, (theme: ThemePreference) => void, boolean] {
-  const [theme, setThemeState] = useState<ThemePreference>(() => {
-    // Try to load from localStorage first
-    const stored = localStorage.getItem(THEME_STORAGE_KEY);
-    if (stored === 'light' || stored === 'dark' || stored === 'system') {
-      return stored as ThemePreference;
-    }
-    // Default to system
-    return 'system';
-  });
+  const [theme, setThemeState] = useState<ThemePreference>(readThemePreference);
+  const [systemDark, setSystemDark] = useState(() => getSystemThemeQuery()?.matches ?? false);
+  const isDarkMode = theme === 'dark' || (theme === 'system' && systemDark);
 
-  // Apply theme to document
+  // App and ThemeProvider both consume this hook. Keep them (and other tabs)
+  // on one preference rather than letting them overwrite each other's classes.
   useEffect(() => {
-    const html = document.documentElement;
-    
-    // Remove any existing theme classes
-    html.classList.remove('light', 'dark');
-    
-    if (theme === 'light') {
-      html.classList.add('light');
-    } else if (theme === 'dark') {
-      html.classList.add('dark');
-    }
-    // If theme is 'system', we don't add any class - CSS media query handles it
-    
-    // Persist to localStorage
-    localStorage.setItem(THEME_STORAGE_KEY, theme);
-    
-    // Ensure no flash of wrong theme by setting attribute immediately
-    html.setAttribute('data-theme', theme);
-  }, [theme]);
+    const handlePreference = (event: Event) => {
+      const preference = (event as CustomEvent<ThemePreference>).detail;
+      if (preference === 'light' || preference === 'dark' || preference === 'system') {
+        setThemeState(preference);
+      }
+    };
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key === THEME_STORAGE_KEY || event.key === null) setThemeState(readThemePreference());
+    };
+    window.addEventListener(THEME_CHANGE_EVENT, handlePreference);
+    window.addEventListener('storage', handleStorage);
+    return () => {
+      window.removeEventListener(THEME_CHANGE_EVENT, handlePreference);
+      window.removeEventListener('storage', handleStorage);
+    };
+  }, []);
 
-  // Determine if dark mode is active (for UI indicators)
-  const [isDarkMode, setIsDarkMode] = useState(() => {
-    if (theme === 'light') return false;
-    if (theme === 'dark') return true;
-    // For 'system', check system preference
-    return window.matchMedia('(prefers-color-scheme: dark)').matches;
-  });
-
-  // Listen for system preference changes when theme is 'system'
   useEffect(() => {
-    if (theme !== 'system') {
-      setIsDarkMode(theme === 'dark');
+    if (theme !== 'system') return;
+    const query = getSystemThemeQuery();
+    if (!query) {
+      setSystemDark(false);
       return;
     }
-
-    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
-    
-    const handleChange = () => {
-      setIsDarkMode(mediaQuery.matches);
-    };
-    
-    // Set initial value
-    setIsDarkMode(mediaQuery.matches);
-    
-    // Listen for changes
-    mediaQuery.addEventListener('change', handleChange);
-    return () => mediaQuery.removeEventListener('change', handleChange);
+    const handleChange = () => setSystemDark(query.matches);
+    handleChange();
+    if (typeof query.addEventListener === 'function') {
+      query.addEventListener('change', handleChange);
+      return () => query.removeEventListener('change', handleChange);
+    }
+    if (typeof query.addListener === 'function') {
+      query.addListener(handleChange);
+      return () => query.removeListener(handleChange);
+    }
   }, [theme]);
 
-  const setTheme = (newTheme: ThemePreference) => {
+  useEffect(() => {
+    applyThemePreference(theme, systemDark);
+  }, [theme, systemDark]);
+
+  const setTheme = useCallback((newTheme: ThemePreference) => {
+    if (!['system', 'light', 'dark'].includes(newTheme)) return;
     setThemeState(newTheme);
-  };
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, newTheme);
+      localStorage.removeItem('dark-mode');
+    } catch {
+      // Manual overrides still work when persistence is unavailable.
+    }
+    window.dispatchEvent(new CustomEvent(THEME_CHANGE_EVENT, { detail: newTheme }));
+  }, []);
 
   return [theme, setTheme, isDarkMode];
 }

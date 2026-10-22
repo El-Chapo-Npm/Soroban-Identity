@@ -37,8 +37,15 @@ setInterval(() => {
   for (const res of clients) res.write(`: ping\n\n`);
 }, 25_000).unref();
 
+const CORS_HEADERS: Record<string, string> = {
+  "Access-Control-Allow-Origin": config.corsOrigin ?? "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Authorization, Content-Type",
+  "Access-Control-Max-Age": "86400",
+};
+
 function send(res: http.ServerResponse, status: number, body: string, headers: Record<string, string> = {}) {
-  res.writeHead(status, { "Content-Type": "application/json", ...headers });
+  res.writeHead(status, { "Content-Type": "application/json", ...CORS_HEADERS, ...headers });
   res.end(body);
 }
 
@@ -96,6 +103,7 @@ function handleStream(req: http.IncomingMessage, res: http.ServerResponse) {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
     Connection: "keep-alive",
+    ...CORS_HEADERS,
   });
   res.write(`retry: 5000\nevent: summary\ndata: ${JSON.stringify(summary)}\n\n`);
   clients.add(res);
@@ -112,6 +120,7 @@ function handleExport(url: URL, res: http.ServerResponse) {
   res.writeHead(200, {
     "Content-Type": report.contentType,
     "Content-Disposition": `attachment; filename="${report.filename}"`,
+    ...CORS_HEADERS,
   });
   res.end(report.body);
 }
@@ -129,9 +138,18 @@ function serveStatic(pathname: string, res: http.ServerResponse) {
 const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://localhost");
 
-  if (req.method === "GET" && url.pathname === "/api/summary") return send(res, 200, JSON.stringify(summary));
-  if (req.method === "GET" && url.pathname === "/api/stream") return handleStream(req, res);
-  if (req.method === "GET" && url.pathname === "/api/export") return handleExport(url, res);
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, CORS_HEADERS);
+    return res.end();
+  }
+  if (req.method === "GET" && (url.pathname === "/api/summary" || url.pathname === "/summary")) {
+    return send(res, 200, JSON.stringify(summary));
+  }
+  if (req.method === "GET" && (url.pathname === "/api/stream" || url.pathname === "/stream")) return handleStream(req, res);
+  if (req.method === "GET" && (url.pathname === "/api/export" || url.pathname === "/export")) return handleExport(url, res);
+  if (req.method === "GET" && (url.pathname === "/api/reports" || url.pathname === "/reports")) {
+    return send(res, 200, JSON.stringify({ reports: REPORTS, formats: ["csv", "json"] }));
+  }
   if (req.method === "POST" && url.pathname === "/api/verifications") return void handleReport(req, res);
   if (req.method === "GET" && url.pathname === "/healthz") {
     return send(res, 200, JSON.stringify({ ok: true, latestLedger: store.data.cursor.latestLedger ?? null }));

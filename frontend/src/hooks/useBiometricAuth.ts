@@ -72,6 +72,10 @@ export interface AuthenticationResult {
 const DEVICES_STORAGE_KEY = "soroban_biometric_registered_devices_encrypted";
 const PREFS_STORAGE_KEY = "soroban_biometric_prefs_encrypted";
 const DEVICE_SALT_KEY = "soroban_biometric_device_salt";
+const IDB_NAME = "soroban_biometric_store";
+const IDB_VERSION = 1;
+const IDB_STORE = "devices";
+const IDB_RECORD_KEY = "registered_devices";
 
 // Browser compatibility notes (documented for consumers of this hook):
 // - Chrome/Edge 67+ (desktop & Android): platform authenticators supported.
@@ -184,6 +188,129 @@ async function decryptData<T>(ciphertextJson: string): Promise<T | null> {
   }
 }
 
+// IndexedDB helpers for secure device metadata storage (with localStorage fallback)
+function openDeviceDb(): Promise<IDBDatabase | null> {
+  return new Promise((resolve) => {
+    if (typeof window === "undefined" || typeof window.indexedDB === "undefined") {
+      resolve(null);
+      return;
+    }
+    try {
+      const request = window.indexedDB.open(IDB_NAME, IDB_VERSION);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) {
+          db.createObjectStore(IDB_STORE);
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => resolve(null);
+      request.onblocked = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+async function idbGetDevices(): Promise<BiometricDevice[] | null> {
+  const db = await openDeviceDb();
+  if (!db) return null;
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(IDB_STORE, "readonly");
+      const store = tx.objectStore(IDB_STORE);
+      const req = store.get(IDB_RECORD_KEY);
+      req.onsuccess = () => {
+        const value = req.result;
+        resolve(Array.isArray(value) ? (value as BiometricDevice[]) : null);
+      };
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    } finally {
+      db.close();
+    }
+  });
+}
+
+async function idbSetDevices(devices: BiometricDevice[]): Promise<boolean> {
+  const db = await openDeviceDb();
+  if (!db) return false;
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(IDB_STORE, "readwrite");
+      const store = tx.objectStore(IDB_STORE);
+      store.put(devices, IDB_RECORD_KEY);
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+      tx.onabort = () => resolve(false);
+    } catch {
+      resolve(false);
+    } finally {
+      db.close();
+    }
+  });
+}
+
+async function idbClearDevices(): Promise<void> {
+  const db = await openDeviceDb();
+  if (!db) return;
+  try {
+    const tx = db.transaction(IDB_STORE, "readwrite");
+    tx.objectStore(IDB_STORE).delete(IDB_RECORD_KEY);
+  } catch {
+    /* ignore */
+  } finally {
+    db.close();
+  }
+}
+
+// Persist devices: encrypted IndexedDB primary, encrypted localStorage fallback.
+async function persistDevices(devices: BiometricDevice[]): Promise<void> {
+  const encrypted = await encryptData(devices);
+  if (!encrypted) {
+    throw new BiometricError(
+      "storage_failure",
+      "Unable to securely encrypt biometric device metadata."
+    );
+  }
+  const storedInIdb = await idbSetDevices(devices);
+  try {
+    localStorage.setItem(DEVICES_STORAGE_KEY, encrypted);
+  } catch {
+    if (!storedInIdb) {
+      throw new BiometricError(
+        "storage_failure",
+        "Unable to persist biometric device metadata to secure storage."
+      );
+    }
+  }
+}
+
+// Load devices: IndexedDB first, then encrypted localStorage, then legacy plaintext.
+async function loadPersistedDevices(): Promise<BiometricDevice[]> {
+  const fromIdb = await idbGetDevices();
+  if (fromIdb && fromIdb.length > 0) return fromIdb;
+
+  let stored: string | null = null;
+  try {
+    stored = localStorage.getItem(DEVICES_STORAGE_KEY);
+  } catch {
+    stored = null;
+  }
+  if (stored) {
+    const decrypted = await decryptData<BiometricDevice[]>(stored);
+    if (decrypted) return decrypted;
+    try {
+      const legacy = JSON.parse(stored);
+      if (Array.isArray(legacy)) return legacy as BiometricDevice[];
+    } catch {
+      /* ignore */
+    }
+  }
+  return fromIdb ?? [];
+}
+
 const DEFAULT_PREFERENCES: BiometricPreferences = {
   enabledOperations: {
     credential_issuance: true,
@@ -239,21 +366,8 @@ export function useBiometricAuth() {
   useEffect(() => {
     const load = async () => {
       try {
-        const storedDevices = localStorage.getItem(DEVICES_STORAGE_KEY);
-        if (storedDevices) {
-          const decrypted = await decryptData<BiometricDevice[]>(storedDevices);
-          if (decrypted) {
-            setDevices(decrypted);
-          } else {
-            // Backwards compatibility: legacy plaintext storage
-            try {
-              const legacy = JSON.parse(storedDevices);
-              if (Array.isArray(legacy)) setDevices(legacy);
-            } catch {
-              /* ignore */
-            }
-          }
-        }
+        const loadedDevices = await loadPersistedDevices();
+        if (loadedDevices.length > 0) setDevices(loadedDevices);
 
         const encryptedPrefs = localStorage.getItem(PREFS_STORAGE_KEY);
         if (encryptedPrefs) {
@@ -267,21 +381,19 @@ export function useBiometricAuth() {
     load();
   }, []);
 
-  // Save devices (encrypted at rest)
+  // Save devices (encrypted at rest, IndexedDB primary with localStorage fallback)
   const saveDevices = useCallback(async (newDevices: BiometricDevice[]) => {
     setDevices(newDevices);
     try {
-      const encrypted = await encryptData(newDevices);
-      if (encrypted) {
-        localStorage.setItem(DEVICES_STORAGE_KEY, encrypted);
-      } else {
-        throw new BiometricError(
-          "storage_failure",
-          "Unable to securely encrypt biometric device metadata."
-        );
-      }
+      await persistDevices(newDevices);
     } catch (e) {
       console.warn("Could not save biometric devices to storage", e);
+      throw e instanceof BiometricError
+        ? e
+        : new BiometricError(
+            "storage_failure",
+            "Unable to persist biometric device metadata to secure storage."
+          );
     }
   }, []);
 
@@ -330,6 +442,8 @@ export function useBiometricAuth() {
       }
 
       const userId = getRandomBytes(16);
+      // Challenge is generated client-side here; in production this should be
+      // supplied by the server and verified during attestation validation.
       const challenge = getRandomBytes(32);
       const name =
         deviceName ||
@@ -393,11 +507,22 @@ export function useBiometricAuth() {
           ? (response.getTransports() as AuthenticatorTransport[])
           : undefined;
 
+      let publicKey: string | undefined;
+      try {
+        if (typeof response.getPublicKey === "function") {
+          const spki = response.getPublicKey();
+          if (spki) publicKey = bufferToBase64(spki);
+        }
+      } catch {
+        publicKey = undefined;
+      }
+
       const newDevice: BiometricDevice = {
         id: `device-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
         credentialId: bufferToBase64(credential.rawId),
         name,
         registeredAt: Date.now(),
+        publicKey,
         transports,
       };
 
@@ -412,6 +537,17 @@ export function useBiometricAuth() {
   const revokeDevice = useCallback(
     async (deviceId: string) => {
       const updated = devices.filter((d) => d.id !== deviceId);
+      if (updated.length === 0) {
+        // Clear both stores when the last device is removed
+        await idbClearDevices();
+        try {
+          localStorage.removeItem(DEVICES_STORAGE_KEY);
+        } catch {
+          /* ignore */
+        }
+        setDevices([]);
+        return;
+      }
       await saveDevices(updated);
     },
     [devices, saveDevices]
@@ -429,13 +565,8 @@ export function useBiometricAuth() {
   // Refresh devices from storage
   const refreshDevices = useCallback(async () => {
     try {
-      const stored = localStorage.getItem(DEVICES_STORAGE_KEY);
-      if (!stored) {
-        setDevices([]);
-        return;
-      }
-      const decrypted = await decryptData<BiometricDevice[]>(stored);
-      if (decrypted) setDevices(decrypted);
+      const loaded = await loadPersistedDevices();
+      setDevices(loaded);
     } catch {
       /* ignore */
     }
@@ -487,6 +618,18 @@ export function useBiometricAuth() {
   // Execute WebAuthn Assertion (authentication ceremony)
   const executeBiometricGet = useCallback(
     async (credentialIdBase64: string): Promise<PublicKeyCredential | null> => {
+      if (
+        typeof window === "undefined" ||
+        !window.PublicKeyCredential ||
+        !navigator.credentials ||
+        typeof navigator.credentials.get !== "function"
+      ) {
+        throw new BiometricError(
+          "unsupported_browser",
+          "WebAuthn is not supported on this browser."
+        );
+      }
+
       const challenge = getRandomBytes(32);
       const allowCredentials: PublicKeyCredentialDescriptor[] = [
         {
@@ -495,16 +638,35 @@ export function useBiometricAuth() {
         },
       ];
 
-      const assertion = (await navigator.credentials.get({
-        publicKey: {
-          challenge: challenge.buffer as ArrayBuffer,
-          allowCredentials,
-          timeout: 60000,
-          userVerification: "required",
-        },
-      })) as PublicKeyCredential | null;
+      try {
+        const assertion = (await navigator.credentials.get({
+          publicKey: {
+            challenge: challenge.buffer as ArrayBuffer,
+            allowCredentials,
+            timeout: 60000,
+            userVerification: "required",
+          },
+        })) as PublicKeyCredential | null;
 
-      return assertion;
+        return assertion;
+      } catch (err: any) {
+        if (err?.name === "NotAllowedError") {
+          throw new BiometricError(
+            "cancelled",
+            "Biometric authentication was cancelled or timed out."
+          );
+        }
+        if (err?.name === "SecurityError") {
+          throw new BiometricError(
+            "authentication_failed",
+            "Biometric authentication failed due to a security error."
+          );
+        }
+        throw new BiometricError(
+          "authentication_failed",
+          err?.message || "Biometric authentication failed."
+        );
+      }
     },
     []
   );
@@ -554,7 +716,37 @@ export function useBiometricAuth() {
         throw new Error("Biometric authentication verification returned empty.");
       } catch (err: any) {
         const errorMsg = err?.message || "Biometric authentication failed.";
+        const errorCode: BiometricErrorCode =
+          err instanceof BiometricError ? err.code : "authentication_failed";
         setAuthError(errorMsg);
+
+        // Cancellation should not retry; go straight to fallback or failure.
+        if (errorCode === "cancelled") {
+          if (preferences.fallbackToWallet && options?.fallbackSigner) {
+            setPromptState((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    status: "falling_back",
+                    error: "Biometric prompt cancelled. Falling back to wallet signature...",
+                  }
+                : null
+            );
+            const fallbackResult = await performWalletFallback(operation, options);
+            activeAuthParamsRef.current = null;
+            resolve(fallbackResult);
+          } else {
+            setPromptState(null);
+            setIsAuthenticating(false);
+            activeAuthParamsRef.current = null;
+            resolve({
+              success: false,
+              method: "biometric",
+              error: errorMsg,
+            });
+          }
+          return;
+        }
 
         if (attempt < preferences.maxRetries) {
           setPromptState((prev) =>
@@ -645,6 +837,22 @@ export function useBiometricAuth() {
         };
       }
 
+      // Platform authenticator unavailable: fall back to wallet/password path
+      if (!isPlatformAuthenticatorAvailable) {
+        setAuthError(
+          "No platform authenticator (Touch ID, Face ID, Windows Hello) is available on this device."
+        );
+        if (preferences.fallbackToWallet && options?.fallbackSigner) {
+          return performWalletFallback(operation, options);
+        }
+        setIsAuthenticating(false);
+        return {
+          success: false,
+          method: "none",
+          error: "Platform authenticator unavailable and no fallback signer provided.",
+        };
+      }
+
       return new Promise<AuthenticationResult>((resolve) => {
         activeAuthParamsRef.current = {
           operation,
@@ -655,7 +863,14 @@ export function useBiometricAuth() {
         attemptBiometric(1);
       });
     },
-    [preferences, isSupported, devices, performWalletFallback, attemptBiometric]
+    [
+      preferences,
+      isSupported,
+      isPlatformAuthenticatorAvailable,
+      devices,
+      performWalletFallback,
+      attemptBiometric,
+    ]
   );
 
   // Retry currently pending authentication manually
