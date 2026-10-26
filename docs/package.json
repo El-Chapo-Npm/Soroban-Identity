@@ -10,7 +10,7 @@
   },
   "devDependencies": {
     "typedoc": "^0.28.13",
-    "typedoc-plugin-markdown": "^4.13.1",
+    "typedoc-plugin-markdown": "^4.14.1",
     "vitepress": "^1.6.4"
   }
 }
