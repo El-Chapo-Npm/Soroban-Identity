@@ -24,7 +24,7 @@
     "@walletconnect/sign-client": "^2.17.0",
     "date-fns": "^4.4.0",
     "i18next": "^26.0.7",
-    "jspdf": "^2.5.2",
+    "jspdf": "^4.2.1",
     "jszip": "^3.10.1",
     "qrcode": "^1.5.4",
     "qrcode.react": "^4.2.0",
