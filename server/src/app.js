@@ -181,6 +181,7 @@ import {
 import { CacheManager, CACHE_TTL, cacheKey } from "./cache/index.js";
 import { MeteringService, meteringMiddleware, handleBillingRoutes } from "./billing/index.js";
 import { createRequestDeduplication } from "./middleware/dedupe.js";
+import { createIdentityRouter } from "./routes/identity.js";
 import { verifyJwt } from "./jwt-auth.js";
 import { createIpfsStorage } from "./ipfs-storage.js";
 const SERVER_VERSION = "0.1.0";
@@ -417,6 +418,25 @@ export function createApp({
     ttlMs: config.requestDeduplicationTtlMs ?? 5000,
   });
 
+  // #1273–#1276: REST surface for identity resolution, identity registration,
+  // attestation issuance and attestation revocation. The router owns its own
+  // validation, auth, rate limiting and metrics so the handlers below stay
+  // focused on the legacy credential API.
+  const identityRouter = createIdentityRouter({
+    config,
+    soroban,
+    metrics,
+    didCache,
+    apiKeyService,
+    oauthService,
+    limiter,
+    logger,
+    nonceStore,
+    checkNonce,
+    dedupe,
+    linkPrefix: resolveLinkPrefix({ version: DEFAULT_VERSION, isExplicitUrlVersion: false }),
+  });
+
   return async function app(req, res) {
     const startTime = Date.now();
     const url = new URL(
@@ -565,6 +585,10 @@ export function createApp({
     });
 
         if (await handleMockApiRequest(req, res, config)) return;
+
+    // Identity and attestation REST endpoints (#1273–#1276). Dispatched
+    // before the legacy DID routes so /identity/* is owned by the router.
+    if (await identityRouter(req, res, { url, pathname, tenantId })) return;
 
     // Session key exchange (#1049). Unauthenticated by design: the key it
     // returns is only useful to the client that generated the ephemeral

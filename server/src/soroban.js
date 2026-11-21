@@ -156,6 +156,142 @@ export class SorobanClient {
     });
   }
 
+  /**
+   * Submit a pre-signed transaction envelope (base64 XDR) to Soroban.
+   *
+   * The envelope is already signed by the caller, so no source account is
+   * required here. The submission is wrapped in the circuit breaker and
+   * retried on transient RPC failures, mirroring `invoke`.
+   *
+   * @param {string} signedXdr - Base64-encoded signed transaction envelope.
+   * @returns {Promise<{hash: string|null, status: string, ledger: number|null, error: object|null}>}
+   */
+  async submitSignedXdr(signedXdr) {
+    if (!signedXdr || typeof signedXdr !== 'string') {
+      throw new SorobanError('invalid_request', 'A signed transaction XDR is required.', 'signedXdr missing');
+    }
+
+    const commandArgs = [
+      'contract',
+      'invoke',
+      '--network', this.config.network,
+      '--rpc-url', this.config.rpcUrl,
+      '--',
+      '--xdr',
+      signedXdr,
+    ];
+
+    return this.circuitBreaker.call(async () => {
+      let attempt = 0;
+      while (true) {
+        const started = performance.now();
+        try {
+          const output = await traceSpan(
+            'soroban.submitSignedXdr',
+            () => runCommand(this.config.stellarCli, commandArgs, this.config.sorobanInvokeTimeoutMs),
+            {},
+          );
+          this.metrics?.observeRpcLatency((performance.now() - started) / 1000);
+          return parseSubmissionResult(output);
+        } catch (error) {
+          this.metrics?.observeRpcLatency((performance.now() - started) / 1000);
+
+          if (error instanceof SorobanTimeoutError) {
+            throw new SorobanError('timeout', 'The operation timed out.', error.message);
+          }
+
+          const errMsg = error.message.toLowerCase();
+          const isTransient =
+            errMsg.includes('timeout') ||
+            errMsg.includes('429') ||
+            errMsg.includes('503') ||
+            errMsg.includes('econnreset');
+
+          if (isTransient && attempt < this.config.rpcMaxRetries) {
+            attempt++;
+            if (this.metrics && typeof this.metrics.counters === 'object') {
+              this.metrics.counters.rpc_retries_total = (this.metrics.counters.rpc_retries_total || 0) + 1;
+            }
+            const maxDelay = this.config.rpcRetryBaseMs * Math.pow(this.config.rpcRetryBackoff, attempt);
+            const delay = Math.floor(Math.random() * maxDelay);
+            logger.warn(
+              { attempt, maxRetries: this.config.rpcMaxRetries, delayMs: delay, error: error.message },
+              'Retrying Soroban signed XDR submission',
+            );
+            await new Promise((r) => setTimeout(r, delay));
+            continue;
+          }
+
+          throw normalizeSubmissionError(error);
+        }
+      }
+    }).catch((error) => {
+      if (error instanceof SorobanUnavailableError) {
+        throw new SorobanError('rpc_unavailable', 'The Soroban RPC node is currently unavailable.', error.message);
+      }
+      throw error;
+    });
+  }
+
+  /**
+   * Build and submit an attestation contract call on behalf of an issuer.
+   *
+   * @param {string} issuer - Issuer Stellar address (G...).
+   * @param {object} payload - Attestation payload (subject, data, etc.).
+   * @returns {Promise<{hash: string|null, status: string, ledger: number|null, error: object|null}>}
+   */
+  async buildAndSubmitAttestation(issuer, payload = {}) {
+    if (!issuer) {
+      throw new SorobanError('invalid_request', 'An issuer address is required.', 'issuer missing');
+    }
+    if (!this.config.contracts?.attestation) {
+      throw new SorobanError('config_error', 'The attestation contract is not configured.', 'contracts.attestation missing');
+    }
+
+    const args = ['--issuer', issuer];
+    if (payload.subject !== undefined) args.push('--subject', String(payload.subject));
+    if (payload.data !== undefined) {
+      args.push('--data', typeof payload.data === 'string' ? payload.data : JSON.stringify(payload.data));
+    }
+    if (payload.expiresAt !== undefined) args.push('--expires_at', String(payload.expiresAt));
+
+    try {
+      const raw = await this.invoke(this.config.contracts.attestation, 'attest', args);
+      return parseSubmissionResult(raw);
+    } catch (error) {
+      throw normalizeSubmissionError(error);
+    }
+  }
+
+  /**
+   * Build and submit a revocation contract call.
+   *
+   * @param {string} attestationId - Identifier of the attestation to revoke.
+   * @param {string} caller - Address invoking the revocation (issuer or owner).
+   * @returns {Promise<{hash: string|null, status: string, ledger: number|null, error: object|null}>}
+   */
+  async buildAndSubmitRevocation(attestationId, caller) {
+    if (!attestationId) {
+      throw new SorobanError('invalid_request', 'An attestation id is required.', 'attestationId missing');
+    }
+    if (!caller) {
+      throw new SorobanError('invalid_request', 'A caller address is required.', 'caller missing');
+    }
+    if (!this.config.contracts?.attestation) {
+      throw new SorobanError('config_error', 'The attestation contract is not configured.', 'contracts.attestation missing');
+    }
+
+    try {
+      const raw = await this.invoke(this.config.contracts.attestation, 'revoke', [
+        '--id', String(attestationId),
+        '--caller', String(caller),
+      ]);
+      return parseSubmissionResult(raw);
+    } catch (error) {
+      throw normalizeSubmissionError(error);
+    }
+  }
+
   async pingAllContracts() {
     const entries = Object.entries(this.config.contracts);
     const results = await Promise.allSettled(entries.map(([name, id]) => this.invoke(id, 'ping').then(() => [name, true])));
@@ -419,6 +555,76 @@ function runCommand(command, args, timeoutMs) {
 function parseAddressList(raw) {
   const matches = raw.match(/G[A-Z0-9]{55}/g);
   return matches ? [...new Set(matches)] : [];
+}
+
+/**
+ * Normalize a CLI submission response into a stable shape for the HTTP layer.
+ *
+ * The CLI may print JSON or a plain hash; anything unparseable is treated as a
+ * successful submission with an unknown hash so callers can still respond.
+ */
+function parseSubmissionResult(raw) {
+  const text = typeof raw === 'string' ? raw.trim() : raw;
+  if (text && typeof text === 'object') {
+    return {
+      hash: text.hash ?? text.txHash ?? null,
+      status: text.status ?? 'success',
+      ledger: text.ledger ?? text.ledgerSequence ?? null,
+      error: text.error ?? null,
+    };
+  }
+  if (typeof text === 'string' && text !== '') {
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === 'object') {
+        return {
+          hash: parsed.hash ?? parsed.txHash ?? null,
+          status: parsed.status ?? 'success',
+          ledger: parsed.ledger ?? parsed.ledgerSequence ?? null,
+          error: parsed.error ?? null,
+        };
+      }
+    } catch {
+      // Not JSON — fall through and treat the text as a transaction hash.
+    }
+    return { hash: text, status: 'success', ledger: null, error: null };
+  }
+  return { hash: null, status: 'success', ledger: null, error: null };
+}
+
+/**
+ * Map an arbitrary submission error onto a `SorobanError` with a category the
+ * HTTP layer can translate into a status code.
+ */
+function normalizeSubmissionError(error) {
+  if (error instanceof SorobanError) return error;
+  const message = error?.message ?? String(error);
+  const errMsg = message.toLowerCase();
+
+  let category = 'unknown_error';
+  let publicMessage = 'An unknown error occurred.';
+
+  if (errMsg.includes('contracterror') || errMsg.includes('rejected') || errMsg.includes('panic') || errMsg.includes('trap')) {
+    category = 'contract_error';
+    publicMessage = 'The contract rejected this request.';
+  } else if (errMsg.includes('insufficient_fee') || errMsg.includes('tx_insufficient_fee')) {
+    category = 'insufficient_fee';
+    publicMessage = 'The transaction fee was insufficient.';
+  } else if (errMsg.includes('ledger_closed') || errMsg.includes('tx_bad_seq')) {
+    category = 'ledger_closed';
+    publicMessage = 'The ledger closed before the transaction could be included.';
+  } else if (errMsg.includes('timeout')) {
+    category = 'timeout';
+    publicMessage = 'The operation timed out.';
+  } else if (errMsg.includes('429') || errMsg.includes('503') || errMsg.includes('econnreset')) {
+    category = 'rpc_unavailable';
+    publicMessage = 'The Soroban RPC node is currently unavailable.';
+  } else if (errMsg.includes('invalid') || errMsg.includes('malformed') || errMsg.includes('xdr')) {
+    category = 'invalid_request';
+    publicMessage = 'The submitted transaction was invalid.';
+  }
+
+  return new SorobanError(category, publicMessage, message);
 }
 
 /**

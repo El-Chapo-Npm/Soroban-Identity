@@ -4,6 +4,8 @@ import crypto from 'node:crypto';
 import { requestContextStore } from './request-context.js';
 import { logger } from './logger.js';
 import { EventStore, createEvent, EventTypes } from './events/index.js';
+import { getCachedDidDocument } from './did-cache.js';
+import { getCachedQuery, setCachedQuery } from './query-cache.js';
 
 let _eventStoreInstance = null;
 function getEventStore(config) {
@@ -728,6 +730,24 @@ export async function recordCredentialVerification(config, id, details = {}) {
 
 
 
+// ── Indexed query helpers for identity / attestation REST routes (#1273, #1276) ──
+/**
+ * Resolve a DID document from the indexed DID cache.
+ *
+ * @param {string} did
+ * @returns {Promise<object|null>} The resolved DID document, or null if unknown
+ */
+export async function getResolvedDidDocument(did) {
+  if (!did || typeof did !== 'string') return null;
+  try {
+    const doc = await getCachedDidDocument(did);
+    return doc ?? null;
+  } catch (error) {
+    logger.warn({ error: error.message, did }, 'Failed to resolve DID document from cache');
+    return null;
+  }
+}
+
 // ── DID document version history (#1288) ─────────────────────────────────────
 // Each DID's revision history is stored as an append-only NDJSON file under
 // <dataDir>/did-history/<sha256(did)>.ndjson. One JSON object per line:
@@ -763,6 +783,66 @@ export function clearDidHistoryCache(config, did) {
     _didHistoryCache.delete(getDidHistoryPath(config, did));
   } else {
     _didHistoryCache.clear();
+  }
+}
+
+/**
+ * List the current (non-revoked) attestations issued to or by a DID.
+ *
+ * @param {string} did
+ * @returns {Promise<object[]>} Attestation records; empty array when none
+ */
+export async function listAttestationsForDid(did) {
+  if (!did || typeof did !== 'string') return [];
+  const cacheKey = `attestations:did:${did}`;
+  const cached = getCachedQuery(cacheKey);
+  if (cached !== undefined && cached !== null) return cached;
+
+  const attestations = await _readAttestations();
+  const result = attestations.filter(
+    (a) => (a.subject === did || a.issuer === did) && a.status !== 'revoked',
+  );
+  setCachedQuery(cacheKey, result);
+  return result;
+}
+
+/**
+ * Look up a single attestation record by id.
+ *
+ * @param {string} id
+ * @returns {Promise<object|null>} The attestation record (including issuer and
+ *   status), or null if unknown
+ */
+export async function getAttestationById(id) {
+  if (!id || typeof id !== 'string') return null;
+  const cacheKey = `attestation:id:${id}`;
+  const cached = getCachedQuery(cacheKey);
+  if (cached !== undefined && cached !== null) return cached;
+
+  const attestations = await _readAttestations();
+  const record = attestations.find((a) => a.id === id) ?? null;
+  if (record) setCachedQuery(cacheKey, record);
+  return record;
+}
+
+/**
+ * Read the raw attestation index. Returns an empty array when the store has
+ * not been created yet.
+ *
+ * @returns {Promise<object[]>}
+ */
+async function _readAttestations() {
+  const storePath = path.resolve(
+    process.env.ATTESTATION_STORE_PATH ?? path.join(process.env.DATA_DIR ?? './data', 'attestations.json'),
+  );
+  try {
+    const raw = await fs.readFile(storePath, 'utf8');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed.attestations) ? parsed.attestations : [];
+  } catch (error) {
+    if (error.code === 'ENOENT') return [];
+    logger.warn({ error: error.message, storePath }, 'Failed to read attestation index');
+    return [];
   }
 }
 
@@ -872,7 +952,6 @@ export async function readDidHistory(config, did, { limit = 50, cursor } = {}) {
 
   return { items, nextCursor, total };
 }
-
 // ── Expiry scanner watermark persistence ──────────────────────────────────────
 /**
  * Get the path where the expiry watermark is stored.

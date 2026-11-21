@@ -17,6 +17,7 @@ import { initFeatureFlags, getFlag } from './feature-flags.js';
 import { QueryResultCache } from './query-cache.js';
 import { DdosProtection } from './ddos-protection.js';
 import { createBatchVerificationQueue, createCredentialIssueQueue } from './job-queue.js';
+import { createIdentityRouter } from './identity-routes.js';
 
 // Load secrets before validation so existing config consumers see the same
 // values as environment-backed deployments. Vault is opt-in and fails closed
@@ -158,6 +159,19 @@ if (config.accessLogEnabled && config.accessLogPath) {
   });
 }
 
+// Identity and attestation REST endpoints (#1273-#1276). The router is built
+// with the same shared services as the rest of the app so authentication,
+// rate limiting, access logging, metrics and error handling behave uniformly.
+const identityRouter = createIdentityRouter({
+  config,
+  soroban,
+  metrics,
+  didCache,
+  apiKeyService,
+  webhookService,
+  realtime,
+});
+
 let dbPool = null;
 if (config.databaseUrl) {
   const { default: pg } = await import('pg');
@@ -179,6 +193,7 @@ const server = http.createServer(
     accessLogSink,
     realtime,
     ddosProtection,
+    identityRouter,
   }),
 );
 

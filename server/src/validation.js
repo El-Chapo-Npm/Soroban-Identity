@@ -311,6 +311,51 @@ export const schemas = {
       aad: optionalText,
     }),
   }),
+  identityByDidParams: looseObject({
+    params: looseObject({
+      did: z.string().transform(sanitizeString).refine((v) => isValidDid(v), {
+        message: DID_FORMAT_MESSAGE,
+      }),
+    }),
+    query: looseObject(queryFields).optional(),
+  }),
+  submitIdentity: looseObject({
+    body: z
+      .object({
+        signedXdr: z
+          .string()
+          .transform(sanitizeString)
+          .refine((v) => v.length > 0, { message: 'signedXdr must not be empty' })
+          .refine((v) => v.length <= 100_000, { message: 'signedXdr exceeds maximum length' }),
+        networkPassphrase: optionalText,
+      })
+      .strict(),
+  }),
+  submitAttestation: looseObject({
+    body: z
+      .object({
+        subject: z.string().transform(sanitizeString).refine((v) => isValidDid(v), {
+          message: DID_FORMAT_MESSAGE,
+        }),
+        claim: z.string().transform(sanitizeString).min(1).max(2000),
+        expiresAt: z.coerce.number().int().positive().optional(),
+        signedXdr: z
+          .string()
+          .transform(sanitizeString)
+          .refine((v) => v.length > 0, { message: 'signedXdr must not be empty' })
+          .refine((v) => v.length <= 100_000, { message: 'signedXdr exceeds maximum length' })
+          .optional(),
+        metadata: z.record(z.string(), z.unknown()).optional().default({}),
+      })
+      .strict(),
+  }),
+  revokeAttestationParams: looseObject({
+    params: looseObject({
+      id: z.string().transform(sanitizeString).refine((v) => v.length > 0 && v.length <= 128, {
+        message: 'Attestation id must be a non-empty string of at most 128 characters',
+      }),
+    }),
+  }),
 };
 
 /**
@@ -331,6 +376,60 @@ export function validateJwtExpiry(payload, skewSeconds = 0) {
   const skew = Number.isFinite(skewSeconds) && skewSeconds > 0 ? skewSeconds : 0;
   const nowSeconds = Math.floor(Date.now() / 1000);
   return exp > nowSeconds - skew;
+}
+
+/**
+ * Validate a signed XDR payload for POST /identity. Returns a structured
+ * result so route handlers can respond with a 400 without throwing.
+ *
+ * @param {unknown} value
+ * @returns {{ ok: true, signedXdr: string } | { ok: false, error: { error: string, code: string, message: string, errors: Array<{ field: string, source: string, message: string, code: string }> } }}
+ */
+export function validateSignedXdr(value, field = 'signedXdr') {
+  const result = schemas.submitIdentity.safeParse({ body: { signedXdr: value } });
+  if (result.success) return { ok: true, signedXdr: result.data.body.signedXdr };
+  const errors = result.error.issues.map((issue) => ({
+    field: issue.path.join('.') || field,
+    source: field,
+    message: issue.message,
+    code: issue.code,
+  }));
+  return {
+    ok: false,
+    error: {
+      error: 'validation_failed',
+      code: 'VALIDATION_FAILED',
+      message: 'Request validation failed.',
+      errors,
+    },
+  };
+}
+
+/**
+ * Validate an attestation id path parameter for DELETE /attestation/:id.
+ *
+ * @param {unknown} value
+ * @param {string} [field]
+ * @returns {{ ok: true, id: string } | { ok: false, error: { error: string, code: string, message: string, errors: Array<{ field: string, source: string, message: string, code: string }> } }}
+ */
+export function validateAttestationId(value, field = 'id') {
+  const result = schemas.revokeAttestationParams.safeParse({ params: { id: value } });
+  if (result.success) return { ok: true, id: result.data.params.id };
+  const errors = result.error.issues.map((issue) => ({
+    field: issue.path.join('.') || field,
+    source: field,
+    message: issue.message,
+    code: issue.code,
+  }));
+  return {
+    ok: false,
+    error: {
+      error: 'validation_failed',
+      code: 'VALIDATION_FAILED',
+      message: 'Request validation failed.',
+      errors,
+    },
+  };
 }
 
 function normalizeInput(input = {}) {

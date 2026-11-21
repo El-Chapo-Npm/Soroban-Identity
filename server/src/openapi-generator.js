@@ -14,6 +14,186 @@ const METHOD_OPERATIONS = {
   DELETE: { tag: "write", response: "204", description: "Resource deleted" },
 };
 
+const ERROR_RESPONSES = {
+  "400": { description: "Invalid request" },
+  "401": { description: "Authentication required" },
+  "403": { description: "Forbidden: caller is not authorized for this operation" },
+  "404": { description: "Resource not found" },
+  "429": { description: "Too many requests" },
+  "500": { description: "Internal server error" },
+};
+
+const IDENTITY_DOCUMENT_SCHEMA = {
+  type: "object",
+  description: "Resolved DID document",
+  properties: {
+    id: { type: "string", description: "The DID this document describes" },
+    controller: { type: "string" },
+    verificationMethod: { type: "array", items: { type: "object" } },
+    authentication: { type: "array", items: { type: "string" } },
+    service: { type: "array", items: { type: "object" } },
+    created: { type: "string", format: "date-time" },
+    updated: { type: "string", format: "date-time" },
+  },
+  required: ["id"],
+};
+
+const ATTESTATION_SCHEMA = {
+  type: "object",
+  properties: {
+    id: { type: "string", description: "Attestation identifier" },
+    issuer: { type: "string", description: "DID of the issuing account" },
+    subject: { type: "string", description: "DID of the attested subject" },
+    claim: { type: "string", description: "Attestation claim type" },
+    data: { type: "object", additionalProperties: true },
+    status: { type: "string", enum: ["active", "revoked"] },
+    createdAt: { type: "string", format: "date-time" },
+    revokedAt: { type: "string", format: "date-time", nullable: true },
+  },
+  required: ["id", "issuer", "subject", "status"],
+};
+
+const TX_RESULT_SCHEMA = {
+  type: "object",
+  properties: {
+    hash: { type: "string", description: "Transaction hash" },
+    status: { type: "string", enum: ["SUCCESS", "FAILED", "PENDING"] },
+    ledger: { type: "integer", nullable: true },
+    resultXdr: { type: "string", description: "Base64-encoded transaction result XDR" },
+    error: { type: "string", nullable: true },
+  },
+  required: ["hash", "status"],
+};
+
+const SIGNED_XDR_BODY_SCHEMA = {
+  type: "object",
+  properties: {
+    signedXdr: { type: "string", description: "Base64-encoded signed Soroban transaction XDR" },
+  },
+  required: ["signedXdr"],
+};
+
+const ATTESTATION_BODY_SCHEMA = {
+  type: "object",
+  properties: {
+    subject: { type: "string", description: "DID of the subject being attested" },
+    claim: { type: "string", description: "Attestation claim type" },
+    data: { type: "object", additionalProperties: true },
+    signedXdr: {
+      type: "string",
+      description: "Optional pre-signed Soroban transaction XDR for the attestation",
+    },
+  },
+  required: ["subject", "claim"],
+};
+
+const IDENTITY_ATTESTATIONS_RESPONSE_SCHEMA = {
+  type: "object",
+  properties: {
+    did: { type: "string" },
+    document: IDENTITY_DOCUMENT_SCHEMA,
+    attestations: { type: "array", items: ATTESTATION_SCHEMA },
+  },
+  required: ["did", "document", "attestations"],
+};
+
+const EXPLICIT_OPERATIONS = {
+  "GET /identity/{did}": {
+    tag: "identity",
+    summary: "Resolve DID document and attestations",
+    description:
+      "Returns the resolved DID document and the current attestation list from indexed data.",
+    operationId: "getIdentity",
+    security: [],
+    parameters: [
+      {
+        name: "did",
+        in: "path",
+        required: true,
+        schema: { type: "string" },
+        description: "Decentralized identifier to resolve",
+      },
+    ],
+    responses: {
+      "200": {
+        description: "Resolved DID document and attestations",
+        content: {
+          "application/json": { schema: IDENTITY_ATTESTATIONS_RESPONSE_SCHEMA },
+        },
+      },
+      ...ERROR_RESPONSES,
+    },
+  },
+  "POST /identity": {
+    tag: "identity",
+    summary: "Submit a signed identity transaction",
+    description: "Accepts a signed XDR, submits it to Soroban and returns the transaction result.",
+    operationId: "postIdentity",
+    security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }],
+    requestBody: {
+      required: true,
+      content: { "application/json": { schema: SIGNED_XDR_BODY_SCHEMA } },
+    },
+    responses: {
+      "200": {
+        description: "Transaction result",
+        content: { "application/json": { schema: TX_RESULT_SCHEMA } },
+      },
+      ...ERROR_RESPONSES,
+    },
+  },
+  "POST /attestation": {
+    tag: "attestation",
+    summary: "Submit a new attestation",
+    description: "Issuer-authenticated endpoint that submits a new attestation on-chain.",
+    operationId: "postAttestation",
+    security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }],
+    requestBody: {
+      required: true,
+      content: { "application/json": { schema: ATTESTATION_BODY_SCHEMA } },
+    },
+    responses: {
+      "201": {
+        description: "Attestation submitted",
+        content: {
+          "application/json": {
+            schema: {
+              type: "object",
+              properties: {
+                attestation: ATTESTATION_SCHEMA,
+                transaction: TX_RESULT_SCHEMA,
+              },
+              required: ["attestation"],
+            },
+          },
+        },
+      },
+      ...ERROR_RESPONSES,
+    },
+  },
+  "DELETE /attestation/{id}": {
+    tag: "attestation",
+    summary: "Revoke an attestation",
+    description:
+      "Revokes an attestation. Only callable by the original issuer or the contract owner.",
+    operationId: "deleteAttestation",
+    security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }],
+    parameters: [
+      {
+        name: "id",
+        in: "path",
+        required: true,
+        schema: { type: "string" },
+        description: "Attestation identifier to revoke",
+      },
+    ],
+    responses: {
+      "204": { description: "Attestation revoked" },
+      ...ERROR_RESPONSES,
+    },
+  },
+};
+
 export function toOpenApiPath(path) {
   return String(path).replace(/:([A-Za-z0-9_]+)/g, "{$1}");
 }
@@ -89,6 +269,22 @@ export function generateOpenApiSpec(baseSpec, routes = V1_ROUTES) {
       },
     };
     generated.push({ name, method, path });
+  }
+
+  for (const [key, definition] of Object.entries(EXPLICIT_OPERATIONS)) {
+    const [method, path] = key.split(" ");
+    const lowerMethod = method.toLowerCase();
+    spec.paths[path] = spec.paths[path] ?? {};
+    if (spec.paths[path][lowerMethod]) continue;
+
+    if (!addedTags.has(definition.tag)) {
+      spec.tags.push({ name: definition.tag, description: `${definition.tag} endpoints` });
+      addedTags.add(definition.tag);
+    }
+
+    const { tag, ...rest } = definition;
+    spec.paths[path][lowerMethod] = { tags: [tag], ...rest };
+    generated.push({ name: definition.operationId, method: lowerMethod, path });
   }
 
   spec["x-generated-routes"] = generated;
