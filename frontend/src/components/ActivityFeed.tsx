@@ -2,6 +2,8 @@ import React, { useState, useMemo, useCallback } from "react";
 import { formatTimestamp } from "../utils/formatDate";
 import { useToast } from "../context/ToastContext";
 import { getActiveNetwork, isMainnet } from "../network";
+import { useContractEvents } from "../hooks/useContractEvents";
+import TransactionHistoryTable from "./TransactionHistoryTable";
 
 export type ActivityType =
   | "credential_issued"
@@ -127,6 +129,7 @@ const TYPE_COLORS: Record<ActivityType, { bg: string; text: string; icon: string
 };
 
 export const ActivityFeed: React.FC = () => {
+  const { events } = useContractEvents({ limit: 50 });
   const toast = useToast();
   const [activities, setActivities] = useState<ActivityItem[]>(() => getStoredActivities());
   const [selectedType, setSelectedType] = useState<string>("all");
@@ -239,6 +242,7 @@ export const ActivityFeed: React.FC = () => {
 
   return (
     <div style={{ maxWidth: "1000px", margin: "0 auto", padding: "1.5rem 0" }}>
+      <TransactionHistoryTable transactions={events} />
       <div
         style={{
           display: "flex",
