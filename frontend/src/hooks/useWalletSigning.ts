@@ -33,6 +33,24 @@ function isUserRejection(err: unknown): boolean {
   );
 }
 
+/** User-facing message shown when signing is attempted outside a user gesture. */
+export const SIGNING_GESTURE_REQUIRED_MESSAGE =
+  "Please click the button again to open the Freighter signing window.";
+
+/**
+ * Browsers block extension popups that are not opened from a direct user
+ * gesture (click/keypress). Where the User Activation API is available we
+ * check it so signing is only ever started from a click handler's activation
+ * window. When the API is unavailable we cannot tell, so we allow the call.
+ */
+function hasUserGesture(): boolean {
+  if (typeof navigator === "undefined") return true;
+  const activation = (navigator as Navigator & {
+    userActivation?: { isActive: boolean };
+  }).userActivation;
+  return activation ? activation.isActive : true;
+}
+
 /**
  * Handles transaction signing for whichever wallet is currently active.
  * Single responsibility: sign an XDR string and return the signed XDR.
@@ -64,7 +82,6 @@ export function useWalletSigning({
       setSigningError(null);
       setSigningRejected(false);
       setState((s) => ({ ...s, txLoading: true }));
-======
 
       try {
         if (state.walletType === "walletconnect") {
@@ -89,6 +106,13 @@ export function useWalletSigning({
           throw new Error("Freighter not available");
         }
 
+        if (!hasUserGesture()) {
+          // Do not call Freighter: the browser would block the popup and the
+          // user would see no feedback. Ask for a fresh click instead.
+          setSigningError(SIGNING_GESTURE_REQUIRED_MESSAGE);
+          throw new Error(SIGNING_GESTURE_REQUIRED_MESSAGE);
+        }
+
         try {
           return await window.freighter.signTransaction(xdr, {
             networkPassphrase: state.networkPassphrase,
@@ -107,7 +131,6 @@ export function useWalletSigning({
           // Genuine Freighter error — re-throw so callers can handle it.
           throw freighterErr;
         }
-======
       } finally {
         setState((s) => ({ ...s, txLoading: false }));
       }
