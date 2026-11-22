@@ -192,6 +192,12 @@ export class Indexer {
     if (!ev.inSuccessfulContractCall) return;
 
     const contractId = ev.contractId?.toString();
+    // Horizon/RPC payloads can carry a null/missing topic list or null entries;
+    // skip such events instead of throwing a TypeError that crashes the poller.
+    if (!Array.isArray(ev.topic) || ev.topic.length < 2 || ev.topic.some((t) => t == null)) {
+      console.warn(`[indexer] skipping event ${ev.id}: missing or null topic`);
+      return;
+    }
     const [ns, action] = ev.topic.map(symbolOf);
     // ts is unix ms UTC, parsed from the ledger close time (UTC).
     const ts = parseUtcMs(ev.ledgerClosedAt);
