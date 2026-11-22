@@ -7,6 +7,7 @@ import { CredentialClient } from '../../../sdk/src';
 import { validateStellarAddress } from "../../../sdk/src/utils";
 import { getNetworkConfig } from '../network';
 import SkeletonCard from "./SkeletonCard";
+import ClaimSubmissionForm from "./ClaimSubmissionForm";
 import FormField from "./FormField";
 import { formatTimestamp, formatLedgerExpiry } from "../utils/formatDate";
 import { handleError } from "../utils/handleError";
@@ -1827,6 +1828,8 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
           </div>
         )}
       </div>
+
+      <ClaimSubmissionForm />
 
       <div className="card" data-tour="issue-credential">
         <h2>Issue Credential</h2>
