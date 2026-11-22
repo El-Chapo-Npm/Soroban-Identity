@@ -72,6 +72,16 @@ pub enum ContractError {
     InvalidUpgradeVersion = 33,
     /// The requested DID document version does not exist.
     VersionNotFound = 34,
+    /// Issue #1361: this DID requires M-of-N signer approval to deactivate;
+    /// use `approve_deactivation` instead of `deactivate_did`.
+    MultiSigRequired = 35,
+    /// Issue #1361: invalid signer set or threshold (empty, duplicates,
+    /// too many signers, or threshold outside `1..=signers.len()`).
+    InvalidMultiSigConfig = 36,
+    /// Issue #1361: the signer has already approved this pending deactivation.
+    AlreadyApproved = 37,
+    /// Issue #1361: no multi-sig deactivation policy is configured for this DID.
+    MultiSigNotConfigured = 38,
 }
 
 /// Version returned by `ping` for deployment health checks.
@@ -120,6 +130,13 @@ const DELEGATION_CHILDREN: Symbol = symbol_short!("DELGCH");
 const DELEGATION_PARENT: Symbol = symbol_short!("DELGPAR");
 const MAX_DELEGATION_SCOPE_LEN: u32 = 128;
 
+/// Issue #1361: maximum number of signers in a deactivation multi-sig policy.
+pub const MAX_MULTISIG_SIGNERS: u32 = 10;
+/// Issue #1361: seconds after which partial deactivation approvals lapse.
+pub const DEACTIVATION_APPROVAL_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+const DEACT_CFG: Symbol = symbol_short!("DEACTCFG");
+const DEACT_PEND: Symbol = symbol_short!("DEACTPND");
+
 /// Maximum number of entries accepted in a resolver fallback chain.
 pub const MAX_FALLBACK_CHAIN: u32 = 8;
 /// Default TTL (in ledgers) applied to cached DID resolutions.
@@ -143,6 +160,22 @@ pub const MAX_DID_HISTORY: u32 = 20;
 pub struct IdentityStorageStats {
     pub total_dids: u32,
     pub active_dids: u32,
+}
+
+/// Issue #1361: M-of-N signer policy guarding `deactivate_did` for one DID.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MultiSigConfig {
+    pub signers: Vec<Address>,
+    pub threshold: u32,
+}
+
+/// Issue #1361: partial approvals collected for a pending deactivation.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingDeactivation {
+    pub approvals: Vec<Address>,
+    pub started_at: u64,
 }
 
 #[contracttype]
@@ -662,22 +695,162 @@ impl IdentityRegistry {
     pub fn deactivate_did(env: Env, controller: Address) -> Result<(), ContractError> {
         controller.require_auth();
         Self::require_not_paused(&env)?;
+        // Issue #1361: DIDs with a multi-sig policy cannot be deactivated by
+        // the controller alone.
+        if env
+            .storage()
+            .persistent()
+            .has(&(DEACT_CFG, controller.clone()))
+        {
+            return Err(ContractError::MultiSigRequired);
+        }
+        Self::apply_deactivation(&env, &controller)
+    }
+
+    /// Issue #1361: configure (or replace) the M-of-N signer policy that must
+    /// approve deactivation of `controller`'s DID.
+    ///
+    /// The controller must authorize the call. When a policy already exists,
+    /// replacing it additionally requires `approvers` to contain at least the
+    /// existing `threshold` of distinct members of the existing signer set,
+    /// each of which must authorize, so a compromised controller key cannot
+    /// strip the policy.
+    ///
+    /// # Errors
+    /// [`ContractError::DidNotFound`], [`ContractError::InvalidMultiSigConfig`],
+    /// [`ContractError::Unauthorized`] (insufficient or non-signer approvers).
+    pub fn set_deactivation_signers(
+        env: Env,
+        controller: Address,
+        signers: Vec<Address>,
+        threshold: u32,
+        approvers: Vec<Address>,
+    ) -> Result<(), ContractError> {
+        controller.require_auth();
+        Self::require_not_paused(&env)?;
         let storage = env.storage().persistent();
-        let key = Self::did_key(&env, &controller);
-        let mut doc: DidDocument = storage.get(&key).ok_or(ContractError::DidNotFound)?;
+        if !storage.has(&Self::did_key(&env, &controller)) {
+            return Err(ContractError::DidNotFound);
+        }
+        let n = signers.len();
+        if n == 0 || n > MAX_MULTISIG_SIGNERS || threshold == 0 || threshold > n {
+            return Err(ContractError::InvalidMultiSigConfig);
+        }
+        for i in 0..n {
+            let a = signers.get(i).unwrap();
+            for j in (i + 1)..n {
+                if a == signers.get(j).unwrap() {
+                    return Err(ContractError::InvalidMultiSigConfig);
+                }
+            }
+        }
+
+        let cfg_key = (DEACT_CFG, controller.clone());
+        if let Some(existing) = storage.get::<_, MultiSigConfig>(&cfg_key) {
+            let mut seen: Vec<Address> = Vec::new(&env);
+            for a in approvers.iter() {
+                if !existing.signers.contains(&a) {
+                    return Err(ContractError::Unauthorized);
+                }
+                if seen.contains(&a) {
+                    continue;
+                }
+                a.require_auth();
+                seen.push_back(a);
+            }
+            if seen.len() < existing.threshold {
+                return Err(ContractError::Unauthorized);
+            }
+        }
+
+        storage.set(&cfg_key, &MultiSigConfig { signers, threshold });
+        storage.extend_ttl(&cfg_key, TTL_BUMP_THRESHOLD, TTL_LEDGERS);
+        // A policy change invalidates approvals gathered under the old one.
+        storage.remove(&(DEACT_PEND, controller.clone()));
+        env.events().publish(
+            (IDENTITY, symbol_short!("msigcfg")),
+            (EVENT_VERSION, controller, threshold, n),
+        );
+        Ok(())
+    }
+
+    /// Issue #1361: record `approver`'s approval to deactivate `controller`'s
+    /// DID. The first approval opens the proposal; once `threshold` distinct
+    /// signers have approved, the DID is deactivated.
+    ///
+    /// Partial approvals lapse after [`DEACTIVATION_APPROVAL_TTL_SECS`].
+    ///
+    /// # Returns
+    /// `true` if this approval executed the deactivation, `false` otherwise.
+    ///
+    /// # Errors
+    /// [`ContractError::MultiSigNotConfigured`], [`ContractError::Unauthorized`]
+    /// (not a signer), [`ContractError::AlreadyApproved`],
+    /// [`ContractError::DidNotFound`], [`ContractError::DidDeactivated`].
+    pub fn approve_deactivation(
+        env: Env,
+        approver: Address,
+        controller: Address,
+    ) -> Result<bool, ContractError> {
+        approver.require_auth();
+        Self::require_not_paused(&env)?;
+        let storage = env.storage().persistent();
+        let cfg: MultiSigConfig = storage
+            .get(&(DEACT_CFG, controller.clone()))
+            .ok_or(ContractError::MultiSigNotConfigured)?;
+        if !cfg.signers.contains(&approver) {
+            return Err(ContractError::Unauthorized);
+        }
+        let doc: DidDocument = storage
+            .get(&Self::did_key(&env, &controller))
+            .ok_or(ContractError::DidNotFound)?;
         if !doc.active {
             return Err(ContractError::DidDeactivated);
         }
-        doc.active = false;
-        doc.updated_at = env.ledger().timestamp();
-        storage.set(&key, &doc);
-        storage.extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_LEDGERS);
-        let count: u32 = env.storage().instance().get(&DID_COUNT).unwrap_or(0);
-        if count > 0 {
-            env.storage().instance().set(&DID_COUNT, &(count - 1));
+
+        let now = env.ledger().timestamp();
+        let pend_key = (DEACT_PEND, controller.clone());
+        let mut pending: PendingDeactivation = storage
+            .get::<_, PendingDeactivation>(&pend_key)
+            .filter(|p| now <= p.started_at + DEACTIVATION_APPROVAL_TTL_SECS)
+            .unwrap_or(PendingDeactivation {
+                approvals: Vec::new(&env),
+                started_at: now,
+            });
+        if pending.approvals.contains(&approver) {
+            return Err(ContractError::AlreadyApproved);
         }
-        env.events().publish((IDENTITY, symbol_short!("deact")), (EVENT_VERSION, controller, doc.updated_at));
-        Ok(())
+        pending.approvals.push_back(approver.clone());
+        env.events().publish(
+            (IDENTITY, symbol_short!("deactapp")),
+            (EVENT_VERSION, controller.clone(), approver, pending.approvals.len()),
+        );
+
+        if pending.approvals.len() >= cfg.threshold {
+            storage.remove(&pend_key);
+            Self::apply_deactivation(&env, &controller)?;
+            Ok(true)
+        } else {
+            storage.set(&pend_key, &pending);
+            storage.extend_ttl(&pend_key, TTL_BUMP_THRESHOLD, TTL_LEDGERS);
+            Ok(false)
+        }
+    }
+
+    /// Issue #1361: the deactivation signer policy for a DID, if any.
+    pub fn get_deactivation_signers(env: Env, controller: Address) -> Option<MultiSigConfig> {
+        env.storage().persistent().get(&(DEACT_CFG, controller))
+    }
+
+    /// Issue #1361: unexpired partial approvals for a pending deactivation.
+    pub fn get_deactivation_approvals(env: Env, controller: Address) -> Vec<Address> {
+        let now = env.ledger().timestamp();
+        env.storage()
+            .persistent()
+            .get::<_, PendingDeactivation>(&(DEACT_PEND, controller))
+            .filter(|p| now <= p.started_at + DEACTIVATION_APPROVAL_TTL_SECS)
+            .map(|p| p.approvals)
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     /// Reactivates a deactivated DID. Only the admin can call this.
@@ -1232,6 +1405,29 @@ impl IdentityRegistry {
         Ok(())
     }
 
+    /// Shared deactivation logic used by `deactivate_did` and the multi-sig path.
+    fn apply_deactivation(env: &Env, controller: &Address) -> Result<(), ContractError> {
+        let storage = env.storage().persistent();
+        let key = Self::did_key(env, controller);
+        let mut doc: DidDocument = storage.get(&key).ok_or(ContractError::DidNotFound)?;
+        if !doc.active {
+            return Err(ContractError::DidDeactivated);
+        }
+        doc.active = false;
+        doc.updated_at = env.ledger().timestamp();
+        storage.set(&key, &doc);
+        storage.extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_LEDGERS);
+        let count: u32 = env.storage().instance().get(&DID_COUNT).unwrap_or(0);
+        if count > 0 {
+            env.storage().instance().set(&DID_COUNT, &(count - 1));
+        }
+        env.events().publish(
+            (IDENTITY, symbol_short!("deact")),
+            (EVENT_VERSION, controller.clone(), doc.updated_at),
+        );
+        Ok(())
+    }
+
     /// Core DID-creation logic shared by [`Self::create_did`] and
     /// [`Self::create_dids_batch`]. Caller must have already authorized
     /// `controller` (via `require_auth`) and confirmed the contract isn't paused.
@@ -1430,6 +1626,133 @@ mod tests {
         let doc = client.resolve_did(&user);
         assert!(doc.active);
         assert_eq!(doc.controller, user);
+    }
+
+    // -- Issue #1361: multi-sig deactivation
+
+    fn msig_setup(
+        n: u32,
+        threshold: u32,
+    ) -> (Env, IdentityRegistryClient<'static>, Address, std::vec::Vec<Address>) {
+        let (env, client) = setup();
+        let user = Address::generate(&env);
+        client.create_did(&user, &Map::new(&env));
+        let mut signers = Vec::new(&env);
+        let mut list = std::vec::Vec::new();
+        for _ in 0..n {
+            let a = Address::generate(&env);
+            signers.push_back(a.clone());
+            list.push(a);
+        }
+        client.set_deactivation_signers(&user, &signers, &threshold, &Vec::new(&env));
+        (env, client, user, list)
+    }
+
+    #[test]
+    fn test_multisig_blocks_direct_deactivation() {
+        let (_env, client, user, _s) = msig_setup(3, 2);
+        assert_eq!(client.try_deactivate_did(&user), Err(Ok(ContractError::MultiSigRequired)));
+        assert!(client.has_active_did(&user));
+    }
+
+    #[test]
+    fn test_multisig_executes_at_threshold() {
+        let (_env, client, user, s) = msig_setup(3, 2);
+        assert!(!client.approve_deactivation(&s[0], &user));
+        assert!(client.has_active_did(&user));
+        assert_eq!(client.get_deactivation_approvals(&user).len(), 1);
+        assert!(client.approve_deactivation(&s[1], &user));
+        assert!(!client.has_active_did(&user));
+        assert_eq!(client.get_deactivation_approvals(&user).len(), 0);
+    }
+
+    #[test]
+    fn test_multisig_rejects_duplicate_and_non_signer() {
+        let (env, client, user, s) = msig_setup(3, 3);
+        client.approve_deactivation(&s[0], &user);
+        assert_eq!(
+            client.try_approve_deactivation(&s[0], &user),
+            Err(Ok(ContractError::AlreadyApproved))
+        );
+        let outsider = Address::generate(&env);
+        assert_eq!(
+            client.try_approve_deactivation(&outsider, &user),
+            Err(Ok(ContractError::Unauthorized))
+        );
+        assert!(client.has_active_did(&user));
+    }
+
+    #[test]
+    fn test_multisig_not_configured_keeps_single_controller_flow() {
+        let (env, client) = setup();
+        let user = Address::generate(&env);
+        client.create_did(&user, &Map::new(&env));
+        let other = Address::generate(&env);
+        assert_eq!(
+            client.try_approve_deactivation(&other, &user),
+            Err(Ok(ContractError::MultiSigNotConfigured))
+        );
+        client.deactivate_did(&user);
+        assert!(!client.has_active_did(&user));
+    }
+
+    #[test]
+    fn test_multisig_invalid_config() {
+        let (env, client) = setup();
+        let user = Address::generate(&env);
+        client.create_did(&user, &Map::new(&env));
+        let a = Address::generate(&env);
+        let none: Vec<Address> = Vec::new(&env);
+        let empty: Vec<Address> = Vec::new(&env);
+        assert_eq!(
+            client.try_set_deactivation_signers(&user, &empty, &1, &none),
+            Err(Ok(ContractError::InvalidMultiSigConfig))
+        );
+        let mut one = Vec::new(&env);
+        one.push_back(a.clone());
+        assert_eq!(
+            client.try_set_deactivation_signers(&user, &one, &0, &none),
+            Err(Ok(ContractError::InvalidMultiSigConfig))
+        );
+        assert_eq!(
+            client.try_set_deactivation_signers(&user, &one, &2, &none),
+            Err(Ok(ContractError::InvalidMultiSigConfig))
+        );
+        let mut dup = Vec::new(&env);
+        dup.push_back(a.clone());
+        dup.push_back(a);
+        assert_eq!(
+            client.try_set_deactivation_signers(&user, &dup, &1, &none),
+            Err(Ok(ContractError::InvalidMultiSigConfig))
+        );
+    }
+
+    #[test]
+    fn test_multisig_policy_change_requires_existing_signers() {
+        let (env, client, user, s) = msig_setup(3, 2);
+        let mut new_signers = Vec::new(&env);
+        new_signers.push_back(Address::generate(&env));
+        let mut approvers = Vec::new(&env);
+        approvers.push_back(s[0].clone());
+        assert_eq!(
+            client.try_set_deactivation_signers(&user, &new_signers, &1, &approvers),
+            Err(Ok(ContractError::Unauthorized))
+        );
+        approvers.push_back(s[1].clone());
+        client.set_deactivation_signers(&user, &new_signers, &1, &approvers);
+        assert_eq!(client.get_deactivation_signers(&user).unwrap().threshold, 1);
+    }
+
+    #[test]
+    fn test_multisig_approvals_expire() {
+        use soroban_sdk::testutils::Ledger;
+        let (env, client, user, s) = msig_setup(2, 2);
+        client.approve_deactivation(&s[0], &user);
+        env.ledger()
+            .with_mut(|l| l.timestamp += DEACTIVATION_APPROVAL_TTL_SECS + 1);
+        assert_eq!(client.get_deactivation_approvals(&user).len(), 0);
+        assert!(!client.approve_deactivation(&s[1], &user));
+        assert!(client.has_active_did(&user));
     }
 
     #[test]

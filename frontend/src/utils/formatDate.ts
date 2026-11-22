@@ -54,10 +54,80 @@ export function normalizeUnixTimestamp(value: number | bigint | string): number 
   return num;
 }
 
+/**
+ * Numeric values below this are Stellar ledger sequences, not Unix seconds.
+ * Unix seconds passed 1e9 in 2001; ledger sequences only reach that around
+ * year 2160 at 5s per ledger, so the two ranges do not overlap in practice.
+ */
+const LEDGER_SEQUENCE_CEILING = 1_000_000_000;
+
+/**
+ * Normalise a non-ISO date string into ISO 8601 so Safari can parse it.
+ * Safari's Date parser rejects forms V8/SpiderMonkey accept, such as
+ * "2024-01-15 10:30:00" (space separator) or "2024-01-15 10:30:00 +0000".
+ * Strings without an explicit offset are treated as UTC.
+ */
+function normalizeDateString(raw: string): string {
+  const value = raw.trim();
+  const m = value.match(
+    /^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?))?\s*(Z|[+-]\d{2}:?\d{2})?$/i,
+  );
+  if (!m) return value;
+  const [, day, time, zone] = m;
+  if (!time) return day;
+  let offset = 'Z';
+  if (zone && zone.toUpperCase() !== 'Z') {
+    offset = zone.includes(':') ? zone : `${zone.slice(0, 3)}:${zone.slice(3)}`;
+  }
+  return `${day}T${time}${offset}`;
+}
+
+/**
+ * Convert an expiry/timestamp value to an ISO 8601 string, or null when it is
+ * absent (0 / empty) or unparseable. Accepts Unix seconds, Stellar ledger
+ * sequences (number, bigint or numeric string) and date strings. The result
+ * is safe to hand to `new Date()` in every browser, including Safari.
+ */
+export function toISO8601(value: string | number | bigint | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (typeof value === 'string' && text === '') return null;
+
+  if (typeof value !== 'string' || /^\d+$/.test(text)) {
+    const num = normalizeUnixTimestamp(typeof value === 'string' ? text : value);
+    if (num === 0) return null;
+    const seconds = num < LEDGER_SEQUENCE_CEILING ? ledgerSequenceToUnixSeconds(num) : num;
+    if (seconds >= MAX_DATE_SECS) return null;
+    const date = new Date(seconds * 1000);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  }
+
+  const date = new Date(normalizeDateString(text));
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+/**
+ * Format a credential/attestation expiry for display. Never produces
+ * "Invalid Date": unparseable input falls back to the raw value.
+ */
+export function formatLedgerExpiry(value: string | number | bigint | null | undefined): string {
+  if (value === null || value === undefined || value === 0 || value === 0n) return 'No expiry';
+  const iso = toISO8601(value);
+  if (iso === null) {
+    if (typeof value === 'string' && value.trim() !== '' && !/^\d+$/.test(value.trim())) {
+      return value;
+    }
+    const n = Number(value);
+    if (Number.isFinite(n) && n >= MAX_DATE_SECS) return 'Far future (max timestamp)';
+    return 'No expiry';
+  }
+  return formatFns(new Date(iso), 'PPP', { locale: getDateFnsLocale() });
+}
+
 export function formatDate(value: string | number | bigint): string {
   if (typeof value === 'string' && !/^\d+$/.test(value.trim())) {
-    const date = new Date(value);
-    return isNaN(date.getTime()) ? String(value) : formatFns(date, 'PPP', { locale: getDateFnsLocale() });
+    const iso = toISO8601(value);
+    return iso === null ? String(value) : formatFns(new Date(iso), 'PPP', { locale: getDateFnsLocale() });
   }
   const unix = normalizeUnixTimestamp(value);
   if (unix >= MAX_DATE_SECS) {

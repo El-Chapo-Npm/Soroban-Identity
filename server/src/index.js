@@ -187,7 +187,7 @@ const identityRouter = createIdentityRouter({
 let dbPool = null;
 if (config.databaseUrl) {
   const { default: pg } = await import('pg');
-  dbPool = new pg.Pool({ connectionString: config.databaseUrl, max: 2 });
+  dbPool = new pg.Pool({ connectionString: config.databaseUrl, max: config.dbPoolMaxSize ?? 10 });
 }
 
 const server = http.createServer(

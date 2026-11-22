@@ -1190,7 +1190,8 @@ export function createApp({
 
         if (req.method === "GET" && pathname === "/metrics") {
           if (metricsAggregator) await metricsAggregator.refresh().catch((error) => logger.error("metrics refresh failed", error));
-          return sendText(res, 200, metrics.renderPrometheus());
+          metrics.updateDbPoolStats?.(dbClient);
+          return sendText(res, 200, await metrics.renderPrometheus());
         }
         if (req.method === "GET" && pathname === "/ready") {
           const readiness = await collectReadiness({
@@ -1245,6 +1246,7 @@ export function createApp({
             }
           }
 
+          metrics.updateDbPoolStats?.(dbClient);
           const body = await metrics.renderPrometheus();
           return sendText(res, 200, body, metrics.contentType ? { "content-type": metrics.contentType } : {});
         }

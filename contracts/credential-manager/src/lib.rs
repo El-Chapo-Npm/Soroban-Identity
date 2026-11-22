@@ -364,6 +364,9 @@ pub enum ContractError {
     PresentationDomainMismatch = 86,
     AttestationNotFound = 87,
     AttestationExpired = 88,
+    /// Issue #1361: multi-sig signers are configured, so this admin operation
+    /// must go through `propose_admin_action` / `approve_admin_action`.
+    MultiSigRequired = 89,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -935,6 +938,11 @@ impl CredentialManager {
 
     pub fn add_issuer(env: Env, issuer: Address) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
+        // Issue #1361: once M-of-N admin signers are configured, adding an
+        // issuer needs `threshold` approvals via the proposal flow.
+        if env.storage().instance().has(&ADMIN_SIGNERS) {
+            return Err(ContractError::MultiSigRequired);
+        }
         Self::require_capability(&env, &Self::admin_address(&env)?, Capability::Admin)?;
         let mut issuers = Self::get_issuers_internal(&env);
         if !issuers.contains(&issuer) {
@@ -4820,6 +4828,36 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin, &registry_id);
         (env, admin, client)
+    }
+
+    #[test]
+    fn add_issuer_requires_multisig_once_signers_configured() {
+        let (env, admin, client) = setup();
+        let s1 = Address::generate(&env);
+        let s2 = Address::generate(&env);
+        let s3 = Address::generate(&env);
+        let issuer = Address::generate(&env);
+
+        // Without signers configured, the single-admin path is unchanged.
+        let legacy = Address::generate(&env);
+        client.add_issuer(&legacy);
+        assert!(client.get_issuers().contains(&legacy));
+
+        let mut signers = Vec::new(&env);
+        signers.push_back(s1.clone());
+        signers.push_back(s2.clone());
+        signers.push_back(s3.clone());
+        client.set_admin_signers(&admin, &signers, &2);
+
+        assert_eq!(
+            client.try_add_issuer(&issuer),
+            Err(Ok(ContractError::MultiSigRequired))
+        );
+
+        let id = client.propose_admin_action(&s1, &AdminActionType::AddIssuer, &issuer, &0);
+        assert!(!client.get_issuers().contains(&issuer));
+        client.approve_admin_action(&s2, &id);
+        assert!(client.get_issuers().contains(&issuer));
     }
 
     #[test]

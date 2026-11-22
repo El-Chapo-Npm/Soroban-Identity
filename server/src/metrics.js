@@ -108,6 +108,19 @@ export class MetricsService {
       registers: [this.registry],
     });
 
+    this.dbPoolConnections = new client.Gauge({
+      name: 'db_pool_connections',
+      help: 'Database connection pool size, by state (total, idle, active)',
+      labelNames: ['state'],
+      registers: [this.registry],
+    });
+
+    this.dbPoolWaiting = new client.Gauge({
+      name: 'db_pool_waiting_requests',
+      help: 'Number of requests queued waiting for a database connection',
+      registers: [this.registry],
+    });
+
     this.credentialsVerified = new client.Counter({
       name: 'credentials_verified_total',
       help: 'Total number of credential verification attempts, by result',
@@ -284,6 +297,26 @@ export class MetricsService {
           ? { enumerable: true, configurable: true, value: readCounter(target[name]) }
           : undefined,
     });
+  }
+
+  /**
+   * Sample database pool statistics into the db_pool_* gauges. Accepts a
+   * `pg.Pool` (totalCount/idleCount/waitingCount) or the ConnectionPool
+   * `getStats()` shape (totalConnections/idleConnections/waitingRequests).
+   * A missing or unrecognised pool is ignored.
+   * @param {object|null} pool
+   */
+  updateDbPoolStats(pool) {
+    if (!pool) return;
+    const stats = typeof pool.getStats === 'function' ? pool.getStats() : pool;
+    const total = Number(stats.totalCount ?? stats.totalConnections);
+    const idle = Number(stats.idleCount ?? stats.idleConnections);
+    const waiting = Number(stats.waitingCount ?? stats.waitingRequests ?? 0);
+    if (!Number.isFinite(total) || !Number.isFinite(idle)) return;
+    this.dbPoolConnections.set({ state: 'total' }, total);
+    this.dbPoolConnections.set({ state: 'idle' }, idle);
+    this.dbPoolConnections.set({ state: 'active' }, Math.max(0, total - idle));
+    this.dbPoolWaiting.set(Number.isFinite(waiting) ? waiting : 0);
   }
 
   /**
