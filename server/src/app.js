@@ -138,6 +138,7 @@ function wantsJsonLd(req, url) {
 }
 import { sanitizeDidMetadata, schemas, validateRequest } from "./validation.js";
 import { DidValidationError, validateDidInput } from "./did-validation.js";
+import { resolveDidDocument } from "./did-resolver.js";
 import {
   buildApiRootLinks,
   buildCredentialCollectionLinks,
@@ -2221,6 +2222,28 @@ export function createApp({
             }
             throw err;
           }
+        }
+
+        // ── W3C DID resolver (#1359) ───────────────────────────────────
+        // GET /did/:did returns a DID Core document (application/did+ld+json)
+        // with verificationMethod and service endpoints.
+        const w3cDidMatch = pathname.match(/^\/did\/([^/]+)$/);
+        if (req.method === "GET" && w3cDidMatch) {
+          let rawDid;
+          try {
+            rawDid = decodeURIComponent(w3cDidMatch[1]);
+          } catch {
+            return sendJson(res, 400, { error: "invalidDid", message: "Malformed URL-encoded DID parameter." });
+          }
+          const result = await resolveDidDocument(
+            rawDid,
+            (address) => (soroban?.resolveDid ? soroban.resolveDid(address) : null),
+            { accept: req.headers.accept },
+          );
+          return sendJson(res, result.status, result.body, {
+            "content-type": `${result.contentType}; charset=utf-8`,
+            ...(result.status === 200 ? { "cache-control": "public, max-age=60" } : {}),
+          });
         }
 
         const didRouteMatch = pathname.match(/^\/dids\/([^/]+)(\/metadata)?$/);

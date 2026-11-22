@@ -624,6 +624,12 @@ export function loadConfig(env = process.env) {
       5000,
       true,
     ),
+    // #1360 BE-37: when the indexer is enabled and contract_events is empty,
+    // replay historical events from INDEXER_REPLAY_START_LEDGER (default 0) to
+    // rebuild state. Set INDEXER_REPLAY_ON_EMPTY=false to opt out.
+    indexerReplayOnEmpty: parseBoolean(env.INDEXER_REPLAY_ON_EMPTY, true),
+    indexerReplayStartLedger: parseInteger(env.INDEXER_REPLAY_START_LEDGER, 0, true),
+    indexerReplayPageSize: parseInteger(env.INDEXER_REPLAY_PAGE_SIZE, 200),
     // PostgreSQL connection used by the indexer. DATABASE_URL takes
     // precedence; the discrete settings are the fallback.
     indexerDatabaseUrl: env.DATABASE_URL ?? "",

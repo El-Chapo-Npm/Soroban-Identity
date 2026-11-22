@@ -18,6 +18,7 @@ import { QueryResultCache } from './query-cache.js';
 import { DdosProtection } from './ddos-protection.js';
 import { createBatchVerificationQueue, createCredentialIssueQueue } from './job-queue.js';
 import { HorizonIndexer } from './indexer.js';
+import { createRpcEventFetcher, replayIfEmpty } from './indexer-replay.js';
 
 // Load secrets before validation so existing config consumers see the same
 // values as environment-backed deployments. Vault is opt-in and fails closed
@@ -239,6 +240,26 @@ server.listen(config.port, () => {
     } catch (error) {
       logger.error({ error: error.message }, 'Failed to start Horizon event indexer');
     }
+  }
+
+  // #1360: rebuild indexer state from historical events when the store is
+  // empty. Runs in the background so a slow or failing replay never blocks
+  // the API; failures are logged and retried on the next startup.
+  if (config.indexerEnabled && config.indexerReplayOnEmpty && dbPool) {
+    replayIfEmpty({
+      db: dbPool,
+      contractIds: config.indexerContractIds,
+      startLedger: config.indexerReplayStartLedger,
+      pageSize: config.indexerReplayPageSize,
+      fetchEvents: createRpcEventFetcher({ rpcUrl: config.rpcUrl }),
+      shouldStop: () => shuttingDown,
+      logger: {
+        info: (msg) => logger.info(msg),
+        warn: (msg) => logger.warn(msg),
+      },
+    }).catch((error) => {
+      logger.error({ error: error.message }, 'Indexer event replay failed');
+    });
   }
 });
 

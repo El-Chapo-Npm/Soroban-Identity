@@ -51,6 +51,43 @@ empty list returns `503` and disables admin access until a range is configured.
 When `TRUST_PROXY=true`, the first `X-Forwarded-For` address is used; only enable
 this when direct access to the server is restricted to the trusted proxy.
 
+## W3C DID resolver
+
+`GET /did/:did` resolves a `did:stellar:G...` identifier (or a bare Stellar account id) to a
+DID Core document. The response is `application/did+ld+json` by default; send
+`Accept: application/did+json` for the plain-JSON representation.
+
+The document contains an `Ed25519VerificationKey2020` `verificationMethod` derived from the
+account key (`publicKeyMultibase`), `authentication`/`assertionMethod`/`capabilityInvocation`
+references to it, and any stored `service` endpoints. Only `https` endpoints without embedded
+credentials are emitted.
+
+| Status | Meaning |
+|---|---|
+| 200 | Document returned |
+| 400 `invalidDid` | Identifier is not a valid Stellar DID |
+| 404 `notFound` | No such DID |
+| 406 `representationNotSupported` | `Accept` allows no DID representation |
+| 410 | DID is deactivated; a minimal document is returned |
+| 501 `methodNotSupported` | Non-`stellar` DID method |
+
+## Indexer event replay
+
+With `INDEXER_ENABLED=true`, the server checks `contract_events` at startup. If it is empty,
+it replays historical events for `INDEXER_CONTRACT_IDS` from `INDEXER_REPLAY_START_LEDGER`
+(default `0`) through Soroban RPC to rebuild state. Replay runs in the background, writes each
+page and its cursor in one transaction (so an interrupted replay resumes), and is idempotent.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `INDEXER_REPLAY_ON_EMPTY` | `true` | Set `false` to disable replay |
+| `INDEXER_REPLAY_START_LEDGER` | `0` | First ledger to replay |
+| `INDEXER_REPLAY_PAGE_SIZE` | `200` | Events per RPC request |
+
+Soroban RPC only retains a limited window of ledgers. If the start ledger is older than that
+window, replay begins at the oldest ledger the node still serves and logs a warning. Full
+history beyond that window needs an archive source.
+
 ## Connected Accounts
 
 GitHub and verified-email linking are optional and require wallet-bound account sessions. See [CONNECTED_ACCOUNTS.md](CONNECTED_ACCOUNTS.md) for provider setup, required environment variables, API routes, and storage/security constraints.
