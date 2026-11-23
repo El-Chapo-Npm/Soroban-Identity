@@ -5,6 +5,7 @@ import IdentityPanel from "./components/IdentityPanel";
 import CredentialsPanel from "./components/CredentialsPanel";
 import WalletButton from "./components/WalletButton";
 import ErrorBoundary from "./components/ErrorBoundary";
+import DashboardOverview from "./components/DashboardOverview";
 import { useWallet } from "./hooks/useWallet";
 import { useCredentialExpiryCheck } from "./hooks/useCredentialExpiryCheck";
 import {
@@ -18,6 +19,7 @@ import { checkConnection, IdentityClient, CredentialClient, ReputationClient } f
 import type { Credential } from "../../sdk/src/types";
 
 export enum Tab {
+  Dashboard = "dashboard",
   Identity = "identity",
   Credentials = "credentials",
 }
@@ -274,6 +276,12 @@ export default function App() {
 
       <div className="tabs">
         <button
+          className={`tab ${tab === Tab.Dashboard ? "active" : ""}`}
+          onClick={() => setTab(Tab.Dashboard)}
+        >
+          Dashboard
+        </button>
+        <button
           className={`tab ${tab === Tab.Identity ? "active" : ""}`}
           onClick={() => setTab(Tab.Identity)}
         >
@@ -288,6 +296,9 @@ export default function App() {
       </div>
 
       <ErrorBoundary>
+        {tab === Tab.Dashboard && (
+          <DashboardOverview address={wallet.publicKey} config={networkConfig} />
+        )}
         {tab === Tab.Identity && <IdentityPanel />}
         {tab === Tab.Credentials && (
           <CredentialsPanel verifyId={verifyId} />

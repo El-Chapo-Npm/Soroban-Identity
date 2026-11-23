@@ -485,3 +485,24 @@ button:disabled { background: var(--btn-disabled-bg); color: var(--btn-disabled-
   outline-offset: 2px;
   border-radius: 0.5rem;
 }
+
+/* Toasts */
+.toast-container { position: fixed; bottom: 1rem; right: 1rem; display: flex; flex-direction: column; gap: 0.5rem; z-index: 1000; }
+.toast { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; min-width: 240px; padding: 0.6rem 0.9rem; border-radius: 0.5rem; font-size: 0.9rem; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+.toast button { background: none; border: none; cursor: pointer; color: inherit; }
+.toast-success { background: var(--badge-green-bg); color: var(--badge-green-text); }
+.toast-error   { background: var(--badge-red-bg);   color: var(--badge-red-text); }
+.toast-info    { background: var(--badge-purple-bg); color: var(--badge-purple-text); }
+
+/* Attestations */
+.attestation-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 1rem; }
+.attestation-header { display: flex; justify-content: space-between; margin-bottom: 0.75rem; }
+.attestation-details { display: grid; grid-template-columns: auto 1fr; gap: 0.25rem 0.75rem; font-size: 0.9rem; }
+.attestation-details dt { color: var(--text-muted); }
+.attestation-details dd { margin: 0; word-break: break-all; }
+.btn-danger { background: var(--badge-red-text); color: #fff; }
+
+/* Modal */
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 999; }
+.modal { background: var(--card-bg); color: var(--text); border-radius: 0.75rem; padding: 1.5rem; max-width: 420px; width: 90%; display: flex; flex-direction: column; gap: 0.75rem; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 0.5rem; }
