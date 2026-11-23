@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 240
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -22,7 +22,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
       - name: Run mutation tests
@@ -30,7 +30,7 @@ jobs:
       - name: Job summary
         if: always()
         run: cat tests/mutation/reports/mutation-report.md >> "$GITHUB_STEP_SUMMARY" || true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: mutation-report
