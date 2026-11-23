@@ -9,17 +9,23 @@ import { useAddressHistory } from '../hooks/useAddressHistory';
 import SkeletonCard from './SkeletonCard';
 import FormField from './FormField';
 import ReputationChart from './ReputationChart';
+import IdentityDirectory from './IdentityDirectory';
 import { formatTimestamp } from '../utils/formatDate';
 import { handleError, isNetworkError } from '../utils/handleError';
 import { useWalletContext } from '../context/WalletContext';
 import { useToast } from '../context/ToastContext';
 import { exportDidDocumentAsJsonLd } from '../../../sdk/src/serializers';
-import { SorobanRpc, TransactionBuilder, BASE_FEE, nativeToScVal, Contract } from '@stellar/stellar-sdk';
+import { nativeToScVal } from '@stellar/stellar-sdk';
+import { useSorobanInvoke } from '../hooks/useSorobanInvoke';
+import { downloadIdentityExport } from '../utils/exportIdentity';
+import { RecoveryPhraseBackup } from './RecoveryPhraseBackup';
+import { ProfilePictureUpload } from './ProfilePictureUpload';
 import { IdentityClient, ReputationClient } from '../../../sdk/src';
 import { getNetworkConfig } from '../network';
 import ClaimVerificationBadge, { getClaimStatus } from './ClaimVerificationBadge';
 import AuditLogViewer from './AuditLogViewer';
 import { buildDidVerificationUrl } from '../utils/socialShare';
+import { copyToClipboard } from '../utils/clipboard';
 
 type IdentityState =
   | { status: 'idle' }
@@ -87,6 +93,10 @@ function validateMetadataFields(
 
 export default function IdentityPanel({ initialAddress }: { initialAddress?: string } = {}) {
   const wallet = useWalletContext();
+export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } = {}) {
+  const contextWallet = useWalletContext();
+  const wallet = propWallet ?? contextWallet;
+  const invokeContract = useSorobanInvoke(propWallet);
   const toast = useToast();
   const [identityState, dispatch] = useReducer(identityReducer, { status: 'idle' });
   const resolving = identityState.status === 'loading';
@@ -125,6 +135,30 @@ export default function IdentityPanel({ initialAddress }: { initialAddress?: str
 
   const [createResult, setCreateResult] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+
+  // ── Creation wizard (#1299) ────────────────────────────────────────────
+  const [createStep, setCreateStep] = useState(1);
+  const [createDid, setCreateDid] = useState('');
+  const [createDidError, setCreateDidError] = useState<string | null>(null);
+
+  /** Validates the DID field on step 3: required, non-whitespace. */
+  const validateCreateDid = (value: string): string | null => {
+    if (!value.trim()) return 'DID is required';
+    return null;
+  };
+
+  const handleCreateNext = () => {
+    if (createStep === 3) {
+      const error = validateCreateDid(createDid);
+      setCreateDidError(error);
+      if (error) return;
+    }
+    setCreateStep((s) => Math.min(s + 1, 3));
+  };
+
+  const handleCreateBack = () => {
+    setCreateStep((s) => Math.max(s - 1, 1));
+  };
 
   const [metadataEntries, setMetadataEntries] = useState<Array<{ key: string; value: string }>>([]);
   const [metadataError, setMetadataError] = useState<string | null>(null);
@@ -216,6 +250,35 @@ export default function IdentityPanel({ initialAddress }: { initialAddress?: str
     URL.revokeObjectURL(url);
   };
 
+  const handleExportIdentityData = () => {
+    if (!resolvedDoc || !resolvedAddress) return;
+    downloadIdentityExport({
+      did: resolvedDoc,
+      address: resolvedAddress,
+      network: getNetworkConfig().name,
+      reputation,
+      scoreHistory,
+    });
+  };
+
+  const handleAvatarLinked = async (cid: string) => {
+    if (!wallet.connected || !wallet.publicKey) {
+      throw new Error('Connect your wallet to link a profile picture.');
+    }
+    const networkConfig = getNetworkConfig();
+    await invokeContract({
+      contractId: networkConfig.identityRegistryId,
+      method: 'update_did',
+      args: [
+        nativeToScVal(wallet.publicKey, { type: 'address' }),
+        nativeToScVal(
+          { ...(resolvedDoc?.metadata ?? {}), avatar: `ipfs://${cid}` },
+          { type: 'map' }
+        ),
+      ],
+    });
+  };
+
   const handleExportJsonLd = () => {
     if (!resolvedDoc) return;
     const blob = new Blob([exportDidDocumentAsJsonLd(resolvedDoc)], { type: 'application/ld+json' });
@@ -230,74 +293,38 @@ export default function IdentityPanel({ initialAddress }: { initialAddress?: str
   const handleCopyDid = async () => {
     if (!resolvedAddress) return;
     const did = `did:stellar:${resolvedAddress}`;
-    
-    try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(did);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-      } else {
-        // Fallback for browsers without clipboard API
-        const textarea = document.createElement('textarea');
-        textarea.value = did;
-        textarea.style.position = 'fixed';
-        textarea.style.opacity = '0';
-        document.body.appendChild(textarea);
-        textarea.select();
-        document.execCommand('copy');
-        document.body.removeChild(textarea);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-      }
-    } catch (err) {
-      console.error('Failed to copy DID:', err);
+    const copiedSuccessfully = await copyToClipboard(did);
+    if (copiedSuccessfully) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
     }
   };
 
   const handleCreate = async () => {
     if (creating) return; // guard against duplicate submissions
     if (!wallet.connected || !wallet.publicKey) return;
+
+    // Step 3 validation: DID is required (#1299)
+    const didError = validateCreateDid(createDid);
+    setCreateDidError(didError);
+    if (didError) {
+      toast.error(didError);
+      return;
+    }
+
     setCreating(true);
     setCreateResult(null);
     try {
       const networkConfig = getNetworkConfig();
-      const server = new SorobanRpc.Server(typeof networkConfig.rpcUrl === 'string' ? networkConfig.rpcUrl : networkConfig.rpcUrl[0]);
-      const contract = new Contract(networkConfig.identityRegistryId);
-      const account = await server.getAccount(wallet.publicKey);
-      
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: networkConfig.networkPassphrase,
-      })
-        .addOperation(
-          contract.call(
-            "create_did",
-            nativeToScVal(wallet.publicKey, { type: "address" }),
-            nativeToScVal({}, { type: "map" })
-          )
-        )
-        .setTimeout(30)
-        .build();
+      const { fee: estimatedFee } = await invokeContract({
+        contractId: networkConfig.identityRegistryId,
+        method: "create_did",
+        args: [
+          nativeToScVal(wallet.publicKey, { type: "address" }),
+          nativeToScVal({}, { type: "map" }),
+        ],
+      });
 
-      const prepared = await server.prepareTransaction(tx);
-      const estimatedFee = parseInt(prepared.fee, 10);
-      const signedXdr = await wallet.signTransaction(prepared.toXDR());
-      const signedTx = TransactionBuilder.fromXDR(signedXdr, networkConfig.networkPassphrase);
-      const result = await server.sendTransaction(signedTx as any);
-      
-      if (result.status !== "PENDING") {
-        throw new Error(`Transaction failed: ${result.status}`);
-      }
-      
-      let txStatus = await server.getTransaction(result.hash);
-      while (txStatus.status === "NOT_FOUND") {
-        await new Promise(r => setTimeout(r, 2000));
-        txStatus = await server.getTransaction(result.hash);
-      }
-      if (txStatus.status === "FAILED") {
-        throw new Error("Transaction failed on-chain");
-      }
-      
       setCreateResult(
         `DID created: did:stellar:${wallet.publicKey}\nEstimated fee: ${estimatedFee} stroops (${(estimatedFee / 10_000_000).toFixed(7)} XLM)`
       );
@@ -335,41 +362,14 @@ export default function IdentityPanel({ initialAddress }: { initialAddress?: str
       });
 
       const networkConfig = getNetworkConfig();
-      const server = new SorobanRpc.Server(typeof networkConfig.rpcUrl === 'string' ? networkConfig.rpcUrl : networkConfig.rpcUrl[0]);
-      const contract = new Contract(networkConfig.identityRegistryId);
-      const account = await server.getAccount(wallet.publicKey);
-
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: networkConfig.networkPassphrase,
-      })
-        .addOperation(
-          contract.call(
-            "update_did",
-            nativeToScVal(wallet.publicKey, { type: "address" }),
-            nativeToScVal(metadata, { type: "map" })
-          )
-        )
-        .setTimeout(30)
-        .build();
-
-      const prepared = await server.prepareTransaction(tx);
-      const signedXdr = await wallet.signTransaction(prepared.toXDR());
-      const signedTx = TransactionBuilder.fromXDR(signedXdr, networkConfig.networkPassphrase);
-      const result = await server.sendTransaction(signedTx as any);
-      
-      if (result.status !== "PENDING") {
-        throw new Error(`Transaction failed: ${result.status}`);
-      }
-      
-      let txStatus = await server.getTransaction(result.hash);
-      while (txStatus.status === "NOT_FOUND") {
-        await new Promise(r => setTimeout(r, 2000));
-        txStatus = await server.getTransaction(result.hash);
-      }
-      if (txStatus.status === "FAILED") {
-        throw new Error("Transaction failed on-chain");
-      }
+      await invokeContract({
+        contractId: networkConfig.identityRegistryId,
+        method: "update_did",
+        args: [
+          nativeToScVal(wallet.publicKey, { type: "address" }),
+          nativeToScVal(metadata, { type: "map" }),
+        ],
+      });
 
       // Wait for metadata to be indexed after transaction confirmation
       // Issue #665: Add small delay to ensure metadata is persisted on-chain
@@ -504,41 +504,14 @@ export default function IdentityPanel({ initialAddress }: { initialAddress?: str
       });
 
       const networkConfig = getNetworkConfig();
-      const server = new SorobanRpc.Server(typeof networkConfig.rpcUrl === 'string' ? networkConfig.rpcUrl : networkConfig.rpcUrl[0]);
-      const contract = new Contract(networkConfig.identityRegistryId);
-      const account = await server.getAccount(wallet.publicKey);
-
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: networkConfig.networkPassphrase,
-      })
-        .addOperation(
-          contract.call(
-            "update_did",
-            nativeToScVal(wallet.publicKey, { type: "address" }),
-            nativeToScVal(metadata, { type: "map" })
-          )
-        )
-        .setTimeout(30)
-        .build();
-
-      const prepared = await server.prepareTransaction(tx);
-      const signedXdr = await wallet.signTransaction(prepared.toXDR());
-      const signedTx = TransactionBuilder.fromXDR(signedXdr, networkConfig.networkPassphrase);
-      const result = await server.sendTransaction(signedTx as any);
-      
-      if (result.status !== "PENDING") {
-        throw new Error(`Transaction failed: ${result.status}`);
-      }
-      
-      let txStatus = await server.getTransaction(result.hash);
-      while (txStatus.status === "NOT_FOUND") {
-        await new Promise(r => setTimeout(r, 2000));
-        txStatus = await server.getTransaction(result.hash);
-      }
-      if (txStatus.status === "FAILED") {
-        throw new Error("Transaction failed on-chain");
-      }
+      await invokeContract({
+        contractId: networkConfig.identityRegistryId,
+        method: "update_did",
+        args: [
+          nativeToScVal(wallet.publicKey, { type: "address" }),
+          nativeToScVal(metadata, { type: "map" }),
+        ],
+      });
       
       const identityClient = new IdentityClient(networkConfig);
       const updatedDid = await identityClient.resolveDid(wallet.publicKey);
@@ -608,6 +581,7 @@ export default function IdentityPanel({ initialAddress }: { initialAddress?: str
         <input
           id="resolve-address"
           data-tour="resolve-did-input"
+          data-tour-resolve-did="resolve-did"
           placeholder="Stellar address (G…)"
           value={resolveAddress}
           onChange={(e) => setResolveAddress(e.target.value)}
@@ -712,7 +686,9 @@ export default function IdentityPanel({ initialAddress }: { initialAddress?: str
 
         {!resolving && resolvedAddress && (
           <>
-            <div style={{ 
+            <div
+              data-tour="did-document"
+              style={{ 
               display: 'flex', 
               alignItems: 'center', 
               gap: '0.5rem', 
@@ -794,6 +770,12 @@ export default function IdentityPanel({ initialAddress }: { initialAddress?: str
               style={{ marginLeft: '0.5rem' }}
             >
               Copy Verify Link
+              onClick={handleExportIdentityData}
+              disabled={!resolvedDoc || !resolvedAddress}
+              style={{ marginLeft: '0.5rem' }}
+              title="Download the full identity record, including reputation and credentials"
+            >
+              Export Identity Data
             </button>
             {!isEditingMetadata && resolvedDoc?.metadata && Object.keys(resolvedDoc.metadata).length > 0 && (
               <button
@@ -1013,6 +995,13 @@ export default function IdentityPanel({ initialAddress }: { initialAddress?: str
         )}
       </div>
 
+      <IdentityDirectory
+        wallet={wallet}
+        onSelectIdentity={(controller) => {
+          setResolveAddress(controller);
+          void handleResolve(controller);
+        }}
+      />
       <div className="card">
         <h2>Create DID</h2>
         {wallet.connected && wallet.publicKey ? (
@@ -1023,9 +1012,64 @@ export default function IdentityPanel({ initialAddress }: { initialAddress?: str
                 {wallet.publicKey.slice(0, 6)}…{wallet.publicKey.slice(-4)}
               </span>
             </p>
-            <button onClick={handleCreate} disabled={creating} data-tour="create-did-button">
-              {creating ? 'Creating…' : 'Create DID'}
-            </button>
+            {createStep === 3 && (
+              <div style={{ marginBottom: '1rem' }}>
+                <label htmlFor="create-did-input" style={{ display: 'block', fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>
+                  DID <span aria-hidden="true">*</span>
+                </label>
+                <input
+                  id="create-did-input"
+                  type="text"
+                  required
+                  aria-required="true"
+                  aria-invalid={createDidError ? true : undefined}
+                  aria-describedby={createDidError ? 'create-did-error' : undefined}
+                  placeholder="DID (required)"
+                  value={createDid}
+                  onChange={(e) => {
+                    setCreateDid(e.target.value);
+                    if (createDidError) setCreateDidError(validateCreateDid(e.target.value));
+                  }}
+                  onBlur={() => setCreateDidError(validateCreateDid(createDid))}
+                  style={{
+                    width: '100%',
+                    padding: '0.5rem',
+                    borderRadius: '0.25rem',
+                    border: `1px solid ${createDidError ? 'var(--danger-border)' : 'var(--border-light)'}`,
+                  }}
+                />
+                {createDidError && (
+                  <p
+                    id="create-did-error"
+                    role="alert"
+                    style={{ color: 'var(--danger-text)', fontSize: '0.75rem', margin: '0.25rem 0 0 0' }}
+                  >
+                    {createDidError}
+                  </p>
+                )}
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              {createStep > 1 && (
+                <button type="button" onClick={handleCreateBack} disabled={creating}>
+                  Back
+                </button>
+              )}
+              {createStep < 3 ? (
+                <button type="button" onClick={handleCreateNext}>
+                  Next
+                </button>
+              ) : (
+                <button
+                  onClick={handleCreate}
+                  disabled={creating}
+                  data-tour="create-did-button"
+                  data-tour-create-did="create-did"
+                >
+                  {creating ? 'Creating…' : 'Create DID'}
+                </button>
+              )}
+            </div>
             {creating && <SkeletonCard variant="identity" />}
           </>
         ) : (
@@ -1033,7 +1077,9 @@ export default function IdentityPanel({ initialAddress }: { initialAddress?: str
             Connect your Freighter wallet to create a new on-chain DID.
           </p>
         )}
-        {!creating && createResult && <pre className="result">{createResult}</pre>}
+        <div data-tour="did-status">
+          {!creating && createResult && <pre className="result">{createResult}</pre>}
+        </div>
       </div>
 
       <div className="card">
@@ -1153,6 +1199,18 @@ export default function IdentityPanel({ initialAddress }: { initialAddress?: str
             Connect your wallet to update your DID metadata.
           </p>
         )}
+      </div>
+
+      <div className="card">
+        <ProfilePictureUpload
+          address={resolvedAddress ?? wallet.publicKey ?? ''}
+          currentCid={resolvedDoc?.metadata?.avatar?.replace(/^ipfs:\/\//, '') ?? null}
+          onLinked={handleAvatarLinked}
+        />
+      </div>
+
+      <div className="card">
+        <RecoveryPhraseBackup />
       </div>
     </>
   );

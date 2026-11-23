@@ -59,9 +59,18 @@ libfuzzer_sys::fuzz_target!(|input: SubmitScoreInput| {
     // Submit the score 1-10 times (bounded to keep fuzz runs fast)
     let num_submissions = (input.num_submissions % 10).max(1) as usize;
     for _ in 0..num_submissions {
-        // submit_score must never panic regardless of delta
+        // submit_score must never panic regardless of delta; it must always
+        // return a Result (Ok or a contract error), never trap.
         let _ = client.try_submit_score(&reporter, &subject, &input.delta, &reason);
     }
+
+    // Explicitly exercise the i64 boundary deltas, including values that
+    // would overflow when accumulated. Each call must return a Result.
+    let _ = client.try_submit_score(&reporter, &subject, &i64::MIN, &reason);
+    let _ = client.try_submit_score(&reporter, &subject, &i64::MAX, &reason);
+    let _ = client.try_submit_score(&reporter, &subject, &0, &reason);
+    let _ = client.try_submit_score(&reporter, &subject, &1, &reason);
+    let _ = client.try_submit_score(&reporter, &subject, &-1, &reason);
 
     // After submissions, get_reputation should not panic
     let _ = client.try_get_reputation(&subject);

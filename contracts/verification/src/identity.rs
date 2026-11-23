@@ -25,6 +25,8 @@ pub struct Registry {
     pub dids: [Option<Did>; ADDRS],
     /// `DID_COUNT`: the number of *active* DIDs.
     pub did_count: u32,
+    /// Registered DID methods, in registration order.
+    pub did_methods: Vec<DidMethod>,
 }
 
 impl Registry {
@@ -36,6 +38,7 @@ impl Registry {
             paused: false,
             dids: [None; ADDRS],
             did_count: 0,
+            did_methods: Vec::new(),
         }
     }
 
@@ -199,6 +202,128 @@ impl Registry {
     pub fn has_active_did(&self, controller: Addr) -> bool {
         matches!(self.dids[controller as usize], Some(Did { active: true }))
     }
+
+    /// `register_did_method`: admin-gated registration of a supported DID
+    /// method (e.g. `"did:stellar"`). Re-registering is idempotent.
+    pub fn register_did_method(&mut self, signer: Addr, admin: Addr, method: DidMethod) -> CallResult {
+        atomically(self, |s| {
+            require_auth(signer, admin)?;
+            s.require_admin(admin)?;
+            s.require_not_paused()?;
+            if !method.is_well_formed() {
+                return Err(Abort::Error("InvalidDidMethod"));
+            }
+            if !s.did_methods.contains(&method) {
+                if s.did_methods.len() >= DID_METHODS {
+                    return Err(Abort::Error("TooManyDidMethods"));
+                }
+                s.did_methods.push(method);
+            }
+            Ok(())
+        })
+    }
+
+    /// `resolve_did_string`: universal resolver dispatch. Parses the DID
+    /// string, checks the method is registered, and returns the controller
+    /// address of the (active) DID document. Unsupported methods and
+    /// malformed DIDs yield typed errors; this never panics.
+    pub fn resolve_did_string(&self, did: &DidString) -> CallResult<Addr> {
+        let (method, controller) = parse_did(did)?;
+        if !self.did_methods.contains(&method) {
+            return Err(Abort::Error("UnsupportedDidMethod"));
+        }
+        match self.dids[controller as usize] {
+            Some(Did { active: true }) => Ok(controller),
+            Some(Did { active: false }) => Err(Abort::Error("DidDeactivated")),
+            None => Err(Abort::Error("DidNotFound")),
+        }
+    }
+}
+
+/// Maximum number of registered DID methods.
+pub const DID_METHODS: usize = 8;
+
+/// Maximum length of a DID method name, in bytes.
+pub const DID_METHOD_MAX_LEN: usize = 16;
+
+/// A DID method name, e.g. `"stellar"` in `did:stellar:<id>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(kani, derive(kani::Arbitrary))]
+pub struct DidMethod {
+    pub len: u8,
+    pub bytes: [u8; DID_METHOD_MAX_LEN],
+}
+
+impl DidMethod {
+    pub fn from_bytes(src: &[u8]) -> Self {
+        let mut bytes = [0u8; DID_METHOD_MAX_LEN];
+        let n = if src.len() > DID_METHOD_MAX_LEN { DID_METHOD_MAX_LEN } else { src.len() };
+        bytes[..n].copy_from_slice(&src[..n]);
+        DidMethod { len: n as u8, bytes }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        let n = if self.len as usize > DID_METHOD_MAX_LEN { DID_METHOD_MAX_LEN } else { self.len as usize };
+        &self.bytes[..n]
+    }
+
+    /// A method name is `1*(ALPHA / DIGIT)` per the DID core grammar.
+    pub fn is_well_formed(&self) -> bool {
+        let b = self.as_bytes();
+        !b.is_empty() && b.iter().all(|c| c.is_ascii_alphanumeric())
+    }
+}
+
+/// A DID string, e.g. `did:stellar:42`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(kani, derive(kani::Arbitrary))]
+pub struct DidString {
+    pub len: u8,
+    pub bytes: [u8; DID_STRING_MAX_LEN],
+}
+
+/// Maximum length of a DID string, in bytes.
+pub const DID_STRING_MAX_LEN: usize = 64;
+
+impl DidString {
+    pub fn from_bytes(src: &[u8]) -> Self {
+        let mut bytes = [0u8; DID_STRING_MAX_LEN];
+        let n = if src.len() > DID_STRING_MAX_LEN { DID_STRING_MAX_LEN } else { src.len() };
+        bytes[..n].copy_from_slice(&src[..n]);
+        DidString { len: n as u8, bytes }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        let n = if self.len as usize > DID_STRING_MAX_LEN { DID_STRING_MAX_LEN } else { self.len as usize };
+        &self.bytes[..n]
+    }
+}
+
+/// Parse `did:<method>:<id>` into the method and the controller address.
+/// Returns typed errors for malformed input; never panics.
+pub fn parse_did(did: &DidString) -> CallResult<(DidMethod, Addr)> {
+    let s = did.as_bytes();
+    if s.len() < 4 || &s[..4] != b"did:" {
+        return Err(Abort::Error("InvalidDid"));
+    }
+    let rest = &s[4..];
+    let colon = rest.iter().position(|&c| c == b':').ok_or(Abort::Error("InvalidDid"))?;
+    let method = DidMethod::from_bytes(&rest[..colon]);
+    if !method.is_well_formed() {
+        return Err(Abort::Error("InvalidDid"));
+    }
+    let id = &rest[colon + 1..];
+    if id.is_empty() || !id.iter().all(|c| c.is_ascii_digit()) {
+        return Err(Abort::Error("InvalidDid"));
+    }
+    let mut value: u32 = 0;
+    for &c in id {
+        value = value.saturating_mul(10).saturating_add((c - b'0') as u32);
+    }
+    if !valid_addr(value) {
+        return Err(Abort::Error("InvalidDid"));
+    }
+    Ok((method, value))
 }
 
 impl Default for Registry {
@@ -220,6 +345,7 @@ pub enum Op {
     CreateDid { controller: Addr },
     DeactivateDid { controller: Addr },
     ReactivateDid { admin: Addr, controller: Addr },
+    RegisterDidMethod { admin: Addr, method: DidMethod },
 }
 
 impl Op {
@@ -231,6 +357,7 @@ impl Op {
             Op::AcceptAdmin { new_admin } => valid_addr(new_admin),
             Op::CreateDid { controller } | Op::DeactivateDid { controller } => valid_addr(controller),
             Op::ReactivateDid { admin, controller } => valid_addr(admin) && valid_addr(controller),
+            Op::RegisterDidMethod { admin, .. } => valid_addr(admin),
         }
     }
 
@@ -245,6 +372,7 @@ impl Op {
             Op::CreateDid { controller } => r.create_did(signer, controller),
             Op::DeactivateDid { controller } => r.deactivate_did(signer, controller),
             Op::ReactivateDid { admin, controller } => r.reactivate_did(signer, admin, controller),
+            Op::RegisterDidMethod { admin, method } => r.register_did_method(signer, admin, method),
         }
     }
 }

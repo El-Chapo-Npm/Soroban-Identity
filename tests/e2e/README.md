@@ -12,6 +12,11 @@ Issue #820. Playwright drives the Vite app with a mocked Freighter wallet and a 
 - Serious and critical axe violations on the home screen
 - A full-page screenshot of the connected shell (`wallet-connected.png`), compared locally. CI attaches the same screenshot and records video instead of pixel-matching across operating systems.
 
+Issue #1080 adds two more specs:
+
+- `navigation.spec.ts`: keyboard navigation of the section tabs (arrows, Home, End, wrap-around, roving tabindex); the mainnet warning when switching networks; language and theme choices applied and kept across a reload; wallet disconnect; switching sections with a connected wallet.
+- `offline.spec.ts` (Chromium only): the app shell loads from the service worker cache while offline, including deep links; API responses come from the cache marked `x-sw-cache: offline`; an uncached API call returns the offline JSON 503. Playwright's offline emulation does not reliably cover service worker fetches in Firefox and WebKit, so those projects skip this file.
+
 ## Browsers
 
 `playwright.config.ts` runs Chromium, Firefox, and WebKit. CI installs all three and records a video for every test (`video: "on"`, artifacts under `tests/e2e/test-results/`).

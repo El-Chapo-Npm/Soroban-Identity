@@ -8,26 +8,10 @@ import { KeyboardShortcutsProvider } from "./context/KeyboardShortcutsContext";
 import "./i18n";
 import "./index.css";
 import "./styles/index.css";
+import { initializeTheme } from "./utils/themePreference";
 
 // Initialize theme before React renders to prevent flicker
-(function initializeTheme() {
-  const THEME_STORAGE_KEY = 'theme-preference';
-  const storedTheme = localStorage.getItem(THEME_STORAGE_KEY) as 'system' | 'light' | 'dark' | null;
-  const html = document.documentElement;
-  
-  // Remove any existing theme classes
-  html.classList.remove('light', 'dark');
-  
-  if (storedTheme === 'light') {
-    html.classList.add('light');
-  } else if (storedTheme === 'dark') {
-    html.classList.add('dark');
-  }
-  // If theme is 'system' or null, we don't add any class - CSS media query handles it
-  
-  // Set data attribute for immediate access
-  html.setAttribute('data-theme', storedTheme || 'system');
-})();
+initializeTheme();
 
 // Initialize the animation system before React renders so CSS can gate
 // animations and the transition wrapper is ready before the first paint.
@@ -73,8 +57,18 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
   </React.StrictMode>
 );
 
+// Dev-only runtime accessibility auditing (axe-core) and dev tools panel
+if (import.meta.env.DEV) {
+  void import("./a11y").then(({ startRuntimeA11y, A11yDevPanel }) => {
+    startRuntimeA11y();
+    const host = document.createElement("div");
+    host.id = "a11y-devtools";
+    document.body.appendChild(host);
+    ReactDOM.createRoot(host).render(<A11yDevPanel />);
+  });
+}
+
 // Register service worker for offline support and PWA caching
 import("./serviceWorker").then((sw) => {
   sw.register();
 });
-

@@ -4,6 +4,7 @@ export interface OpenGraphMeta {
   title: string;
   description: string;
   url?: string;
+  image?: string;
 }
 
 function setMeta(attr: 'property' | 'name', key: string, content: string): () => void {
@@ -39,13 +40,21 @@ export function useOpenGraphMeta(meta: OpenGraphMeta | null): void {
     const restore = [
       setMeta('property', 'og:title', meta.title),
       setMeta('property', 'og:description', meta.description),
+      setMeta('property', 'og:type', 'website'),
       setMeta('name', 'twitter:title', meta.title),
       setMeta('name', 'twitter:description', meta.description),
+      setMeta('name', 'twitter:card', meta.image ? 'summary_large_image' : 'summary'),
       ...(meta.url ? [setMeta('property', 'og:url', meta.url)] : []),
+      ...(meta.image
+        ? [
+            setMeta('property', 'og:image', meta.image),
+            setMeta('name', 'twitter:image', meta.image),
+          ]
+        : []),
     ];
     return () => {
       document.title = previousTitle;
       restore.forEach((fn) => fn());
     };
-  }, [meta?.title, meta?.description, meta?.url]);
+  }, [meta?.title, meta?.description, meta?.url, meta?.image]);
 }

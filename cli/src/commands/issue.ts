@@ -1,5 +1,11 @@
 import { Command } from 'commander';
-import { CredentialClient, hashSubjectClaims, type CredentialType } from '@soroban-identity/sdk';
+import {
+  CredentialClient,
+  hashSubjectClaims,
+  validateAgainstTemplate,
+  type CredentialType,
+  type SignedPayload,
+} from '@soroban-identity/sdk';
 import { toSdkConfig } from '../config';
 import { resolveKeypair, validateAddress } from '../keys';
 import { info, printResult, table } from '../output';
@@ -17,6 +23,9 @@ export function issueCommand(): Command {
     .option('--claims-file <path>', 'JSON file with claims')
     .option('-e, --expires <when>', 'expiry: 30d, ISO date, Unix seconds, or "never"')
     .option('--schema-id <id>', 'validate claims against a registered schema')
+    .option('--template <id>', 'issue against a registered credential template')
+    .option('--template-version <n>', 'template version to use (defaults to latest)')
+    .option('--threshold-signatures <path>', 'JSON file with a SignedPayload for threshold signatures')
     .option('-s, --secret-key <secret>', 'issuer secret key (or SOROBAN_SECRET_KEY)')
     .option('-y, --yes', 'skip the confirmation prompt')
     .action(async (subjectArg: string | undefined, opts, cmd: Command) => {
@@ -62,6 +71,22 @@ export function issueCommand(): Command {
       });
       const expiresAt = parseExpiry(expiresRaw);
 
+      if (opts.template) {
+        const templateVersion = opts.templateVersion !== undefined ? Number(opts.templateVersion) : undefined;
+        if (templateVersion !== undefined && (!Number.isInteger(templateVersion) || templateVersion < 0)) {
+          throw new Error('--template-version must be a non-negative integer.');
+        }
+        const validation = await validateAgainstTemplate(client, opts.template, templateVersion, claims);
+        if (!validation.valid) {
+          throw new Error(`Claims do not satisfy template ${opts.template}: ${validation.errors.join('; ')}`);
+        }
+      }
+
+      let signedPayload: SignedPayload | undefined;
+      if (opts.thresholdSignatures) {
+        signedPayload = readJsonObject(opts.thresholdSignatures) as unknown as SignedPayload;
+      }
+
       const keypair = await resolveKeypair(opts.secretKey);
       const claimsHash = hashSubjectClaims(claims);
 
@@ -78,7 +103,12 @@ export function issueCommand(): Command {
         claims,
         claimsHash,
         expiresAt,
-        opts.schemaId ? { schemaId: opts.schemaId } : undefined
+        {
+          ...(opts.schemaId ? { schemaId: opts.schemaId } : {}),
+          ...(opts.template ? { templateId: opts.template } : {}),
+          ...(opts.templateVersion !== undefined ? { templateVersion: Number(opts.templateVersion) } : {}),
+          ...(signedPayload ? { signedPayload } : {}),
+        }
       );
       const result = {
         credentialId: data.credentialId,
@@ -98,6 +128,8 @@ export function issueCommand(): Command {
           ['Type', type],
           ['Expires', expiresAt === 0 ? 'never' : new Date(expiresAt * 1000).toISOString()],
           ['Claims hash', claimsHash],
+          ...(opts.template ? [['Template', opts.template] as [string, string]] : []),
+          ...(signedPayload ? [['Threshold signatures', 'provided'] as [string, string]] : []),
           ['Tx hash', txHash],
         ])
       );

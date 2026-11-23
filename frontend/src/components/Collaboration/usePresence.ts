@@ -150,21 +150,36 @@ export function usePresence({
       ) {
         return;
       }
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        return;
+      }
       reconnectAttemptsRef.current += 1;
-      const delay = Math.min(
+      const baseDelay = Math.min(
         MAX_RECONNECT_DELAY_MS,
         reconnectDelayMs * 2 ** (reconnectAttemptsRef.current - 1),
       );
+      const jitter = Math.floor(Math.random() * Math.min(500, baseDelay * 0.2));
       reconnectRef.current = setTimeout(() => {
         reconnectRef.current = null;
         connect();
-      }, delay);
+      }, baseDelay + jitter);
     };
 
     const connect = () => {
       if (closedRef.current || offlineRef.current || socketRef.current) return;
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        setConnected(false);
+        return;
+      }
       clearReconnectTimer();
-      const socket = new WebSocket(url);
+
+      let socket: WebSocket;
+      try {
+        socket = new WebSocket(url);
+      } catch {
+        scheduleReconnect();
+        return;
+      }
       socketRef.current = socket;
 
       socket.onopen = () => {
@@ -213,7 +228,9 @@ export function usePresence({
       socket.onclose = () => {
         socketRef.current = null;
         setConnected(false);
-        scheduleReconnect();
+        if (!closedRef.current) {
+          scheduleReconnect();
+        }
       };
 
       socket.onerror = () => {
@@ -257,9 +274,13 @@ export function usePresence({
       }
       const socket = socketRef.current;
       if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(
-          JSON.stringify({ type: 'presence:leave', userId: currentUserRef.current.id }),
-        );
+        try {
+          socket.send(
+            JSON.stringify({ type: 'presence:leave', userId: currentUserRef.current.id }),
+          );
+        } catch {
+          // Ignore send errors on teardown
+        }
       }
       teardownSocket();
     };

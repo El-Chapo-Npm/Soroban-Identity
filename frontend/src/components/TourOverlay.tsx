@@ -6,16 +6,13 @@ import React, {
   useState,
 } from 'react';
 
-export type TourPath = 'issuer' | 'holder';
+import {
+  TOUR_PATHS,
+  type TourPath,
+  type TourStep,
+} from '../tour/steps';
 
-export interface TourStep {
-  /** Value of the target element's data-tour attribute. */
-  target: string;
-  title: string;
-  description: string;
-  /** Optional placement hint for the tooltip relative to the target. */
-  placement?: 'top' | 'bottom' | 'left' | 'right';
-}
+export type { TourPath, TourStep };
 
 export interface TourOverlayProps {
   /** Which tour path to run. */
@@ -24,62 +21,14 @@ export interface TourOverlayProps {
   open: boolean;
   /** Called when the tour finishes, is skipped, or is dismissed. */
   onClose?: (reason: 'completed' | 'skipped') => void;
-  /** Optional custom step configs; defaults to built-in issuer/holder paths. */
+  /** Optional custom step configs; defaults to shared issuer/holder paths. */
   steps?: Record<TourPath, TourStep[]>;
-  /** localStorage key prefix for progress persistence. */
-  storageKeyPrefix?: string;
 }
 
-const DEFAULT_STEPS: Record<TourPath, TourStep[]> = {
-  issuer: [
-    {
-      target: 'create-did',
-      title: 'Create your DID',
-      description:
-        'Start by creating a decentralized identifier (DID). This is your on-chain identity used to issue credentials.',
-      placement: 'bottom',
-    },
-    {
-      target: 'issue-credential',
-      title: 'Issue a credential',
-      description:
-        'Once your DID is ready, issue verifiable credentials to holders directly from this dashboard.',
-      placement: 'bottom',
-    },
-    {
-      target: 'credentials-list',
-      title: 'Manage credentials',
-      description:
-        'Track, revoke, and review all credentials you have issued from this list.',
-      placement: 'top',
-    },
-  ],
-  holder: [
-    {
-      target: 'create-did',
-      title: 'Create your DID',
-      description:
-        'Set up your decentralized identifier (DID) to receive and hold verifiable credentials.',
-      placement: 'bottom',
-    },
-    {
-      target: 'receive-credential',
-      title: 'Receive a credential',
-      description:
-        'Accept credentials shared with you by issuers. They will appear in your wallet.',
-      placement: 'bottom',
-    },
-    {
-      target: 'credentials-list',
-      title: 'Your credentials',
-      description:
-        'View and share the credentials stored in your wallet from this list.',
-      placement: 'top',
-    },
-  ],
+const DEFAULT_TOUR_STEPS: Record<TourPath, TourStep[]> = {
+  issuer: TOUR_PATHS.issuer.steps,
+  holder: TOUR_PATHS.holder.steps,
 };
-
-const DEFAULT_STORAGE_PREFIX = 'tour-progress';
 
 interface Rect {
   top: number;
@@ -90,8 +39,8 @@ interface Rect {
 
 const PADDING = 8;
 
-function getTargetRect(target: string): Rect | null {
-  if (typeof document === 'undefined') return null;
+function getTargetRect(target: string | undefined): Rect | null {
+  if (!target || typeof document === 'undefined') return null;
   const el = document.querySelector<HTMLElement>(`[data-tour="${target}"]`);
   if (!el) return null;
   const r = el.getBoundingClientRect();
@@ -152,10 +101,9 @@ export const TourOverlay: React.FC<TourOverlayProps> = ({
   open,
   onClose,
   steps,
-  storageKeyPrefix = DEFAULT_STORAGE_PREFIX,
 }) => {
   const stepConfig = useMemo(
-    () => (steps ?? DEFAULT_STEPS)[path] ?? [],
+    () => (steps ?? DEFAULT_TOUR_STEPS)[path] ?? [],
     [steps, path],
   );
 
@@ -163,41 +111,6 @@ export const TourOverlay: React.FC<TourOverlayProps> = ({
   const [rect, setRect] = useState<Rect | null>(null);
   const tooltipRef = useRef<HTMLDivElement | null>(null);
   const previouslyFocused = useRef<HTMLElement | null>(null);
-
-  const storageKey = `${storageKeyPrefix}:${path}`;
-
-  const persistProgress = useCallback(
-    (completed: boolean, stepIndex: number) => {
-      try {
-        const payload = {
-          completed,
-          stepIndex,
-          updatedAt: new Date().toISOString(),
-        };
-        window.localStorage.setItem(storageKey, JSON.stringify(payload));
-      } catch {
-        // Ignore storage failures (private mode, quota, etc.)
-      }
-    },
-    [storageKey],
-  );
-
-  const readProgress = useCallback((): { completed: boolean; stepIndex: number } | null => {
-    try {
-      const raw = window.localStorage.getItem(storageKey);
-      if (!raw) return null;
-      const parsed = JSON.parse(raw);
-      if (typeof parsed?.completed === 'boolean') {
-        return {
-          completed: parsed.completed,
-          stepIndex: typeof parsed.stepIndex === 'number' ? parsed.stepIndex : 0,
-        };
-      }
-      return null;
-    } catch {
-      return null;
-    }
-  }, [storageKey]);
 
   // Reset to first step whenever the tour is (re)opened.
   useEffect(() => {
@@ -253,10 +166,9 @@ export const TourOverlay: React.FC<TourOverlayProps> = ({
 
   const finish = useCallback(
     (reason: 'completed' | 'skipped') => {
-      persistProgress(reason === 'completed', index);
       onClose?.(reason);
     },
-    [index, onClose, persistProgress],
+    [onClose],
   );
 
   const handleNext = useCallback(() => {
@@ -266,40 +178,40 @@ export const TourOverlay: React.FC<TourOverlayProps> = ({
     }
     const next = index + 1;
     setIndex(next);
-    persistProgress(false, next);
-  }, [index, stepConfig.length, finish, persistProgress]);
+  }, [index, stepConfig.length, finish]);
+
+  const handleRestart = useCallback(() => {
+    setIndex(0);
+  }, []);
 
   const handleBack = useCallback(() => {
     if (index <= 0) return;
     const prev = index - 1;
     setIndex(prev);
-    persistProgress(false, prev);
-  }, [index, persistProgress]);
+  }, [index]);
 
   const handleSkip = useCallback(() => {
     finish('skipped');
   }, [finish]);
 
-  // Escape to skip.
+  // Keyboard handling: Escape skips, arrows navigate.
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
         handleSkip();
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        handleNext();
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        handleBack();
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [open, handleSkip]);
-
-  // Persist the starting step when the tour opens.
-  useEffect(() => {
-    if (open) {
-      persistProgress(false, 0);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, path]);
+  }, [open, handleSkip, handleNext, handleBack]);
 
   if (!open || stepConfig.length === 0) {
     return null;
@@ -309,6 +221,7 @@ export const TourOverlay: React.FC<TourOverlayProps> = ({
   const isFirst = index === 0;
   const isLast = index === stepConfig.length - 1;
   const progressLabel = `Step ${index + 1} of ${stepConfig.length}`;
+  const hasTarget = Boolean(step.target) && rect !== null;
 
   return (
     <div
@@ -323,7 +236,7 @@ export const TourOverlay: React.FC<TourOverlayProps> = ({
         className="tour-overlay__backdrop"
         aria-hidden="true"
         style={
-          rect
+          hasTarget && rect
             ? {
                 position: 'fixed',
                 inset: 0,
@@ -351,7 +264,7 @@ export const TourOverlay: React.FC<TourOverlayProps> = ({
       />
 
       {/* Highlight ring around the target (non-interactive). */}
-      {rect && (
+      {hasTarget && rect && (
         <div
           className="tour-overlay__highlight"
           aria-hidden="true"
@@ -386,7 +299,7 @@ export const TourOverlay: React.FC<TourOverlayProps> = ({
           padding: '16px 18px',
           boxShadow: '0 10px 30px rgba(0, 0, 0, 0.25)',
           outline: 'none',
-          ...computeTooltipPosition(rect, step.placement),
+          ...computeTooltipPosition(hasTarget ? rect : null, step.placement),
         }}
       >
         <div
@@ -435,6 +348,22 @@ export const TourOverlay: React.FC<TourOverlayProps> = ({
             }}
           >
             Skip tour
+          </button>
+
+          <button
+            type="button"
+            onClick={handleRestart}
+            className="tour-overlay__restart"
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: '#6b7280',
+              cursor: 'pointer',
+              fontSize: 13,
+              padding: '6px 4px',
+            }}
+          >
+            Restart
           </button>
 
           <button
@@ -515,29 +444,5 @@ export const TourOverlay: React.FC<TourOverlayProps> = ({
     </div>
   );
 };
-
-/**
- * Restart entry point. Clears stored progress for the given path and
- * returns a handler that reopens the tour.
- */
-export function useTourRestart(
-  path: TourPath,
-  storageKeyPrefix: string = DEFAULT_STORAGE_PREFIX,
-) {
-  const [open, setOpen] = useState(false);
-
-  const restart = useCallback(() => {
-    try {
-      window.localStorage.removeItem(`${storageKeyPrefix}:${path}`);
-    } catch {
-      // Ignore storage failures.
-    }
-    setOpen(true);
-  }, [path, storageKeyPrefix]);
-
-  const close = useCallback(() => setOpen(false), []);
-
-  return { open, restart, close };
-}
 
 export default TourOverlay;

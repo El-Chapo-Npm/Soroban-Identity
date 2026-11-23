@@ -23,6 +23,8 @@ The server configuration can be customized using the following environment varia
 | `PORT` | HTTP port the server listens on. | `3001` |
 | `LOG_LEVEL` | Logging verbosity (trace, debug, info, warn, error, fatal). All logs are structured JSON. | `info` |
 | `ADMIN_API_KEY` | Key for authenticating request calls on `/admin/*` endpoints. Supports scoped access (see API Key Scopes below). | unset |
+| `ADMIN_IP_ALLOWLIST` | Comma-separated IPv4/IPv6 addresses or CIDR ranges permitted to reach admin endpoints. | unset |
+| `ADMIN_IP_ALLOWLIST_REQUIRED` | Fail closed when the allowlist is empty. Defaults to `true` in production and `false` elsewhere. | environment-dependent |
 | `DATA_DIR` | Directory path for local file storage. | `./data` |
 | `AUDIT_LOG_PATH` | Base file path prefix used for daily rotated audit logs. | `[DATA_DIR]/audit` |
 | `AUDIT_LOG_RETENTION_DAYS` | Number of days to retain rotated audit logs. | `30` |
@@ -37,6 +39,106 @@ The server configuration can be customized using the following environment varia
 | `RATE_LIMIT_PREMIUM_TIERS` | Tiers that bypass all rate limits. | `premium,enterprise` |
 | `RATE_LIMIT_PREMIUM_KEYS` | Comma-separated API key ids that bypass all rate limits. | unset |
 | `TRUST_PROXY` | Trust `X-Forwarded-For` when resolving the client IP. | `false` |
+| `JWT_SECRET` / `JWT_PUBLIC_KEY` | Secret or public key used to verify signed bearer JWTs. | unset |
+| `JWT_ALGORITHMS` | Allowed JWT algorithms (`HS256`, `RS256`, `ES256`, or `EdDSA`). | `HS256` |
+| `JWT_ISSUER` / `JWT_AUDIENCE` | Optional issuer and audience checks for JWTs. | unset |
+| `WEB3_STORAGE_TOKEN` | Token used to pin DID JSON documents to web3.storage. | unset |
+
+Admin requests are checked against `ADMIN_IP_ALLOWLIST` before API key or OAuth
+authentication. For example, `ADMIN_IP_ALLOWLIST=203.0.113.8,198.51.100.0/24,2001:db8::/32`
+allows one IPv4 address, an IPv4 subnet and an IPv6 subnet. In production, an
+empty list returns `503` and disables admin access until a range is configured.
+When `TRUST_PROXY=true`, the first `X-Forwarded-For` address is used; only enable
+this when direct access to the server is restricted to the trusted proxy.
+
+## W3C DID resolver
+
+`GET /did/:did` resolves a `did:stellar:G...` identifier (or a bare Stellar account id) to a
+DID Core document. The response is `application/did+ld+json` by default; send
+`Accept: application/did+json` for the plain-JSON representation.
+
+The document contains an `Ed25519VerificationKey2020` `verificationMethod` derived from the
+account key (`publicKeyMultibase`), `authentication`/`assertionMethod`/`capabilityInvocation`
+references to it, and any stored `service` endpoints. Only `https` endpoints without embedded
+credentials are emitted.
+
+| Status | Meaning |
+|---|---|
+| 200 | Document returned |
+| 400 `invalidDid` | Identifier is not a valid Stellar DID |
+| 404 `notFound` | No such DID |
+| 406 `representationNotSupported` | `Accept` allows no DID representation |
+| 410 | DID is deactivated; a minimal document is returned |
+| 501 `methodNotSupported` | Non-`stellar` DID method |
+
+## Indexer event replay
+
+With `INDEXER_ENABLED=true`, the server checks `contract_events` at startup. If it is empty,
+it replays historical events for `INDEXER_CONTRACT_IDS` from `INDEXER_REPLAY_START_LEDGER`
+(default `0`) through Soroban RPC to rebuild state. Replay runs in the background, writes each
+page and its cursor in one transaction (so an interrupted replay resumes), and is idempotent.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `INDEXER_REPLAY_ON_EMPTY` | `true` | Set `false` to disable replay |
+| `INDEXER_REPLAY_START_LEDGER` | `0` | First ledger to replay |
+| `INDEXER_REPLAY_PAGE_SIZE` | `200` | Events per RPC request |
+
+Soroban RPC only retains a limited window of ledgers. If the start ledger is older than that
+window, replay begins at the oldest ledger the node still serves and logs a warning. Full
+history beyond that window needs an archive source.
+
+## Connected Accounts
+
+GitHub and verified-email linking are optional and require wallet-bound account sessions. See [CONNECTED_ACCOUNTS.md](CONNECTED_ACCOUNTS.md) for provider setup, required environment variables, API routes, and storage/security constraints.
+
+## Credential payload encryption
+
+Set `PAYLOAD_ENCRYPTION_ENABLED=true` to require application-layer encryption
+for credential routes. This is an additional layer; it does not replace HTTPS.
+Terminate TLS only at a trusted proxy and use TLS between that proxy and this
+server as well.
+
+The client generates an ephemeral X25519 key pair and sends its SPKI public key
+to `POST /encryption/sessions` as `{"clientPublicKey":"<base64-DER>"}` with its
+normal API authentication. The response contains a random `sessionId`, an
+independent server X25519 public key, a random salt, `keyId`, generation,
+algorithm (`A256GCM`) and expiry. Client and server compute the X25519 shared
+secret and derive the same 256-bit AES key using HKDF-SHA-256 with the returned
+salt and the context `soroban-identity/payload-encryption/v1\n<sessionId>\n<keyId>`.
+Session IDs are bound to the authenticating API key or OAuth client and expire
+after `PAYLOAD_ENCRYPTION_SESSION_TTL_SECONDS`.
+
+Supply `X-Encryption-Session: <sessionId>` on credential reads and writes.
+JSON mutation bodies use this envelope shape:
+
+```json
+{
+  "algorithm": "A256GCM",
+  "keyId": "key-1-...",
+  "iv": "<base64 12-byte nonce>",
+  "ciphertext": "<base64 encrypted JSON bytes>",
+  "tag": "<base64 16-byte GCM tag>"
+}
+```
+
+The request AAD is UTF-8 `request\n<METHOD>\n<exact request target>\n<sessionId>\n<keyId>`.
+Responses keep the normal JSON shape but replace configured sensitive fields
+with objects containing `algorithm`, `keyId`, `iv`, `ciphertext`, and `tag`.
+For each field, its AAD is UTF-8
+`response\n<METHOD>\n<exact request target>\n<status>\n<sessionId>\n<keyId>\n<JSON pointer>`.
+Fields are selected case-insensitively by `PAYLOAD_ENCRYPTION_SENSITIVE_FIELDS`
+(default: `credentialSubject,claims,subject`). Encrypted responses set
+`Cache-Control: no-store`. Rotating requires authenticated
+`POST /encryption/sessions/:sessionId/rotate` with a new client public key;
+the prior key remains valid for inbound requests for the configured grace
+period (`PAYLOAD_ENCRYPTION_ROTATION_GRACE_SECONDS`). Close a session with
+authenticated `DELETE /encryption/sessions/:sessionId`.
+
+Keep the client private key and derived AES key in memory only. Never log
+plaintext bodies or keys. HMAC request signing, when enabled, signs the exact
+encrypted envelope bytes. This protocol is opt-in because it changes credential
+routes to require a session and encrypted request envelopes.
 
 ## Container image and health checks
 
@@ -46,6 +148,20 @@ Build the image from the repository root with `docker build -f server/Dockerfile
 
 Two budgets apply to every non-exempt request, and both must be satisfied.
 `/info`, `/health`, and `/metrics` are exempt.
+
+Public requests are limited to 100 requests per minute per IP. A verified JWT
+whose `sub` is a Stellar public key is treated as an issuer and receives a
+separate 1000 requests per minute per-issuer budget. The IP budget still
+applies to authenticated traffic to prevent shared-address abuse.
+
+### Indexed events and DID metadata
+
+Run Flyway with `server/flyway.conf` and `DATABASE_URL` to apply the versioned
+schema in `server/migrations`. The first migration creates `identities`,
+`attestations`, and `events` with JSONB payloads and indexes for ledger and
+issuer queries. When `WEB3_STORAGE_TOKEN` is configured, DID writes pin the DID
+JSON and add the returned `cid`/`ipfs_cid` to the identity contract metadata.
+The contract keeps that CID immutable on later metadata updates.
 
 ### Per-endpoint limits
 

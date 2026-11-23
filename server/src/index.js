@@ -17,16 +17,18 @@ import { initFeatureFlags, getFlag } from './feature-flags.js';
 import { QueryResultCache } from './query-cache.js';
 import { DdosProtection } from './ddos-protection.js';
 import { createBatchVerificationQueue, createCredentialIssueQueue } from './job-queue.js';
+import { HorizonIndexer } from './indexer.js';
+import { createRpcEventFetcher, replayIfEmpty } from './indexer-replay.js';
 
 // Load secrets before validation so existing config consumers see the same
 // values as environment-backed deployments. Vault is opt-in and fails closed
 // when explicitly configured rather than silently falling back to plaintext.
-const vaultManager = new VaultLeaseManager();
-if (vaultManager.enabled) {
+const secretsManager = new VaultLeaseManager();
+if (secretsManager.enabled) {
   try {
-    await vaultManager.refresh();
+    await secretsManager.refresh();
   } catch (error) {
-    logger.error({ error: error.message }, 'Vault initialization failed');
+    logger.error({ error: error.message }, 'Secret vault initialization failed');
     process.exit(1);
   }
 }
@@ -51,8 +53,8 @@ if (!validationResult.isValid) {
 logDefaultValues();
 
 const config = loadConfig();
-if (vaultManager.enabled) {
-  vaultManager.onSecrets = async () => {
+if (secretsManager.enabled) {
+  secretsManager.onSecrets = async () => {
     Object.assign(config, loadConfig());
     logger.info('Vault secrets applied to live configuration');
   };
@@ -106,6 +108,18 @@ const expiryJob = new ExpiryNotificationJob(config, soroban);
 if (process.env.DISABLE_EXPIRY_JOB !== 'true') expiryJob.start();
 const apiKeyService = new ApiKeyService(config);
 
+// Horizon event indexer (#1272). Opt-in via INDEXER_ENABLED; a failure to
+// start must not prevent the API server from serving traffic.
+let horizonIndexer = null;
+if (config.indexerEnabled) {
+  try {
+    horizonIndexer = new HorizonIndexer(config, { pool: config.dbPool ?? null });
+  } catch (error) {
+    logger.error({ error: error.message }, 'Failed to initialize Horizon indexer');
+    horizonIndexer = null;
+  }
+}
+
 // Initialize job queues for async processing (#716)
 let credentialIssueQueue = null;
 let batchVerificationQueue = null;
@@ -158,10 +172,30 @@ if (config.accessLogEnabled && config.accessLogPath) {
   });
 }
 
+// Identity and attestation REST endpoints (#1273-#1276). The router is built
+// with the same shared services as the rest of the app so authentication,
+// rate limiting, access logging, metrics and error handling behave uniformly.
+const identityRouter = createIdentityRouter({
+  config,
+  soroban,
+  metrics,
+  didCache,
+  apiKeyService,
+  webhookService,
+  realtime,
+});
+
+let dbPool = null;
+if (config.databaseUrl) {
+  const { default: pg } = await import('pg');
+  dbPool = new pg.Pool({ connectionString: config.databaseUrl, max: config.dbPoolMaxSize ?? 10 });
+}
+
 const server = http.createServer(
   createApp({
     config,
     soroban,
+    dbClient: dbPool,
     metrics,
     metricsAggregator,
     didCache,
@@ -172,6 +206,7 @@ const server = http.createServer(
     accessLogSink,
     realtime,
     ddosProtection,
+    identityRouter,
   }),
 );
 
@@ -197,6 +232,35 @@ server.on('connection', (socket) => {
 
 server.listen(config.port, () => {
   logger.info({ port: config.port }, `Soroban Identity server listening on :${config.port}`);
+
+  if (horizonIndexer) {
+    try {
+      horizonIndexer.start();
+      logger.info('Horizon event indexer started');
+    } catch (error) {
+      logger.error({ error: error.message }, 'Failed to start Horizon event indexer');
+    }
+  }
+
+  // #1360: rebuild indexer state from historical events when the store is
+  // empty. Runs in the background so a slow or failing replay never blocks
+  // the API; failures are logged and retried on the next startup.
+  if (config.indexerEnabled && config.indexerReplayOnEmpty && dbPool) {
+    replayIfEmpty({
+      db: dbPool,
+      contractIds: config.indexerContractIds,
+      startLedger: config.indexerReplayStartLedger,
+      pageSize: config.indexerReplayPageSize,
+      fetchEvents: createRpcEventFetcher({ rpcUrl: config.rpcUrl }),
+      shouldStop: () => shuttingDown,
+      logger: {
+        info: (msg) => logger.info(msg),
+        warn: (msg) => logger.warn(msg),
+      },
+    }).catch((error) => {
+      logger.error({ error: error.message }, 'Indexer event replay failed');
+    });
+  }
 });
 
 let shuttingDown = false;
@@ -224,8 +288,18 @@ function shutdown(signal) {
         expiryJob.stop();
       }
 
+      // Stop Horizon event indexer
+      if (horizonIndexer) {
+        logger.info('Stopping Horizon event indexer');
+        try {
+          await horizonIndexer.stop();
+        } catch (error) {
+          logger.error({ error: error.message }, 'Error stopping Horizon event indexer');
+        }
+      }
+
       // Stop vault manager
-      vaultManager.stop();
+      secretsManager.stop();
 
       // Close WebSocket hub
       if (realtime) {
@@ -239,6 +313,11 @@ function shutdown(signal) {
 
       logger.info('Draining Soroban client');
       await soroban.drain();
+
+      if (dbPool) {
+        logger.info('Closing database pool');
+        await dbPool.end();
+      }
 
       // Close access log sink
       if (accessLogSink) {

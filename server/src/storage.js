@@ -4,6 +4,8 @@ import crypto from 'node:crypto';
 import { requestContextStore } from './request-context.js';
 import { logger } from './logger.js';
 import { EventStore, createEvent, EventTypes } from './events/index.js';
+import { getCachedDidDocument } from './did-cache.js';
+import { getCachedQuery, setCachedQuery } from './query-cache.js';
 
 let _eventStoreInstance = null;
 function getEventStore(config) {
@@ -728,6 +730,228 @@ export async function recordCredentialVerification(config, id, details = {}) {
 
 
 
+// ── Indexed query helpers for identity / attestation REST routes (#1273, #1276) ──
+/**
+ * Resolve a DID document from the indexed DID cache.
+ *
+ * @param {string} did
+ * @returns {Promise<object|null>} The resolved DID document, or null if unknown
+ */
+export async function getResolvedDidDocument(did) {
+  if (!did || typeof did !== 'string') return null;
+  try {
+    const doc = await getCachedDidDocument(did);
+    return doc ?? null;
+  } catch (error) {
+    logger.warn({ error: error.message, did }, 'Failed to resolve DID document from cache');
+    return null;
+  }
+}
+
+// ── DID document version history (#1288) ─────────────────────────────────────
+// Each DID's revision history is stored as an append-only NDJSON file under
+// <dataDir>/did-history/<sha256(did)>.ndjson. One JSON object per line:
+//   { version, timestamp, document }
+// Writes go through the same per-file mutex used by the credential store so
+// concurrent updates to the same DID cannot interleave partial lines.
+
+/** In-memory cache of parsed DID histories, keyed by resolved history path. */
+const _didHistoryCache = new Map();
+
+/**
+ * Resolve the on-disk history file path for a DID.
+ *
+ * @param {object} config
+ * @param {string} did
+ * @returns {string}
+ */
+export function getDidHistoryPath(config, did) {
+  const dir = path.join(config?.dataDir || './data', 'did-history');
+  const hash = crypto.createHash('sha256').update(String(did)).digest('hex');
+  return path.join(dir, `${hash}.ndjson`);
+}
+
+/**
+ * Drop cached DID history. When `config`/`did` are omitted the entire cache is
+ * cleared (used by tests that want a full reset).
+ *
+ * @param {object} [config]
+ * @param {string} [did]
+ */
+export function clearDidHistoryCache(config, did) {
+  if (config && did) {
+    _didHistoryCache.delete(getDidHistoryPath(config, did));
+  } else {
+    _didHistoryCache.clear();
+  }
+}
+
+/**
+ * List the current (non-revoked) attestations issued to or by a DID.
+ *
+ * @param {string} did
+ * @returns {Promise<object[]>} Attestation records; empty array when none
+ */
+export async function listAttestationsForDid(did) {
+  if (!did || typeof did !== 'string') return [];
+  const cacheKey = `attestations:did:${did}`;
+  const cached = getCachedQuery(cacheKey);
+  if (cached !== undefined && cached !== null) return cached;
+
+  const attestations = await _readAttestations();
+  const result = attestations.filter(
+    (a) => (a.subject === did || a.issuer === did) && a.status !== 'revoked',
+  );
+  setCachedQuery(cacheKey, result);
+  return result;
+}
+
+/**
+ * Look up a single attestation record by id.
+ *
+ * @param {string} id
+ * @returns {Promise<object|null>} The attestation record (including issuer and
+ *   status), or null if unknown
+ */
+export async function getAttestationById(id) {
+  if (!id || typeof id !== 'string') return null;
+  const cacheKey = `attestation:id:${id}`;
+  const cached = getCachedQuery(cacheKey);
+  if (cached !== undefined && cached !== null) return cached;
+
+  const attestations = await _readAttestations();
+  const record = attestations.find((a) => a.id === id) ?? null;
+  if (record) setCachedQuery(cacheKey, record);
+  return record;
+}
+
+/**
+ * Read the raw attestation index. Returns an empty array when the store has
+ * not been created yet.
+ *
+ * @returns {Promise<object[]>}
+ */
+async function _readAttestations() {
+  const storePath = path.resolve(
+    process.env.ATTESTATION_STORE_PATH ?? path.join(process.env.DATA_DIR ?? './data', 'attestations.json'),
+  );
+  try {
+    const raw = await fs.readFile(storePath, 'utf8');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed.attestations) ? parsed.attestations : [];
+  } catch (error) {
+    if (error.code === 'ENOENT') return [];
+    logger.warn({ error: error.message, storePath }, 'Failed to read attestation index');
+    return [];
+  }
+}
+
+/**
+ * Parse an NDJSON history file into an ordered array of versions.
+ * Malformed lines are skipped rather than failing the whole read.
+ *
+ * @param {string} raw
+ * @returns {Array<{version: number, timestamp: string, document: object}>}
+ */
+function _parseDidHistory(raw) {
+  const versions = [];
+  for (const line of raw.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed && typeof parsed === 'object') versions.push(parsed);
+    } catch {
+      // Skip corrupt lines — history remains best-effort readable.
+    }
+  }
+  versions.sort((a, b) => (a.version ?? 0) - (b.version ?? 0));
+  return versions;
+}
+
+/**
+ * Read all stored versions for a DID (uncached helper).
+ *
+ * @param {object} config
+ * @param {string} did
+ * @returns {Promise<Array<object>>}
+ */
+async function _readDidHistoryFile(config, did) {
+  const filePath = getDidHistoryPath(config, did);
+  try {
+    const raw = await fs.readFile(filePath, 'utf8');
+    return _parseDidHistory(raw);
+  } catch (error) {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  }
+}
+
+/**
+ * Append a new revision of a DID document to its history.
+ * The version number is derived from the existing history (last + 1) unless an
+ * explicit `version` is supplied in `options`.
+ *
+ * @param {object} config
+ * @param {string} did
+ * @param {object} document - The DID document payload for this revision
+ * @param {object} [options]
+ * @param {number} [options.version] - Explicit version number
+ * @param {string} [options.timestamp] - Explicit ISO timestamp
+ * @returns {Promise<{version: number, timestamp: string, document: object}>}
+ */
+export async function appendDidVersion(config, did, document, options = {}) {
+  if (!did) throw new Error('appendDidVersion requires a DID');
+  const filePath = getDidHistoryPath(config, did);
+  const release = await _acquireFileLock(filePath);
+  try {
+    const existing = await _readDidHistoryFile(config, did);
+    const lastVersion = existing.length > 0 ? Number(existing[existing.length - 1].version) || 0 : 0;
+    const version = Number.isFinite(Number(options.version)) ? Number(options.version) : lastVersion + 1;
+    const timestamp = options.timestamp || new Date().toISOString();
+    const entry = { version, timestamp, document: document ?? null };
+
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.appendFile(filePath, `${JSON.stringify(entry)}\n`, 'utf8');
+    _didHistoryCache.delete(filePath);
+    return entry;
+  } finally {
+    release();
+  }
+}
+
+/**
+ * Read the ordered version history for a DID with cursor-based pagination.
+ * Versions are returned oldest-first. The cursor is the version number to
+ * resume after (exclusive).
+ *
+ * @param {object} config
+ * @param {string} did
+ * @param {object} [opts]
+ * @param {number} [opts.limit=50] - Maximum number of versions to return
+ * @param {number|string} [opts.cursor] - Version number to resume after
+ * @returns {Promise<{items: Array<object>, nextCursor: number|null, total: number}>}
+ */
+export async function readDidHistory(config, did, { limit = 50, cursor } = {}) {
+  const filePath = getDidHistoryPath(config, did);
+  let versions = _didHistoryCache.get(filePath);
+  if (!versions) {
+    versions = await _readDidHistoryFile(config, did);
+    _didHistoryCache.set(filePath, versions);
+  }
+
+  const total = versions.length;
+  const cursorVersion = cursor === undefined || cursor === null || cursor === '' ? null : Number(cursor);
+  const filtered = cursorVersion !== null && Number.isFinite(cursorVersion)
+    ? versions.filter((v) => Number(v.version) > cursorVersion)
+    : versions;
+
+  const max = Number.isFinite(Number(limit)) && Number(limit) > 0 ? Number(limit) : 50;
+  const items = filtered.slice(0, max);
+  const nextCursor = filtered.length > max ? Number(items[items.length - 1].version) : null;
+
+  return { items, nextCursor, total };
+}
 // ── Expiry scanner watermark persistence ──────────────────────────────────────
 /**
  * Get the path where the expiry watermark is stored.

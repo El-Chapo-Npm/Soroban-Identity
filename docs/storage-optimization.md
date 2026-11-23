@@ -23,11 +23,11 @@ The patterns below follow from what a transaction pays for:
 | selective-disclosure | `ADMIN`, `PADMIN`, `PAUSED`, `DISCNT`, `TOTDISC` | `(COMMIT, id)`, `(CRED2CMT, credential_id)`, `(PROOF, id)` | TTL re-extended on every access. `TOTDISC` is written but never read. |
 | credential-manager | ~15, including `CFG` (packed `max_issuers` + `is_paused`, #661) | credential, per-subject / per-issuer / per-type ID lists, revocation records, reason indexes, prerequisite graph, delegations | TTL re-extended on every access (27 call sites). Several `has()`-then-`get()` pairs. Per-issuer ID lists grow to 10 000 entries, and each issuance rewrites the whole list. **Not changed here:** the crate does not compile on `main` (see #856). |
 | reputation | `ADMIN`, `PADMIN`, `REPORTER` list, `PAUSED`, counters, config | `(rec, subject)`, `(h, subject)` history | `REPORTER` is an instance-storage list read on every call. **Not changed here:** the crate does not compile on `main`. |
-| governance | `ADMIN`, `QUORUM`, `THRSH`, `TIMELOCK`, `PROSEQ`, **`VPOWER` map, `(PROPOS, id)`, `(DELEG, voter)`** | none | **High priority.** Proposals, delegations and the voting-power map are all kept in *instance* storage. Every call loads all of them, the instance entry grows with each proposal, and it will eventually hit the ledger entry size limit and brick the contract. They belong in persistent storage. **Not changed here:** the crate does not compile on `main`. |
+| governance | `ADMIN`, `QUORUM`, `THRSH`, `TIMELOCK`, `PROSEQ` | `(VPOWER)`, `(PROPOS, id)`, `(DELEG, voter)` | Proposals, delegations and the voting-power map were kept in *instance* storage, so every call loaded them and the instance entry grew with each proposal. They now live in persistent storage with the same bump threshold; reads fall back to legacy instance keys and copy them forward on first access. |
 
 ## Changes in this pass
 
-Both changes apply to identity-registry, schema-registry, revocation-registry and selective-disclosure. They don't change any stored value or key, so no migration is needed and existing deployments keep working.
+Both changes apply to identity-registry, schema-registry, revocation-registry and selective-disclosure. They don't change any stored value or key, so no migration is needed and existing deployments keep working. Governance now also stores proposals, delegations and voting power per-item in persistent storage; existing instance values remain readable through a lazy copy-forward on first access.
 
 1. **One read instead of `has()` + `get()`.** `get()` already returns `None` for a missing entry, so checking `has()` first was a second lookup of the same key. The TTL is now extended only after a successful read.
 2. **TTL bump threshold.** Every `extend_ttl(key, MAX, MAX)` became `extend_ttl(key, TTL_BUMP_THRESHOLD, MAX)`, where `TTL_BUMP_THRESHOLD = MAX - 518_400` (about 30 days of ledgers).
@@ -94,7 +94,7 @@ The change was dropped. Pack values only when that removes a *persistent* entry 
 
 These need a data migration, a redesign, or a contract that compiles on `main` first:
 
-- **governance:** move proposals, delegations and voting power from instance storage to persistent storage.
+- **governance:** legacy instance proposals and voting weights are copied to persistent storage on first read; delegations are copied when a voter delegates again or votes. A future cleanup can remove untouched legacy delegations after a full rotation period.
 - **credential-manager, reputation:** apply the two changes above once the crates compile (#856 restores credential-manager).
 - **identity-registry:** key DIDs by `Address` instead of `sha256(xdr(address))`, and drop the derivable `DidDocument.id` string (68 bytes per DID). Both require a migration.
 - **revocation-registry:** drop `RevocationBitmap.word_count` (derivable from `words.len()`). Requires a migration.

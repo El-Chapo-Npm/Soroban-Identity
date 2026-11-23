@@ -18,6 +18,8 @@ members = [
     "revocation-registry",
     "selective-disclosure",
     "bridge",
+    "credential-extensions",
+    "credential-templates",
 ]
 default-members = [
     ".",
@@ -32,6 +34,8 @@ default-members = [
     "revocation-registry",
     "selective-disclosure",
     "bridge",
+    "credential-extensions",
+    "credential-templates",
 ]
 resolver = "2"
 

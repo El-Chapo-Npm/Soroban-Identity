@@ -33,6 +33,7 @@ paths:
     get:
       tags: [meta]
       summary: Return this OpenAPI specification.
+      security: []
       responses:
         '200':
           description: The OpenAPI spec.
@@ -48,6 +49,7 @@ paths:
         Returns server version, supported features, and the minimum compatible
         SDK version. Clients can use this to gate feature usage before calling
         endpoints that may not exist on older deployments.
+      security: []
       responses:
         '200':
           description: Server information.
@@ -62,6 +64,7 @@ paths:
     get:
       tags: [meta]
       summary: Liveness probe.
+      security: []
       responses:
         '200':
           description: Server is up.
@@ -643,6 +646,105 @@ paths:
                     type: array
                     items: { type: integer }
 
+  /admin/issuers:
+    get:
+      tags: [admin]
+      summary: List all registered issuers (admin view).
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: List of registered issuer addresses.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [issuers]
+                properties:
+                  issuers:
+                    type: array
+                    items: { type: string }
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: Caller does not have admin permission.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    post:
+      tags: [admin]
+      summary: Add an issuer (admin management).
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [issuer]
+              properties:
+                issuer: { type: string }
+      responses:
+        '201':
+          description: Issuer added.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, issuer]
+                properties:
+                  success: { type: boolean }
+                  issuer: { type: string }
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: Caller does not have admin permission.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/issuers/{issuer}:
+    parameters:
+      - { in: path, name: issuer, required: true, schema: { type: string } }
+    delete:
+      tags: [admin]
+      summary: Remove an issuer (admin management).
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Issuer removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, issuer]
+                properties:
+                  success: { type: boolean }
+                  issuer: { type: string }
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: Caller does not have admin permission.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          description: Issuer is not registered.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /admin/api-keys:
     post:
       tags: [admin]
@@ -650,6 +752,8 @@ paths:
       description: |
         Generates a secure API key with configured scopes, tier, and expiration.
         The plaintext API key is returned ONCE and cannot be retrieved later.
+      security:
+        - BearerAuth: []
       requestBody:
         required: true
         content:
@@ -692,6 +796,8 @@ paths:
       summary: List all API keys.
       description: |
         Returns metadata for all issued API keys (hashed keys excluded).
+      security:
+        - BearerAuth: []
       responses:
         '200':
           description: List of API keys.
@@ -712,6 +818,8 @@ paths:
     get:
       tags: [admin]
       summary: Get metadata for a specific API key.
+      security:
+        - BearerAuth: []
       responses:
         '200':
           description: API key metadata.
@@ -724,6 +832,8 @@ paths:
     delete:
       tags: [admin]
       summary: Revoke an API key.
+      security:
+        - BearerAuth: []
       responses:
         '200':
           description: API key revoked.
@@ -748,6 +858,8 @@ paths:
       description: |
         Generates a new secret for an existing key and immediately revokes the old secret.
         Returns the new plaintext secret once.
+      security:
+        - BearerAuth: []
       requestBody:
         required: false
         content:
@@ -794,6 +906,8 @@ paths:
     get:
       tags: [credentials]
       summary: List registered issuers (cursor-paginated).
+      security:
+        - BearerAuth: []
       x-soroban-contract:
         contract: credential-manager
         function: list_issuers
@@ -803,6 +917,101 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/AddressesPage' }
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    post:
+      tags: [credentials]
+      summary: Register a new issuer.
+      description: |
+        Sensitive operation. Replay protection applies: clients must send a
+        unique `X-Nonce` header per request. Duplicate nonces are rejected
+        with `409 REPLAY_DETECTED`; used nonces are retained for 5 minutes.
+      security:
+        - BearerAuth: []
+      x-soroban-contract:
+        contract: credential-manager
+        function: add_issuer
+      parameters:
+        - $ref: '#/components/parameters/XNonce'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [issuer]
+              properties:
+                issuer: { type: string }
+      responses:
+        '201':
+          description: Issuer registered.
+          headers:
+            X-Nonce:
+              $ref: '#/components/headers/XNonce'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  txHash:
+                    type: string
+                    description: On-chain transaction hash for auditing (#296).
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: Caller does not have permission to manage issuers.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          $ref: '#/components/responses/ReplayDetected'
+
+  /credentials/issuers/{issuer}:
+    parameters:
+      - { in: path, name: issuer, required: true, schema: { type: string } }
+    delete:
+      tags: [credentials]
+      summary: Remove a registered issuer.
+      description: |
+        Sensitive operation. Replay protection applies: clients must send a
+        unique `X-Nonce` header per request. Duplicate nonces are rejected
+        with `409 REPLAY_DETECTED`; used nonces are retained for 5 minutes.
+      security:
+        - BearerAuth: []
+      x-soroban-contract:
+        contract: credential-manager
+        function: remove_issuer
+      parameters:
+        - $ref: '#/components/parameters/XNonce'
+      responses:
+        '204':
+          description: Issuer removed.
+          headers:
+            X-Nonce:
+              $ref: '#/components/headers/XNonce'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: Caller does not have permission to manage issuers.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          description: Issuer is not registered.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          $ref: '#/components/responses/ReplayDetected'
 
   /reputation/{subject}:
     get:
@@ -984,7 +1193,10 @@ components:
     BearerAuth:
       type: http
       scheme: bearer
-      description: API Key authentication via Authorization Bearer header.
+      bearerFormat: JWT
+      description: |
+        Bearer token authentication via the `Authorization: Bearer <token>`
+        header. Required on all issuer-management routes (#1326).
   schemas:
     ServerInfo:
       type: object

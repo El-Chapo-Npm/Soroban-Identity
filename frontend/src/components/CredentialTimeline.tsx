@@ -12,9 +12,92 @@
  * Closes #707.
  */
 
-import { useRef, useState, useCallback, useEffect } from "react";
+import { useRef, useState, useCallback, useEffect, useMemo } from "react";
 import type { Credential } from "../../../sdk/src/types";
 import { formatTimestamp } from "../utils/formatDate";
+import {
+  useCredentialVersioning,
+  type CredentialVersion,
+} from "../hooks/useCredentialVersioning";
+
+// ── Activity feed types ───────────────────────────────────────────────────────
+
+/**
+ * Minimal shape of a streamed contract event consumed by the activity feed.
+ * Kept structural so callers can pass SDK event objects directly.
+ */
+export interface StreamedContractEvent {
+  id?: string;
+  type: string;
+  credentialId?: string;
+  subject?: string;
+  issuer?: string;
+  timestamp: number; // Unix seconds
+  txHash?: string;
+  gasCost?: number | string;
+  ledger?: number;
+  detail?: string;
+}
+
+export type ActivityType = "issued" | "verified" | "revoked" | "amended";
+
+const ACTIVITY_TYPES: ActivityType[] = ["issued", "verified", "revoked", "amended"];
+
+const ACTIVITY_COLORS: Record<ActivityType, string> = {
+  issued: "var(--accent-light, #6c63ff)",
+  verified: "var(--success-text, #155724)",
+  revoked: "var(--error, #dc3545)",
+  amended: "var(--info, #0c5460)",
+};
+
+const ACTIVITY_BG: Record<ActivityType, string> = {
+  issued: "var(--card-bg-accent, #f0eeff)",
+  verified: "var(--success-bg, #d4edda)",
+  revoked: "var(--danger-bg, #f8d7da)",
+  amended: "var(--info-bg, #d1ecf1)",
+};
+
+const ACTIVITY_ICONS: Record<ActivityType, string> = {
+  issued: "✦",
+  verified: "✓",
+  revoked: "✕",
+  amended: "↻",
+};
+
+function normalizeActivityType(raw: string): ActivityType | null {
+  const t = raw.toLowerCase();
+  if (t.includes("issue")) return "issued";
+  if (t.includes("verif")) return "verified";
+  if (t.includes("revok")) return "revoked";
+  if (t.includes("amend") || t.includes("updat")) return "amended";
+  return null;
+}
+
+function explorerTxUrl(network: string, hash: string): string {
+  return `https://stellar.expert/explorer/${network}/tx/${hash}`;
+}
+
+function formatGas(gas: number | string | undefined): string | null {
+  if (gas === undefined || gas === null || gas === "") return null;
+  const n = typeof gas === "string" ? Number(gas) : gas;
+  if (!Number.isFinite(n)) return String(gas);
+  return `${n.toLocaleString(undefined, { maximumFractionDigits: 7 })} stroops`;
+}
+
+function downloadFile(filename: string, content: string, mime: string) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function csvEscape(value: string): string {
+  if (/[",\n]/.test(value)) return `"${value.replace(/"/g, '""')}"`;
+  return value;
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -29,9 +112,14 @@ export interface TimelineEvent {
 }
 
 interface Props {
-  credential: Credential;
+  /** Single-credential mode: the credential to visualize. */
+  credential?: Credential;
   /** Optional additional verified-at timestamps from external checks. */
   verifiedAt?: number[];
+  /** Called when the user requests a comparison view for a version. */
+  onCompareVersion?: (version: CredentialVersion) => void;
+  /** Called when the user requests restoring a version. */
+  onRestoreVersion?: (version: CredentialVersion) => void;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -136,7 +224,12 @@ function buildEvents(credential: Credential, verifiedAt: number[] = []): Timelin
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export default function CredentialTimeline({ credential, verifiedAt = [] }: Props) {
+export default function CredentialTimeline({
+  credential,
+  verifiedAt = [],
+  onCompareVersion,
+  onRestoreVersion,
+}: Props) {
   const allEvents = buildEvents(credential, verifiedAt);
 
   const [activeFilters, setActiveFilters] = useState<Set<TimelineEventType>>(
@@ -151,6 +244,73 @@ export default function CredentialTimeline({ credential, verifiedAt = [] }: Prop
   const dragStartX = useRef(0);
   const panAtDragStart = useRef(0);
   const exportCanvasRef = useRef<HTMLCanvasElement>(null);
+
+  // ── Version history state ────────────────────────────────────────────────
+  const {
+    versions,
+    branches,
+    selectedVersionId,
+    selectVersion,
+    annotateVersion,
+    restoreVersion,
+    branchFromVersion,
+  } = useCredentialVersioning(credential.id);
+
+  const [editingAnnotationId, setEditingAnnotationId] = useState<string | null>(null);
+  const [annotationDraft, setAnnotationDraft] = useState("");
+
+  const sortedVersions = useMemo(
+    () => [...versions].sort((a, b) => b.timestamp - a.timestamp),
+    [versions],
+  );
+
+  const branchNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    branches.forEach((b) => map.set(b.id, b.name));
+    return map;
+  }, [branches]);
+
+  const handleStartAnnotation = useCallback((version: CredentialVersion) => {
+    setEditingAnnotationId(version.id);
+    setAnnotationDraft(version.annotation ?? "");
+  }, []);
+
+  const handleSaveAnnotation = useCallback(
+    (versionId: string) => {
+      annotateVersion(versionId, annotationDraft.trim());
+      setEditingAnnotationId(null);
+      setAnnotationDraft("");
+    },
+    [annotateVersion, annotationDraft],
+  );
+
+  const handleCancelAnnotation = useCallback(() => {
+    setEditingAnnotationId(null);
+    setAnnotationDraft("");
+  }, []);
+
+  const handleCompare = useCallback(
+    (version: CredentialVersion) => {
+      selectVersion(version.id);
+      onCompareVersion?.(version);
+    },
+    [selectVersion, onCompareVersion],
+  );
+
+  const handleRestore = useCallback(
+    (version: CredentialVersion) => {
+      restoreVersion(version.id);
+      onRestoreVersion?.(version);
+    },
+    [restoreVersion, onRestoreVersion],
+  );
+
+  const handleBranch = useCallback(
+    (version: CredentialVersion) => {
+      branchFromVersion(version.id);
+    },
+    [branchFromVersion],
+  );
 
   const filteredEvents = allEvents.filter((e) => activeFilters.has(e.type));
 
@@ -272,6 +432,7 @@ export default function CredentialTimeline({ credential, verifiedAt = [] }: Prop
           verified: "#28a745",
           expired: "#ffc107",
           revoked: "#dc3545",
+          amended: "#17a2b8",
         };
         ctx.fillStyle = colorMap[ev.type];
         ctx.beginPath();
@@ -577,8 +738,652 @@ export default function CredentialTimeline({ credential, verifiedAt = [] }: Prop
         </div>
       )}
 
+      {/* ── Version history ─────────────────────────────────────────────── */}
+      <section
+        aria-label="Credential version history"
+        style={{
+          marginTop: "1rem",
+          paddingTop: "0.75rem",
+          borderTop: "1px solid var(--border-input, #333)",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: "0.5rem",
+            marginBottom: "0.5rem",
+          }}
+        >
+          <h4 style={{ margin: 0, fontSize: "0.9rem", fontWeight: 600 }}>
+            Version history
+          </h4>
+          <span style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>
+            {sortedVersions.length} version{sortedVersions.length === 1 ? "" : "s"}
+          </span>
+        </div>
+
+        {sortedVersions.length === 0 ? (
+          <p style={{ fontSize: "0.8rem", color: "var(--text-muted)", margin: 0 }}>
+            No version history recorded yet.
+          </p>
+        ) : (
+          <ol
+            style={{
+              listStyle: "none",
+              margin: 0,
+              padding: 0,
+              display: "flex",
+              flexDirection: "column",
+              gap: "0.5rem",
+            }}
+          >
+            {sortedVersions.map((version) => {
+              const isSelected = selectedVersionId === version.id;
+              const isEditing = editingAnnotationId === version.id;
+              const branchName = version.branchId
+                ? branchNameById.get(version.branchId)
+                : undefined;
+
+              return (
+                <li
+                  key={version.id}
+                  style={{
+                    padding: "0.5rem 0.7rem",
+                    borderRadius: "0.5rem",
+                    border: `1px solid ${
+                      isSelected
+                        ? EVENT_COLORS.amended
+                        : "var(--border-input, #333)"
+                    }`,
+                    background: isSelected
+                      ? EVENT_BG.amended
+                      : "var(--card-bg, #16213e)",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "0.35rem",
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      flexWrap: "wrap",
+                      gap: "0.35rem",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", flexWrap: "wrap" }}>
+                      <span
+                        style={{
+                          fontSize: "0.75rem",
+                          fontWeight: 700,
+                          color: EVENT_COLORS.amended,
+                        }}
+                      >
+                        v{version.version}
+                      </span>
+                      <span style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>
+                        {formatTimestamp(version.timestamp)}
+                      </span>
+                      {version.author && (
+                        <span style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>
+                          · {version.author}
+                        </span>
+                      )}
+                      {branchName && (
+                        <span
+                          title={`Branch: ${branchName}`}
+                          style={{
+                            fontSize: "0.65rem",
+                            padding: "0.05rem 0.4rem",
+                            borderRadius: "999px",
+                            border: `1px solid ${EVENT_COLORS.issued}`,
+                            color: EVENT_COLORS.issued,
+                            background: EVENT_BG.issued,
+                          }}
+                        >
+                          ⑂ {branchName}
+                        </span>
+                      )}
+                    </div>
+
+                    <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
+                      <button
+                        type="button"
+                        onClick={() => handleCompare(version)}
+                        title="Compare this version"
+                        style={{
+                          padding: "0.15rem 0.55rem",
+                          borderRadius: "0.35rem",
+                          border: "1px solid var(--border-input)",
+                          background: "transparent",
+                          color: "var(--text-muted)",
+                          cursor: "pointer",
+                          fontSize: "0.7rem",
+                        }}
+                      >
+                        ⇄ Compare
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleBranch(version)}
+                        title="Create a branch from this version"
+                        style={{
+                          padding: "0.15rem 0.55rem",
+                          borderRadius: "0.35rem",
+                          border: "1px solid var(--border-input)",
+                          background: "transparent",
+                          color: "var(--text-muted)",
+                          cursor: "pointer",
+                          fontSize: "0.7rem",
+                        }}
+                      >
+                        ⑂ Branch
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleRestore(version)}
+                        title="Restore this version"
+                        style={{
+                          padding: "0.15rem 0.55rem",
+                          borderRadius: "0.35rem",
+                          border: `1px solid ${EVENT_COLORS.verified}`,
+                          background: "transparent",
+                          color: EVENT_COLORS.verified,
+                          cursor: "pointer",
+                          fontSize: "0.7rem",
+                        }}
+                      >
+                        ↺ Restore
+                      </button>
+                    </div>
+                  </div>
+
+                  {isEditing ? (
+                    <div style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
+                      <input
+                        type="text"
+                        value={annotationDraft}
+                        onChange={(e) => setAnnotationDraft(e.target.value)}
+                        placeholder="Add a note for this version…"
+                        aria-label={`Annotation for version ${version.version}`}
+                        style={{
+                          flex: 1,
+                          padding: "0.25rem 0.5rem",
+                          borderRadius: "0.35rem",
+                          border: "1px solid var(--border-input)",
+                          background: "transparent",
+                          color: "inherit",
+                          fontSize: "0.75rem",
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleSaveAnnotation(version.id)}
+                        style={{
+                          padding: "0.15rem 0.55rem",
+                          borderRadius: "0.35rem",
+                          border: `1px solid ${EVENT_COLORS.verified}`,
+                          background: "transparent",
+                          color: EVENT_COLORS.verified,
+                          cursor: "pointer",
+                          fontSize: "0.7rem",
+                        }}
+                      >
+                        Save
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleCancelAnnotation}
+                        style={{
+                          padding: "0.15rem 0.55rem",
+                          borderRadius: "0.35rem",
+                          border: "1px solid var(--border-input)",
+                          background: "transparent",
+                          color: "var(--text-muted)",
+                          cursor: "pointer",
+                          fontSize: "0.7rem",
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: "0.5rem",
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontSize: "0.75rem",
+                          color: version.annotation
+                            ? "inherit"
+                            : "var(--text-muted)",
+                          fontStyle: version.annotation ? "normal" : "italic",
+                        }}
+                      >
+                        {version.annotation || "No annotation"}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleStartAnnotation(version)}
+                        title="Edit annotation"
+                        style={{
+                          padding: "0.1rem 0.45rem",
+                          borderRadius: "0.35rem",
+                          border: "1px solid var(--border-input)",
+                          background: "transparent",
+                          color: "var(--text-muted)",
+                          cursor: "pointer",
+                          fontSize: "0.7rem",
+                        }}
+                      >
+                        ✎ Note
+                      </button>
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ol>
+        )}
+      </section>
+
       {/* Hidden canvas for PNG export */}
       <canvas ref={exportCanvasRef} style={{ display: "none" }} aria-hidden="true" />
     </div>
   );
 }
+
+// ── Activity feed (vertical timeline) ─────────────────────────────────────────
+
+interface ActivityFeedProps {
+  events: StreamedContractEvent[];
+  network: string;
+  onLoadMore?: () => void;
+  hasMore: boolean;
+  loadingMore: boolean;
+}
+
+function ActivityFeed({ events, network, onLoadMore, hasMore, loadingMore }: ActivityFeedProps) {
+  const [activeFilters, setActiveFilters] = useState<Set<ActivityType>>(
+    new Set(ACTIVITY_TYPES),
+  );
+  const [search, setSearch] = useState("");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const sentinelRef = useRef<HTMLDivElement>(null);
+
+  const toggleFilter = useCallback((type: ActivityType) => {
+    setActiveFilters((prev) => {
+      const next = new Set(prev);
+      if (next.has(type)) {
+        if (next.size === 1) return prev; // keep at least one active
+        next.delete(type);
+      } else {
+        next.add(type);
+      }
+      return next;
+    });
+  }, []);
+
+  const visibleEvents = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const fromTs = fromDate ? new Date(fromDate).getTime() / 1000 : null;
+    const toTs = toDate ? new Date(toDate).getTime() / 1000 + 86399 : null;
+
+    return events
+      .map((ev) => ({ ev, type: normalizeActivityType(ev.type) }))
+      .filter((entry): entry is { ev: StreamedContractEvent; type: ActivityType } => entry.type !== null)
+      .filter(({ ev, type }) => {
+        if (!activeFilters.has(type)) return false;
+        if (fromTs !== null && ev.timestamp < fromTs) return false;
+        if (toTs !== null && ev.timestamp > toTs) return false;
+        if (q) {
+          const haystack = [
+            ev.credentialId,
+            ev.subject,
+            ev.issuer,
+            ev.txHash,
+            ev.detail,
+            ev.type,
+          ]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase();
+          if (!haystack.includes(q)) return false;
+        }
+        return true;
+      })
+      .sort((a, b) => b.ev.timestamp - a.ev.timestamp); // newest first
+  }, [events, activeFilters, search, fromDate, toDate]);
+
+  // Infinite scroll: trigger onLoadMore when the sentinel becomes visible.
+  useEffect(() => {
+    const node = sentinelRef.current;
+    if (!node || !onLoadMore || !hasMore) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting) && !loadingMore) {
+          onLoadMore();
+        }
+      },
+      { rootMargin: "120px" },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [onLoadMore, hasMore, loadingMore]);
+
+  const handleExport = useCallback(
+    (format: "csv" | "json") => {
+      const rows = visibleEvents.map(({ ev, type }) => ({
+        type,
+        timestamp: ev.timestamp,
+        timestampIso: new Date(ev.timestamp * 1000).toISOString(),
+        credentialId: ev.credentialId ?? "",
+        subject: ev.subject ?? "",
+        issuer: ev.issuer ?? "",
+        txHash: ev.txHash ?? "",
+        gasCost: ev.gasCost ?? "",
+        ledger: ev.ledger ?? "",
+        detail: ev.detail ?? "",
+      }));
+
+      const stamp = new Date().toISOString().slice(0, 10);
+      if (format === "json") {
+        downloadFile(
+          `activity-feed-${stamp}.json`,
+          JSON.stringify(rows, null, 2),
+          "application/json",
+        );
+      } else {
+        const headers = [
+          "type",
+          "timestamp",
+          "timestampIso",
+          "credentialId",
+          "subject",
+          "issuer",
+          "txHash",
+          "gasCost",
+          "ledger",
+          "detail",
+        ];
+        const lines = [headers.join(",")];
+        for (const row of rows) {
+          lines.push(
+            headers
+              .map((h) => csvEscape(String((row as Record<string, unknown>)[h] ?? "")))
+              .join(","),
+          );
+        }
+        downloadFile(`activity-feed-${stamp}.csv`, lines.join("\n"), "text/csv");
+      }
+    },
+    [visibleEvents],
+  );
+
+  return (
+    <div
+      style={{
+        background: "var(--card-bg, #16213e)",
+        borderRadius: "0.75rem",
+        padding: "1rem",
+        marginTop: "0.75rem",
+      }}
+      aria-label="Activity feed"
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          flexWrap: "wrap",
+          gap: "0.5rem",
+          marginBottom: "0.75rem",
+        }}
+      >
+        <h4 style={{ margin: 0, fontSize: "0.9rem", fontWeight: 600 }}>Activity</h4>
+
+        <div style={{ display: "flex", gap: "0.35rem" }}>
+          <button
+            type="button"
+            onClick={() => handleExport("csv")}
+            title="Export visible activity as CSV"
+            style={exportBtnStyle}
+          >
+            ⬇ CSV
+          </button>
+          <button
+            type="button"
+            onClick={() => handleExport("json")}
+            title="Export visible activity as JSON"
+            style={exportBtnStyle}
+          >
+            ⬇ JSON
+          </button>
+        </div>
+      </div>
+
+      {/* Type filter chips */}
+      <div
+        style={{ display: "flex", gap: "0.35rem", flexWrap: "wrap", marginBottom: "0.6rem" }}
+        role="group"
+        aria-label="Filter activity by type"
+      >
+        {ACTIVITY_TYPES.map((type) => {
+          const active = activeFilters.has(type);
+          return (
+            <button
+              key={type}
+              type="button"
+              onClick={() => toggleFilter(type)}
+              aria-pressed={active}
+              title={`${active ? "Hide" : "Show"} ${type} activity`}
+              style={{
+                padding: "0.2rem 0.6rem",
+                borderRadius: "999px",
+                border: `2px solid ${ACTIVITY_COLORS[type]}`,
+                background: active ? ACTIVITY_BG[type] : "transparent",
+                color: active ? ACTIVITY_COLORS[type] : "var(--text-muted)",
+                cursor: "pointer",
+                fontSize: "0.75rem",
+                fontWeight: active ? 600 : 400,
+              }}
+            >
+              {ACTIVITY_ICONS[type]} {type}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Search + date range */}
+      <div
+        style={{
+          display: "flex",
+          gap: "0.5rem",
+          flexWrap: "wrap",
+          alignItems: "center",
+          marginBottom: "0.75rem",
+        }}
+      >
+        <input
+          type="search"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search hash, credential, address…"
+          aria-label="Search activity"
+          style={inputStyle}
+        />
+        <label style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>
+          From{" "}
+          <input
+            type="date"
+            value={fromDate}
+            onChange={(e) => setFromDate(e.target.value)}
+            aria-label="From date"
+            style={inputStyle}
+          />
+        </label>
+        <label style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>
+          To{" "}
+          <input
+            type="date"
+            value={toDate}
+            onChange={(e) => setToDate(e.target.value)}
+            aria-label="To date"
+            style={inputStyle}
+          />
+        </label>
+      </div>
+
+      {/* Vertical timeline */}
+      {visibleEvents.length === 0 ? (
+        <p style={{ color: "var(--text-muted)", fontSize: "0.8rem", margin: 0 }}>
+          No activity matches the selected filters.
+        </p>
+      ) : (
+        <ol
+          role="list"
+          style={{
+            listStyle: "none",
+            margin: 0,
+            padding: 0,
+            position: "relative",
+            borderLeft: "2px solid var(--border-input, #333)",
+            marginLeft: "0.5rem",
+          }}
+        >
+          {visibleEvents.map(({ ev, type }, idx) => {
+            const gas = formatGas(ev.gasCost);
+            return (
+              <li
+                key={ev.id ?? `${ev.txHash ?? "ev"}-${ev.timestamp}-${idx}`}
+                style={{ position: "relative", padding: "0 0 0.9rem 1rem" }}
+              >
+                {/* Dot */}
+                <span
+                  aria-hidden="true"
+                  style={{
+                    position: "absolute",
+                    left: "-0.6rem",
+                    top: "0.15rem",
+                    width: "14px",
+                    height: "14px",
+                    borderRadius: "50%",
+                    border: `2px solid ${ACTIVITY_COLORS[type]}`,
+                    background: ACTIVITY_BG[type],
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontSize: "0.55rem",
+                    color: ACTIVITY_COLORS[type],
+                    fontWeight: 700,
+                  }}
+                >
+                  {ACTIVITY_ICONS[type]}
+                </span>
+
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.5rem",
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <span
+                    style={{
+                      padding: "0.05rem 0.5rem",
+                      borderRadius: "999px",
+                      background: ACTIVITY_BG[type],
+                      color: ACTIVITY_COLORS[type],
+                      fontSize: "0.7rem",
+                      fontWeight: 600,
+                      textTransform: "capitalize",
+                    }}
+                  >
+                    {type}
+                  </span>
+                  <span style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>
+                    {formatTimestamp(ev.timestamp)}
+                  </span>
+                  {gas && (
+                    <span
+                      style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}
+                      title="Gas cost"
+                    >
+                      ⛽ {gas}
+                    </span>
+                  )}
+                </div>
+
+                {(ev.credentialId || ev.detail) && (
+                  <div style={{ fontSize: "0.78rem", marginTop: "0.15rem" }}>
+                    {ev.detail ?? `Credential ${ev.credentialId?.slice(0, 10)}…`}
+                  </div>
+                )}
+
+                {ev.txHash && (
+                  <a
+                    href={explorerTxUrl(network, ev.txHash)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{
+                      fontSize: "0.7rem",
+                      color: "var(--accent-light, #6c63ff)",
+                      fontFamily: "monospace",
+                      wordBreak: "break-all",
+                    }}
+                    title="View transaction on Stellar explorer"
+                  >
+                    {ev.txHash.slice(0, 10)}…{ev.txHash.slice(-6)} ↗
+                  </a>
+                )}
+              </li>
+            );
+          })}
+        </ol>
+      )}
+
+      {/* Infinite scroll sentinel */}
+      <div ref={sentinelRef} aria-hidden="true" style={{ height: "1px" }} />
+      {loadingMore && (
+        <p style={{ fontSize: "0.75rem", color: "var(--text-muted)", textAlign: "center", margin: "0.5rem 0 0" }}>
+          Loading more…
+        </p>
+      )}
+      {!hasMore && visibleEvents.length > 0 && (
+        <p style={{ fontSize: "0.7rem", color: "var(--text-muted)", textAlign: "center", margin: "0.5rem 0 0" }}>
+          End of history
+        </p>
+      )}
+    </div>
+  );
+}
+
+const exportBtnStyle: React.CSSProperties = {
+  padding: "0.2rem 0.7rem",
+  borderRadius: "0.35rem",
+  border: "1px solid var(--border-input)",
+  background: "transparent",
+  color: "var(--text-muted)",
+  cursor: "pointer",
+  fontSize: "0.75rem",
+};
+
+const inputStyle: React.CSSProperties = {
+  padding: "0.25rem 0.5rem",
+  borderRadius: "0.35rem",
+  border: "1px solid var(--border-input)",
+  background: "transparent",
+  color: "inherit",
+  fontSize: "0.75rem",
+};

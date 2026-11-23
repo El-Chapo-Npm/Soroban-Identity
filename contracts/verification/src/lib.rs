@@ -24,9 +24,13 @@
 //!   depends on the build profile; see finding X-1 in `RESULTS.md`.
 
 pub mod credential;
+pub mod did_resolver;
 pub mod governance;
 pub mod identity;
+pub mod presentation;
 pub mod revocation;
+pub mod revocation_bitmap;
+pub mod staking;
 
 #[cfg(kani)]
 mod proofs;

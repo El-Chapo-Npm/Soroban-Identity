@@ -8,15 +8,6 @@ import {
   scValToNative,
 } from "@stellar/stellar-sdk";
 import type {
-  Credential,
-  CredentialType,
-  RevocationReason,
-  SorobanIdentityConfig,
-  VerifyResult,
-} from "./types";
-import { REVOCATION_REASONS } from "./types";
-import { createHash } from "node:crypto";
-import type {
   CallOptions,
   Credential,
   CredentialListOptions,
@@ -24,7 +15,6 @@ import type {
   CredentialType,
   Page,
   PaginationOptions,
-  RevocationReason,
   RevokedCredential,
   RevocationRecord,
   RevokeOptions,
@@ -33,7 +23,8 @@ import type {
   VerifyResult,
   WriteResult,
 } from "./types";
-import { validateConfig, RevocationReason } from "./types";
+import { validateConfig, RevocationReason, REVOCATION_REASONS } from "./types";
+import { createHash } from "node:crypto";
 import { retryWithBackoff, validateStellarAddress, pollTransactionStatus, runConcurrent } from "./utils";
 import { ContractError, SorobanIdentityError, wrapError, ClaimsValidationError } from "./errors";
 import { CREDENTIAL_MANAGER_ERRORS } from "./error-codes";
@@ -61,6 +52,26 @@ import {
   buildGetMerkleRootArgs,
   buildUpdateMerkleRootArgs,
   buildVerifyMerkleProofArgs,
+  buildRegisterOracleArgs,
+  buildSetFeedSchemaArgs,
+  buildSetOracleFeeArgs,
+  buildSetFallbackOraclesArgs,
+  buildRequestOffchainDataArgs,
+  buildOracleCallbackArgs,
+  buildIsResponseFreshArgs,
+  buildRegisterTemplateArgs,
+  buildPublishTemplateVersionArgs,
+  buildValidateAgainstTemplateArgs,
+  buildListTemplateForSaleArgs,
+  buildBuyTemplateArgs,
+  buildSetSignersArgs,
+  buildUpdateSignersArgs,
+  buildValidateThresholdArgs,
+  buildAggregateSignaturesArgs,
+  buildBatchRevokeArgs,
+  buildGenerateRevocationProofArgs,
+  buildVerifyRevocationProofArgs,
+  buildGetRevocationStatsArgs,
 } from "./contract-args";
 
 const PROBE_ADDRESS = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
@@ -135,6 +146,59 @@ export interface MerkleTree {
   leaves: string[];
   /** All tree levels, `levels[0]` being the leaves and the last level the root. */
   levels: string[][];
+}
+
+/**
+ * Options for {@link CredentialClient.batchRevoke}. #1121
+ */
+export interface BatchRevokeOptions extends CallOptions {
+  /** Revocation reason code recorded for every credential in the batch. */
+  reason?: RevocationReason;
+}
+
+/**
+ * Result of {@link CredentialClient.batchRevoke}. #1121
+ */
+export interface BatchRevokeResult {
+  /** Hex-encoded credential IDs that were revoked. */
+  revoked: string[];
+  /** Number of credentials revoked in this call. */
+  count: number;
+  /** The on-chain transaction hash. */
+  txHash: string;
+}
+
+/**
+ * A bitmap-based revocation proof. #1121
+ *
+ * The contract stores revocations in a bitmap keyed by issuer; a proof
+ * consists of the word index within the bitmap, the bit position within that
+ * word, and the word value itself, which lets a verifier check the bit
+ * without reading the whole list.
+ */
+export interface RevocationProof {
+  /** Hex-encoded credential ID the proof is for. */
+  credentialId: string;
+  /** Index of the bitmap word containing the credential's bit. */
+  wordIndex: number;
+  /** Bit position (0-255) within the word. */
+  bitIndex: number;
+  /** The bitmap word value as a bigint. */
+  word: bigint;
+  /** Whether the bit is set (credential revoked). */
+  revoked: boolean;
+}
+
+/**
+ * Aggregated revocation statistics for an issuer. #1121
+ */
+export interface RevocationStats {
+  /** Total number of revoked credentials. */
+  totalRevoked: number;
+  /** Number of bitmap words currently allocated. */
+  wordCount: number;
+  /** Per-reason revocation counts, keyed by {@link RevocationReason}. */
+  byReason: Record<number, number>;
 }
 
 /**
@@ -497,19 +561,27 @@ export class CredentialClient extends BaseClient {
       const estimatedFeeXlm = (estimatedFee / 10_000_000).toFixed(7);
       prepared.sign(issuerKeypair);
 
-      const result = await retryWithBackoff(() => this.server.sendTransaction(prepared));
+      const txHash = Buffer.from(prepared.hash()).toString('hex');
+      let result;
+      try {
+        result = await this.server.sendTransaction(prepared);
+      } catch (error) {
+        const wrapped = error instanceof Error ? error : new Error(String(error));
+        Object.assign(wrapped, { txHash, submissionUnknown: true });
+        throw wrapped;
+      }
       this.debug('sdk.submission_outcome', { operation: 'credentials.sendTransaction', status: result.status });
       if (result.status !== "PENDING") {
         throw new SorobanIdentityError(`Transaction failed: ${result.status}`, "CONTRACT_ERROR");
       }
 
-      const txHash = result.hash;
-      await pollTransactionStatus(this.server, txHash, {
+      const submittedTxHash = result.hash;
+      await pollTransactionStatus(this.server, submittedTxHash, {
         maxRetries: this.config.maxRetries ?? this.config.pollingRetries,
         retryIntervalMs: this.config.retryIntervalMs ?? this.config.pollingIntervalMs,
         exponentialBackoff: this.config.pollingExponentialBackoff,
       });
-      const confirmed = await this.server.getTransaction(txHash) as SorobanRpc.Api.GetSuccessfulTransactionResponse;
+      const confirmed = await this.server.getTransaction(submittedTxHash) as SorobanRpc.Api.GetSuccessfulTransactionResponse;
       // Returns BytesN<32> — encode as hex
       const decoded = scValToNative(confirmed.returnValue!);
       const raw = decoded instanceof Uint8Array
@@ -518,7 +590,7 @@ export class CredentialClient extends BaseClient {
           ? confirmed.returnValue
           : Buffer.alloc(32);
       const credentialId = Buffer.from(raw).toString("hex");
-      return { data: { credentialId, estimatedFee, estimatedFeeXlm }, txHash };
+      return { data: { credentialId, estimatedFee, estimatedFeeXlm }, txHash: submittedTxHash };
     };
 
     try {
@@ -559,7 +631,11 @@ export class CredentialClient extends BaseClient {
         options?.reason === undefined
           ? this.contract.call(
               'revoke_credential',
-              ...buildRevokeCredentialArgs({ issuer: issuerKeypair.publicKey(), credentialId: idBytes })
+              ...buildRevokeCredentialArgs({
+                issuer: issuerKeypair.publicKey(),
+                credentialId: idBytes,
+                reason: RevocationReason.AdminRevoked,
+              })
             )
           : this.contract.call(
               'revoke_credential_with_reason',
@@ -1163,10 +1239,28 @@ export class CredentialClient extends BaseClient {
       throw contractErr;
     }
 
-    return scValToNative(
+    const raw = scValToNative(
       (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
         .result!.retval
-    ) as Credential;
+    ) as Record<string, unknown>;
+
+    const toTimestamp = (v: unknown): number => {
+      if (typeof v === "bigint") return Number(v);
+      if (typeof v === "string") {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : 0;
+      }
+      if (typeof v === "number") return v < 0 ? v >>> 0 : v;
+      return 0;
+    };
+
+    return {
+      ...raw,
+      issuedAt: raw.issuedAt !== undefined || raw.issued_at !== undefined ? toTimestamp(raw.issuedAt ?? raw.issued_at) : (raw.issuedAt as number),
+      lastModifiedAt: raw.lastModifiedAt !== undefined || raw.last_modified_at !== undefined ? toTimestamp(raw.lastModifiedAt ?? raw.last_modified_at) : (raw.lastModifiedAt as number),
+      activationTime: raw.activationTime !== undefined || raw.activation_time !== undefined ? toTimestamp(raw.activationTime ?? raw.activation_time) : (raw.activationTime as number),
+      expiresAt: raw.expiresAt !== undefined || raw.expires_at !== undefined ? toTimestamp(raw.expiresAt ?? raw.expires_at) : (raw.expiresAt as number),
+    } as Credential;
   }
 
   /**
@@ -1372,11 +1466,15 @@ export class CredentialClient extends BaseClient {
       'get_revocation_record',
       buildGetRevocationRecordArgs({ credentialId: Buffer.from(credentialId, 'hex') }),
       options
-    ) as { credential_id: Uint8Array; reason: number; revoked_by: string; revoked_at: bigint } | null;
+    ) as { credential_id: Uint8Array; reason: number; revoked_by?: string; revoked_at: bigint; issuer?: string; subject?: string } | null;
     if (!raw) return null;
+    const reasonIdx = Number(raw.reason);
+    const reason = REVOCATION_REASONS[reasonIdx] ?? RevocationReason.AdminRevoked;
     return {
       credentialId: Buffer.from(raw.credential_id).toString('hex'),
-      reason: Number(raw.reason) as RevocationReason,
+      issuer: raw.issuer ?? '',
+      subject: raw.subject ?? '',
+      reason,
       revokedBy: raw.revoked_by,
       revokedAt: Number(raw.revoked_at),
     };
@@ -1881,5 +1979,687 @@ export class CredentialClient extends BaseClient {
     return allCredentials
       .filter((cred) => cred.revoked)
       .map((cred) => cred.id);
+  }
+
+  // ---------------------------------------------------------------------------
+  // #1124 — Oracle integration for off-chain data
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Register an oracle node with the credential-manager contract. #1124
+   *
+   * @param adminKeypair  The contract admin signing the transaction.
+   * @param oracleAddress Stellar address of the oracle node.
+   * @param options       Per-call overrides.
+   * @returns `{ txHash }` — the on-chain transaction hash.
+   */
+  async registerOracle(
+    adminKeypair: Keypair,
+    oracleAddress: string,
+    options?: CallOptions
+  ): Promise<{ txHash: string }> {
+    validateStellarAddress(oracleAddress);
+    return this.submitWrite(
+      adminKeypair,
+      'register_oracle',
+      buildRegisterOracleArgs({ admin: adminKeypair.publicKey(), oracle: oracleAddress }),
+      options,
+      'credentials.registerOracle'
+    );
+  }
+
+  /**
+   * Define the data-feed schema for an oracle. #1124
+   */
+  async setFeedSchema(
+    adminKeypair: Keypair,
+    oracleAddress: string,
+    feedId: string,
+    schema: string,
+    options?: CallOptions
+  ): Promise<{ txHash: string }> {
+    validateStellarAddress(oracleAddress);
+    return this.submitWrite(
+      adminKeypair,
+      'set_feed_schema',
+      buildSetFeedSchemaArgs({
+        admin: adminKeypair.publicKey(),
+        oracle: oracleAddress,
+        feedId,
+        schema,
+      }),
+      options,
+      'credentials.setFeedSchema'
+    );
+  }
+
+  /**
+   * Configure the fee charged by an oracle for a data request. #1124
+   */
+  async setOracleFee(
+    adminKeypair: Keypair,
+    oracleAddress: string,
+    feeStroops: number | bigint,
+    options?: CallOptions
+  ): Promise<{ txHash: string }> {
+    validateStellarAddress(oracleAddress);
+    return this.submitWrite(
+      adminKeypair,
+      'set_oracle_fee',
+      buildSetOracleFeeArgs({
+        admin: adminKeypair.publicKey(),
+        oracle: oracleAddress,
+        fee: BigInt(feeStroops),
+      }),
+      options,
+      'credentials.setOracleFee'
+    );
+  }
+
+  /**
+   * Configure the ordered list of fallback oracles used when the primary
+   * oracle is unavailable. #1124
+   */
+  async setFallbackOracles(
+    adminKeypair: Keypair,
+    oracleAddress: string,
+    fallbacks: string[],
+    options?: CallOptions
+  ): Promise<{ txHash: string }> {
+    validateStellarAddress(oracleAddress);
+    for (const fb of fallbacks) validateStellarAddress(fb);
+    return this.submitWrite(
+      adminKeypair,
+      'set_fallback_oracles',
+      buildSetFallbackOraclesArgs({
+        admin: adminKeypair.publicKey(),
+        oracle: oracleAddress,
+        fallbacks,
+      }),
+      options,
+      'credentials.setFallbackOracles'
+    );
+  }
+
+  /**
+   * Request off-chain data from a registered oracle. #1124
+   *
+   * @returns `{ txHash, requestId }` — the transaction hash and the on-chain
+   *   request identifier used to correlate the oracle callback.
+   */
+  async requestOffchainData(
+    requesterKeypair: Keypair,
+    oracleAddress: string,
+    feedId: string,
+    payload: string,
+    options?: CallOptions
+  ): Promise<{ txHash: string; requestId: string }> {
+    validateStellarAddress(oracleAddress);
+    const { txHash, returnValue } = await this.submitWriteWithResult(
+      requesterKeypair,
+      'request_offchain_data',
+      buildRequestOffchainDataArgs({
+        requester: requesterKeypair.publicKey(),
+        oracle: oracleAddress,
+        feedId,
+        payload,
+      }),
+      options,
+      'credentials.requestOffchainData'
+    );
+    const raw = returnValue instanceof Uint8Array ? returnValue : Buffer.alloc(32);
+    return { txHash, requestId: Buffer.from(raw).toString('hex') };
+  }
+
+  /**
+   * Submit an oracle data-verification callback on-chain. #1124
+   *
+   * @param oracleKeypair The oracle node signing the callback.
+   * @param requestId     Hex-encoded request ID returned by {@link requestOffchainData}.
+   * @param dataHashHex   64-char hex SHA-256 of the off-chain data payload.
+   * @param timestamp     Unix seconds at which the data was observed.
+   */
+  async oracleCallback(
+    oracleKeypair: Keypair,
+    requestId: string,
+    dataHashHex: string,
+    timestamp: number,
+    options?: CallOptions
+  ): Promise<{ txHash: string }> {
+    if (!/^[0-9a-fA-F]{64}$/.test(dataHashHex)) {
+      throw new SorobanIdentityError(
+        'InvalidDataHashFormat: dataHash must be a 64-character hex string (32 bytes)',
+        'VALIDATION_ERROR'
+      );
+    }
+    return this.submitWrite(
+      oracleKeypair,
+      'oracle_callback',
+      buildOracleCallbackArgs({
+        oracle: oracleKeypair.publicKey(),
+        requestId: Buffer.from(requestId, 'hex'),
+        dataHash: Buffer.from(dataHashHex, 'hex'),
+        timestamp,
+      }),
+      options,
+      'credentials.oracleCallback'
+    );
+  }
+
+  /**
+   * Check whether an oracle response is still within its staleness window. #1124
+   */
+  async isResponseFresh(
+    callerAddress: string,
+    requestId: string,
+    maxAgeSeconds: number,
+    options?: CallOptions
+  ): Promise<boolean> {
+    const result = await this.simulateRead(
+      callerAddress,
+      'is_response_fresh',
+      buildIsResponseFreshArgs({
+        requestId: Buffer.from(requestId, 'hex'),
+        maxAgeSeconds,
+      }),
+      options
+    );
+    return result === true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // #1125 — Credential templates on-chain
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Register a reusable credential template on-chain. #1125
+   *
+   * @returns `{ txHash, templateId }` — the transaction hash and the new
+   *   template identifier.
+   */
+  async registerTemplate(
+    issuerKeypair: Keypair,
+    name: string,
+    schema: string,
+    parentTemplateId?: string,
+    options?: CallOptions
+  ): Promise<{ txHash: string; templateId: string }> {
+    const { txHash, returnValue } = await this.submitWriteWithResult(
+      issuerKeypair,
+      'register_template',
+      buildRegisterTemplateArgs({
+        issuer: issuerKeypair.publicKey(),
+        name,
+        schema,
+        parentTemplateId,
+      }),
+      options,
+      'credentials.registerTemplate'
+    );
+    const raw = returnValue instanceof Uint8Array ? returnValue : Buffer.alloc(32);
+    return { txHash, templateId: Buffer.from(raw).toString('hex') };
+  }
+
+  /**
+   * Publish a new version of an existing credential template. #1125
+   */
+  async publishTemplateVersion(
+    issuerKeypair: Keypair,
+    templateId: string,
+    schema: string,
+    options?: CallOptions
+  ): Promise<{ txHash: string }> {
+    return this.submitWrite(
+      issuerKeypair,
+      'publish_template_version',
+      buildPublishTemplateVersionArgs({
+        issuer: issuerKeypair.publicKey(),
+        templateId: Buffer.from(templateId, 'hex'),
+        schema,
+      }),
+      options,
+      'credentials.publishTemplateVersion'
+    );
+  }
+
+  /**
+   * Validate a set of claims against an on-chain credential template. #1125
+   *
+   * Read-only simulation; resolves to `true` when the claims satisfy the
+   * template's validation rules (including inherited rules).
+   */
+  async validateAgainstTemplate(
+    callerAddress: string,
+    templateId: string,
+    claims: Record<string, string>,
+    options?: CallOptions
+  ): Promise<boolean> {
+    const result = await this.simulateRead(
+      callerAddress,
+      'validate_against_template',
+      buildValidateAgainstTemplateArgs({
+        templateId: Buffer.from(templateId, 'hex'),
+        claims,
+      }),
+      options
+    );
+    return result === true;
+  }
+
+  /**
+   * List a credential template for sale on the template marketplace. #1125
+   */
+  async listTemplateForSale(
+    issuerKeypair: Keypair,
+    templateId: string,
+    priceStroops: number | bigint,
+    options?: CallOptions
+  ): Promise<{ txHash: string }> {
+    return this.submitWrite(
+      issuerKeypair,
+      'list_template_for_sale',
+      buildListTemplateForSaleArgs({
+        issuer: issuerKeypair.publicKey(),
+        templateId: Buffer.from(templateId, 'hex'),
+        price: BigInt(priceStroops),
+      }),
+      options,
+      'credentials.listTemplateForSale'
+    );
+  }
+
+  /**
+   * Purchase a credential template from the marketplace. #1125
+   */
+  async buyTemplate(
+    buyerKeypair: Keypair,
+    templateId: string,
+    options?: CallOptions
+  ): Promise<{ txHash: string }> {
+    return this.submitWrite(
+      buyerKeypair,
+      'buy_template',
+      buildBuyTemplateArgs({
+        buyer: buyerKeypair.publicKey(),
+        templateId: Buffer.from(templateId, 'hex'),
+      }),
+      options,
+      'credentials.buyTemplate'
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // #1126 — Threshold signature support
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Configure the initial signer set and threshold for an issuer. #1126
+   *
+   * @param signers   Map of signer address → weight.
+   * @param threshold Minimum total weight required to authorize an operation.
+   */
+  async setSigners(
+    adminKeypair: Keypair,
+    issuerAddress: string,
+    signers: Record<string, number>,
+    threshold: number,
+    options?: CallOptions
+  ): Promise<{ txHash: string }> {
+    validateStellarAddress(issuerAddress);
+    for (const addr of Object.keys(signers)) validateStellarAddress(addr);
+    return this.submitWrite(
+      adminKeypair,
+      'set_signers',
+      buildSetSignersArgs({
+        admin: adminKeypair.publicKey(),
+        issuer: issuerAddress,
+        signers,
+        threshold,
+      }),
+      options,
+      'credentials.setSigners'
+    );
+  }
+
+  /**
+   * Update the signer set and/or threshold for an issuer. #1126
+   */
+  async updateSigners(
+    adminKeypair: Keypair,
+    issuerAddress: string,
+    signers: Record<string, number>,
+    threshold: number,
+    options?: CallOptions
+  ): Promise<{ txHash: string }> {
+    validateStellarAddress(issuerAddress);
+    for (const addr of Object.keys(signers)) validateStellarAddress(addr);
+    return this.submitWrite(
+      adminKeypair,
+      'update_signers',
+      buildUpdateSignersArgs({
+        admin: adminKeypair.publicKey(),
+        issuer: issuerAddress,
+        signers,
+        threshold,
+      }),
+      options,
+      'credentials.updateSigners'
+    );
+  }
+
+  /**
+   * Validate that a set of signatures meets the configured threshold. #1126
+   *
+   * Read-only simulation; resolves to `true` when the aggregated signer weight
+   * meets or exceeds the issuer's threshold and no signature has expired.
+   */
+  async validateThreshold(
+    callerAddress: string,
+    issuerAddress: string,
+    messageHashHex: string,
+    signaturesHex: string[],
+    options?: CallOptions
+  ): Promise<boolean> {
+    validateStellarAddress(issuerAddress);
+    if (!/^[0-9a-fA-F]{64}$/.test(messageHashHex)) {
+      throw new SorobanIdentityError(
+        'InvalidMessageHashFormat: messageHash must be a 64-character hex string (32 bytes)',
+        'VALIDATION_ERROR'
+      );
+    }
+    const result = await this.simulateRead(
+      callerAddress,
+      'validate_threshold',
+      buildValidateThresholdArgs({
+        issuer: issuerAddress,
+        messageHash: Buffer.from(messageHashHex, 'hex'),
+        signatures: signaturesHex.map((s) => Buffer.from(s, 'hex')),
+      }),
+      options
+    );
+    return result === true;
+  }
+
+  /**
+   * Aggregate multiple signatures into a single threshold signature. #1126
+   *
+   * @returns The aggregated signature as a hex string.
+   */
+  async aggregateSignatures(
+    callerAddress: string,
+    issuerAddress: string,
+    messageHashHex: string,
+    signaturesHex: string[],
+    options?: CallOptions
+  ): Promise<string> {
+    validateStellarAddress(issuerAddress);
+    if (!/^[0-9a-fA-F]{64}$/.test(messageHashHex)) {
+      throw new SorobanIdentityError(
+        'InvalidMessageHashFormat: messageHash must be a 64-character hex string (32 bytes)',
+        'VALIDATION_ERROR'
+      );
+    }
+    const result = await this.simulateRead(
+      callerAddress,
+      'aggregate_signatures',
+      buildAggregateSignaturesArgs({
+        issuer: issuerAddress,
+        messageHash: Buffer.from(messageHashHex, 'hex'),
+        signatures: signaturesHex.map((s) => Buffer.from(s, 'hex')),
+      }),
+      options
+    );
+    if (result instanceof Uint8Array) return Buffer.from(result).toString('hex');
+    if (typeof result === 'string') return result;
+    throw new SorobanIdentityError(
+      'Unexpected aggregate_signatures return value',
+      'CONTRACT_ERROR'
+    );
+  }
+
+  /**
+   * Build, prepare, sign and submit a state-changing contract call, then wait
+   * for confirmation. Shared by the oracle, template and threshold methods.
+   */
+  private async submitWrite(
+    signerKeypair: Keypair,
+    method: string,
+    args: unknown[],
+    options: CallOptions | undefined,
+    operation: string
+  ): Promise<{ txHash: string }> {
+    const { txHash } = await this.submitWriteWithResult(
+      signerKeypair,
+      method,
+      args,
+      options,
+      operation
+    );
+    return { txHash };
+  }
+
+  /**
+   * Like {@link submitWrite} but also decodes and returns the contract's
+   * return value (used for methods that yield a new on-chain ID).
+   */
+  private async submitWriteWithResult(
+    signerKeypair: Keypair,
+    method: string,
+    args: unknown[],
+    options: CallOptions | undefined,
+    operation: string
+  ): Promise<{ txHash: string; returnValue: unknown }> {
+    const account = await this.server.getAccount(signerKeypair.publicKey());
+    const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
+
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(this.contract.call(method, ...(args as never[])))
+      .setTimeout(timeout)
+      .build();
+
+    try {
+      const prepared = await retryWithBackoff(() => this.server.prepareTransaction(tx));
+      prepared.sign(signerKeypair);
+
+      const result = await retryWithBackoff(() => this.server.sendTransaction(prepared));
+      this.debug('sdk.submission_outcome', { operation, status: result.status });
+      if (result.status !== 'PENDING') {
+        throw new SorobanIdentityError(`Transaction failed: ${result.status}`, 'CONTRACT_ERROR');
+      }
+
+      const txHash = result.hash;
+      await pollTransactionStatus(this.server, txHash);
+
+      const confirmed = await this.server.getTransaction(txHash) as SorobanRpc.Api.GetSuccessfulTransactionResponse;
+      const returnValue = confirmed.returnValue
+        ? scValToNative(confirmed.returnValue)
+        : undefined;
+      return { txHash, returnValue };
+    } catch (e) {
+      throw wrapError(e);
+    }
+  }
+
+  /**
+   * Revoke multiple credentials in a single transaction using the on-chain
+   * bitmap-based revocation list. #1121
+   *
+   * Unlike {@link revokeBatch}, this entry point writes into the gas-efficient
+   * bitmap storage and records a single reason code for the whole batch.
+   *
+   * @param issuerKeypair The registered issuer signing the transaction.
+   * @param credentialIds Hex-encoded 32-byte credential IDs to revoke.
+   * @param options       Per-call overrides plus an optional `reason`.
+   * @returns The revoked IDs, their count, and the transaction hash.
+   */
+  async batchRevoke(
+    issuerKeypair: Keypair,
+    credentialIds: string[],
+    options?: BatchRevokeOptions
+  ): Promise<BatchRevokeResult> {
+    if (!Array.isArray(credentialIds) || credentialIds.length === 0) {
+      throw new SorobanIdentityError(
+        'InvalidBatch: at least one credential ID is required',
+        'VALIDATION_ERROR'
+      );
+    }
+    const normalized = credentialIds.map(normalizeCredentialIdHex);
+    const account = await this.server.getAccount(issuerKeypair.publicKey());
+    const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
+
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        this.contract.call(
+          'batch_revoke',
+          ...buildBatchRevokeArgs({
+            issuer: issuerKeypair.publicKey(),
+            credentialIds: normalized.map((id) => Buffer.from(id, 'hex')),
+            reason: options?.reason,
+          })
+        )
+      )
+      .setTimeout(timeout)
+      .build();
+
+    try {
+      const prepared = await retryWithBackoff(() => this.server.prepareTransaction(tx));
+      prepared.sign(issuerKeypair);
+
+      const result = await retryWithBackoff(() => this.server.sendTransaction(prepared));
+      this.debug('sdk.submission_outcome', { operation: 'credentials.batchRevoke', status: result.status });
+      if (result.status !== 'PENDING') {
+        throw new SorobanIdentityError(`Transaction failed: ${result.status}`, 'CONTRACT_ERROR');
+      }
+
+      const txHash = result.hash;
+      await pollTransactionStatus(this.server, txHash);
+      return { revoked: normalized, count: normalized.length, txHash };
+    } catch (e) {
+      throw wrapError(e);
+    }
+  }
+
+  /**
+   * Generate a bitmap revocation proof for a credential. #1121
+   *
+   * The proof is produced by the contract from the on-chain bitmap and can be
+   * checked locally with {@link verifyRevocationProof} or on-chain with
+   * {@link verifyRevocationProofOnChain}.
+   *
+   * @param callerAddress Any valid Stellar address used to build the read simulation.
+   * @param issuerAddress The issuer whose bitmap to query.
+   * @param credentialId  Hex-encoded 32-byte credential ID.
+   * @param options       Per-call overrides.
+   * @returns The {@link RevocationProof}, or `null` when no proof is available.
+   */
+  async generateRevocationProof(
+    callerAddress: string,
+    issuerAddress: string,
+    credentialId: string,
+    options?: CallOptions
+  ): Promise<RevocationProof | null> {
+    validateStellarAddress(issuerAddress);
+    const idHex = normalizeCredentialIdHex(credentialId);
+    const raw = await this.simulateRead(
+      callerAddress,
+      'generate_revocation_proof',
+      buildGenerateRevocationProofArgs({
+        issuer: issuerAddress,
+        credentialId: Buffer.from(idHex, 'hex'),
+      }),
+      options
+    ) as
+      | { credential_id: Uint8Array; word_index: number; bit_index: number; word: bigint; revoked: boolean }
+      | null;
+    if (!raw) return null;
+    return {
+      credentialId: Buffer.from(raw.credential_id).toString('hex'),
+      wordIndex: Number(raw.word_index),
+      bitIndex: Number(raw.bit_index),
+      word: BigInt(raw.word),
+      revoked: Boolean(raw.revoked),
+    };
+  }
+
+  /**
+   * Verify a bitmap revocation proof client-side, without any network calls. #1121
+   *
+   * Recomputes the bit from `proof.word` and compares it to `proof.revoked`.
+   *
+   * @param proof The proof returned by {@link generateRevocationProof}.
+   * @returns `true` when the proof is internally consistent.
+   */
+  verifyRevocationProof(proof: RevocationProof): boolean {
+    if (!proof || typeof proof.wordIndex !== 'number' || typeof proof.bitIndex !== 'number') {
+      return false;
+    }
+    if (proof.bitIndex < 0 || proof.bitIndex > 255) return false;
+    const bit = (proof.word >> BigInt(proof.bitIndex)) & BigInt(1);
+    return (bit === BigInt(1)) === proof.revoked;
+  }
+
+  /**
+   * Verify a bitmap revocation proof against the on-chain bitmap. #1121
+   *
+   * This is a read-only simulation; the proof is checked by the contract so the
+   * caller does not need to trust a locally-cached bitmap.
+   */
+  async verifyRevocationProofOnChain(
+    callerAddress: string,
+    issuerAddress: string,
+    proof: RevocationProof,
+    options?: CallOptions
+  ): Promise<boolean> {
+    validateStellarAddress(issuerAddress);
+    const result = await this.simulateRead(
+      callerAddress,
+      'verify_revocation_proof',
+      buildVerifyRevocationProofArgs({
+        issuer: issuerAddress,
+        credentialId: Buffer.from(normalizeCredentialIdHex(proof.credentialId), 'hex'),
+        wordIndex: proof.wordIndex,
+        bitIndex: proof.bitIndex,
+        word: proof.word,
+      }),
+      options
+    );
+    return result === true;
+  }
+
+  /**
+   * Fetch aggregated revocation statistics for an issuer from the bitmap. #1121
+   *
+   * @param callerAddress Any valid Stellar address used to build the read simulation.
+   * @param issuerAddress The issuer whose statistics to fetch.
+   * @param options       Per-call overrides.
+   * @returns The {@link RevocationStats} for the issuer.
+   */
+  async getRevocationStats(
+    callerAddress: string,
+    issuerAddress: string,
+    options?: CallOptions
+  ): Promise<RevocationStats> {
+    validateStellarAddress(issuerAddress);
+    const raw = await this.simulateRead(
+      callerAddress,
+      'get_revocation_stats',
+      buildGetRevocationStatsArgs({ issuer: issuerAddress }),
+      options
+    ) as { total_revoked: number; word_count: number; by_reason: Array<[number, number]> } | null;
+    const byReason: Record<number, number> = {};
+    for (const [reason, count] of raw?.by_reason ?? []) {
+      byReason[Number(reason)] = Number(count);
+    }
+    return {
+      totalRevoked: Number(raw?.total_revoked ?? 0),
+      wordCount: Number(raw?.word_count ?? 0),
+      byReason,
+    };
   }
 }

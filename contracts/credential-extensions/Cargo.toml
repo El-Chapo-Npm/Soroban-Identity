@@ -1,0 +1,14 @@
+[package]
+name = "credential-extensions"
+version = "0.1.0"
+edition = "2021"
+description = "Oracle integration, dynamic pricing, encrypted metadata and cross-contract verification for Soroban Identity credentials."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { version = "21.0.0", features = ["alloc"] }
+
+[dev-dependencies]
+soroban-sdk = { version = "21.0.0", features = ["testutils"] }

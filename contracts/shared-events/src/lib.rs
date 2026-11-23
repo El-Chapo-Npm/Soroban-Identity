@@ -118,12 +118,59 @@ pub enum EventType {
     EscrowResolved,
     /// Escrow funds were refunded to the depositor
     EscrowRefunded,
+    /// An oracle request was submitted for off-chain data
+    OracleRequested,
+    /// An oracle responded with off-chain data
+    OracleResponded,
+    /// A fallback oracle was used after primary failure
+    OracleFallbackUsed,
+    /// A credential template was registered
+    TemplateRegistered,
+    /// A new version of a credential template was published
+    TemplateVersionPublished,
+    /// A credential template was purchased from the marketplace
+    TemplatePurchased,
+    /// A threshold signer set was updated
+    SignerSetUpdated,
+    /// A threshold signature operation was completed
+    ThresholdSigned,
+    /// A DID method was registered with the resolver
+    DidMethodRegistered,
+    /// A DID was resolved through the resolver
+    DidResolved,
+    /// An attestation was issued for a DID
+    AttestationIssued,
+    /// DID resolution result was cached
+    DidResolutionCached,
+    /// Custom DID resolver plugin was registered
+    DidResolverPluginRegistered,
+    /// Multiple credentials were revoked in a batch
+    CredentialRevokedBatch,
+    /// A credential revocation was reversed
+    RevocationReversed,
+    /// A revocation proof was generated
+    RevocationProofGenerated,
+    /// Stake was deposited by a holder
+    StakeDeposited,
+    /// Stake was withdrawn after cooldown
+    StakeWithdrawn,
+    /// Stake was slashed for fraud
+    StakeSlashed,
+    /// Staking rewards were distributed
+    RewardsDistributed,
+    /// Stake delegation was created
+    DelegationCreated,
+    /// A verifiable presentation was created
+    PresentationCreated,
+    /// A verifiable presentation was verified
+    PresentationVerified,
+    /// A presentation template was registered
+    PresentationTemplateRegistered,
     /// Custom event for extensibility
     Custom(String),
 }
 
 /// Credential-related events emitted by credential-manager contract.
-#[contracttype]
 #[derive(Clone, Debug)]
 pub enum CredentialEvent {
     Issued {
@@ -151,7 +198,6 @@ pub enum CredentialEvent {
 }
 
 /// DID-related events emitted by identity-registry contract.
-#[contracttype]
 #[derive(Clone, Debug)]
 pub enum DidEvent {
     Registered {
@@ -172,8 +218,45 @@ pub enum DidEvent {
     },
 }
 
-/// Reputation-related events emitted by reputation contract.
+/// DID identity events emitted by the identity contract.
+///
+/// These carry the DID identifier, its owner and the metadata hash so that
+/// indexers and subscribers can reconstruct the DID document state.
 #[contracttype]
+#[derive(Clone, Debug)]
+pub enum DidIdentityEvent {
+    /// A new DID was created and its initial metadata hash stored.
+    Created {
+        did: String,
+        owner: Address,
+        metadata_hash: BytesN<32>,
+        created_at: u64,
+    },
+    /// A DID's metadata hash was updated.
+    Updated {
+        did: String,
+        owner: Address,
+        metadata_hash: BytesN<32>,
+        updated_at: u64,
+    },
+}
+
+/// Attestation events emitted by the identity contract.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub enum AttestationEvent {
+    /// A trusted issuer issued an attestation for a DID.
+    Issued {
+        attestation_id: BytesN<32>,
+        did: String,
+        issuer: Address,
+        claim_type: String,
+        expiry: u64,
+        issued_at: u64,
+    },
+}
+
+/// Reputation-related events emitted by reputation contract.
 #[derive(Clone, Debug)]
 pub enum ReputationEvent {
     ScoreSubmitted {
@@ -185,7 +268,6 @@ pub enum ReputationEvent {
 }
 
 /// Escrow-related events emitted by the credential escrow contract.
-#[contracttype]
 #[derive(Clone, Debug)]
 pub enum EscrowEvent {
     /// Funds were deposited into escrow.
@@ -232,14 +314,251 @@ pub enum EscrowEvent {
     },
 }
 
-/// Top-level event payload that wraps all event types.
+/// Oracle-related events emitted by oracle integration contracts.
 #[contracttype]
+#[derive(Clone, Debug)]
+pub enum OracleEvent {
+    /// An off-chain data request was submitted to an oracle.
+    Requested {
+        request_id: BytesN<32>,
+        requester: Address,
+        /// Identifier of the data feed schema being queried
+        feed_id: BytesN<32>,
+        /// Oracle contract address handling the request
+        oracle: Address,
+        requested_at: u64,
+    },
+    /// An oracle responded with off-chain data.
+    Responded {
+        request_id: BytesN<32>,
+        oracle: Address,
+        /// Hash of the returned data payload for verification
+        data_hash: BytesN<32>,
+        /// Ledger timestamp at which the oracle observed the data
+        observed_at: u64,
+        responded_at: u64,
+    },
+    /// A fallback oracle was used because the primary oracle failed.
+    FallbackUsed {
+        request_id: BytesN<32>,
+        /// Primary oracle that failed
+        primary: Address,
+        /// Fallback oracle that served the request
+        fallback: Address,
+        used_at: u64,
+    },
+}
+
+/// Credential template events emitted by template registry contracts.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub enum TemplateEvent {
+    /// A new credential template was registered.
+    Registered {
+        template_id: BytesN<32>,
+        owner: Address,
+        /// Parent template this one inherits from (zero hash if none)
+        parent_id: BytesN<32>,
+        registered_at: u64,
+    },
+    /// A new version of a credential template was published.
+    VersionPublished {
+        template_id: BytesN<32>,
+        version: u32,
+        /// Hash of the template schema for this version
+        schema_hash: BytesN<32>,
+        published_at: u64,
+    },
+    /// A credential template was purchased from the marketplace.
+    Purchased {
+        template_id: BytesN<32>,
+        buyer: Address,
+        /// Usage fee paid to the template owner
+        fee: i128,
+        purchased_at: u64,
+    },
+}
+
+/// Threshold signature events emitted by multi-signature contracts.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub enum ThresholdEvent {
+    /// The signer set or weights were updated.
+    SignerSetUpdated {
+        /// Hash identifying the signer set configuration
+        set_id: BytesN<32>,
+        /// New threshold required for approvals
+        threshold: u32,
+        updated_at: u64,
+    },
+    /// A threshold signature operation was completed.
+    Signed {
+        /// Identifier of the signed operation
+        operation_id: BytesN<32>,
+        /// Number of signers that contributed
+        signer_count: u32,
+        /// Aggregated signature hash
+        signature_hash: BytesN<32>,
+        signed_at: u64,
+    },
+}
+
+/// DID resolver events emitted by the decentralized identifier resolver.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub enum DidResolverEvent {
+    /// A new DID method was registered with the resolver.
+    MethodRegistered {
+        /// Method name (e.g. "stellar", "key")
+        method: String,
+        /// Resolver contract implementing the method
+        resolver: Address,
+        registered_at: u64,
+    },
+    /// A DID was resolved through the resolver.
+    Resolved {
+        did: String,
+        /// Hash of the resolved DID document
+        document_hash: BytesN<32>,
+        resolved_at: u64,
+    },
+}
+
+/// DID resolver events emitted by the DID resolver contract.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub enum DidResolutionEvent {
+    /// A DID was resolved to a document hash.
+    Resolved {
+        did: String,
+        /// Numeric identifier of the DID method (e.g. stellar, ethr, web).
+        method: u32,
+        document_hash: BytesN<32>,
+        resolved_at: u64,
+    },
+    /// A resolution result was written to the cache.
+    ResolutionCached {
+        did: String,
+        document_hash: BytesN<32>,
+        expires_at: u64,
+        cached_at: u64,
+    },
+    /// A custom resolver plugin was registered.
+    PluginRegistered {
+        /// Numeric identifier of the DID method handled by the plugin.
+        method: u32,
+        plugin: Address,
+        registered_at: u64,
+    },
+}
+
+/// Credential revocation events emitted by the revocation list contract.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub enum RevocationEvent {
+    /// A batch of credentials was revoked.
+    RevokedBatch {
+        issuer: Address,
+        /// Number of credentials revoked in this batch.
+        count: u32,
+        reason: u32,
+        revoked_at: u64,
+    },
+    /// A credential revocation was reversed.
+    Reversed {
+        credential_id: BytesN<32>,
+        issuer: Address,
+        reversed_at: u64,
+    },
+    /// A revocation proof was generated.
+    ProofGenerated {
+        credential_id: BytesN<32>,
+        proof_hash: BytesN<32>,
+        generated_at: u64,
+    },
+}
+
+/// Staking events emitted by the reputation staking contract.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub enum StakingEvent {
+    /// A holder deposited stake.
+    Deposited {
+        staker: Address,
+        amount: i128,
+        deposited_at: u64,
+    },
+    /// A holder withdrew stake after the cooldown period.
+    Withdrawn {
+        staker: Address,
+        amount: i128,
+        withdrawn_at: u64,
+    },
+    /// A stake was slashed for fraud.
+    Slashed {
+        staker: Address,
+        amount: i128,
+        reason: u32,
+        slashed_at: u64,
+    },
+    /// Staking rewards were distributed.
+    RewardsDistributed {
+        staker: Address,
+        amount: i128,
+        distributed_at: u64,
+    },
+    /// A stake delegation was created.
+    DelegationCreated {
+        delegator: Address,
+        delegatee: Address,
+        amount: i128,
+        created_at: u64,
+    },
+}
+
+/// Verifiable presentation events emitted by the presentation contract.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub enum PresentationEvent {
+    /// A verifiable presentation was created.
+    Created {
+        presentation_id: BytesN<32>,
+        holder: Address,
+        /// Number of credentials bundled in the presentation.
+        credential_count: u32,
+        created_at: u64,
+    },
+    /// A verifiable presentation was verified.
+    Verified {
+        presentation_id: BytesN<32>,
+        verifier: Address,
+        verified_at: u64,
+    },
+    /// A presentation template was registered.
+    TemplateRegistered {
+        template_id: BytesN<32>,
+        issuer: Address,
+        registered_at: u64,
+    },
+}
+
+/// Top-level event payload that wraps all event types.
 #[derive(Clone, Debug)]
 pub enum EventPayload {
     Credential(CredentialEvent),
     Did(DidEvent),
+    DidIdentity(DidIdentityEvent),
+    Attestation(AttestationEvent),
     Reputation(ReputationEvent),
     Escrow(EscrowEvent),
+    Oracle(OracleEvent),
+    Template(TemplateEvent),
+    Threshold(ThresholdEvent),
+    DidResolver(DidResolverEvent),
+    DidResolution(DidResolutionEvent),
+    Revocation(RevocationEvent),
+    Staking(StakingEvent),
+    Presentation(PresentationEvent),
     Custom(String),
 }
 
@@ -344,7 +663,7 @@ impl EventRegistry {
         listener.require_auth();
 
         let key = (SUBSCRIPTIONS.clone(), event_type.clone());
-        let mut subs: Vec<EventSubscription> = env
+        let subs: Vec<EventSubscription> = env
             .storage()
             .persistent()
             .get(&key)
@@ -443,17 +762,30 @@ impl EventEmitter {
         match &payload {
             EventPayload::Credential(cred_event) => {
                 let topic = match cred_event {
-                    CredentialEvent::Issued { .. } => symbol_short!("cred_issue"),
-                    CredentialEvent::Revoked { .. } => symbol_short!("cred_revok"),
-                    CredentialEvent::Renewed { .. } => symbol_short!("cred_renew"),
+                    CredentialEvent::Issued { .. } => symbol_short!("cred_iss"),
+                    CredentialEvent::Revoked { .. } => symbol_short!("cred_rev"),
+                    CredentialEvent::Renewed { .. } => symbol_short!("cred_ren"),
                 };
-                env.events().publish((topic, emitter, timestamp), payload);
+                env.events().publish((topic.clone(), emitter, timestamp), topic);
             }
             EventPayload::Did(did_event) => {
                 let topic = match did_event {
                     DidEvent::Registered { .. } => symbol_short!("did_reg"),
-                    DidEvent::Updated { .. } => symbol_short!("did_update"),
+                    DidEvent::Updated { .. } => symbol_short!("did_upd"),
                     DidEvent::Deactivated { .. } => symbol_short!("did_deact"),
+                };
+                env.events().publish((topic.clone(), emitter, timestamp), topic);
+            }
+            EventPayload::DidIdentity(did_event) => {
+                let topic = match did_event {
+                    DidIdentityEvent::Created { .. } => symbol_short!("did_crt"),
+                    DidIdentityEvent::Updated { .. } => symbol_short!("did_upd"),
+                };
+                env.events().publish((topic, emitter, timestamp), payload);
+            }
+            EventPayload::Attestation(att_event) => {
+                let topic = match att_event {
+                    AttestationEvent::Issued { .. } => symbol_short!("att_iss"),
                 };
                 env.events().publish((topic, emitter, timestamp), payload);
             }
@@ -461,7 +793,7 @@ impl EventEmitter {
                 let topic = match rep_event {
                     ReputationEvent::ScoreSubmitted { .. } => symbol_short!("rep_score"),
                 };
-                env.events().publish((topic, emitter, timestamp), payload);
+                env.events().publish((topic.clone(), emitter, timestamp), topic);
             }
             EventPayload::Escrow(escrow_event) => {
                 let topic = match escrow_event {
@@ -470,6 +802,70 @@ impl EventEmitter {
                     EscrowEvent::Disputed { .. } => symbol_short!("esc_disp"),
                     EscrowEvent::Resolved { .. } => symbol_short!("esc_res"),
                     EscrowEvent::Refunded { .. } => symbol_short!("esc_ref"),
+                };
+                env.events().publish((topic.clone(), emitter, timestamp), topic);
+            }
+            EventPayload::Oracle(oracle_event) => {
+                let topic = match oracle_event {
+                    OracleEvent::Requested { .. } => symbol_short!("orc_req"),
+                    OracleEvent::Responded { .. } => symbol_short!("orc_resp"),
+                    OracleEvent::FallbackUsed { .. } => symbol_short!("orc_fb"),
+                };
+                env.events().publish((topic, emitter, timestamp), payload);
+            }
+            EventPayload::Template(template_event) => {
+                let topic = match template_event {
+                    TemplateEvent::Registered { .. } => symbol_short!("tpl_reg"),
+                    TemplateEvent::VersionPublished { .. } => symbol_short!("tpl_ver"),
+                    TemplateEvent::Purchased { .. } => symbol_short!("tpl_buy"),
+                };
+                env.events().publish((topic, emitter, timestamp), payload);
+            }
+            EventPayload::Threshold(threshold_event) => {
+                let topic = match threshold_event {
+                    ThresholdEvent::SignerSetUpdated { .. } => symbol_short!("thr_set"),
+                    ThresholdEvent::Signed { .. } => symbol_short!("thr_sign"),
+                };
+                env.events().publish((topic, emitter, timestamp), payload);
+            }
+            EventPayload::DidResolver(resolver_event) => {
+                let topic = match resolver_event {
+                    DidResolverEvent::MethodRegistered { .. } => symbol_short!("did_mreg"),
+                    DidResolverEvent::Resolved { .. } => symbol_short!("did_res"),
+                };
+                env.events().publish((topic, emitter, timestamp), payload);
+            }
+            EventPayload::DidResolution(resolver_event) => {
+                let topic = match resolver_event {
+                    DidResolutionEvent::Resolved { .. } => symbol_short!("did_res"),
+                    DidResolutionEvent::ResolutionCached { .. } => symbol_short!("did_cache"),
+                    DidResolutionEvent::PluginRegistered { .. } => symbol_short!("did_plug"),
+                };
+                env.events().publish((topic, emitter, timestamp), payload);
+            }
+            EventPayload::Revocation(rev_event) => {
+                let topic = match rev_event {
+                    RevocationEvent::RevokedBatch { .. } => symbol_short!("rev_batch"),
+                    RevocationEvent::Reversed { .. } => symbol_short!("rev_rev"),
+                    RevocationEvent::ProofGenerated { .. } => symbol_short!("rev_proof"),
+                };
+                env.events().publish((topic, emitter, timestamp), payload);
+            }
+            EventPayload::Staking(stake_event) => {
+                let topic = match stake_event {
+                    StakingEvent::Deposited { .. } => symbol_short!("stk_dep"),
+                    StakingEvent::Withdrawn { .. } => symbol_short!("stk_wd"),
+                    StakingEvent::Slashed { .. } => symbol_short!("stk_slash"),
+                    StakingEvent::RewardsDistributed { .. } => symbol_short!("stk_rew"),
+                    StakingEvent::DelegationCreated { .. } => symbol_short!("stk_del"),
+                };
+                env.events().publish((topic, emitter, timestamp), payload);
+            }
+            EventPayload::Presentation(pres_event) => {
+                let topic = match pres_event {
+                    PresentationEvent::Created { .. } => symbol_short!("pres_crt"),
+                    PresentationEvent::Verified { .. } => symbol_short!("pres_vrf"),
+                    PresentationEvent::TemplateRegistered { .. } => symbol_short!("pres_tpl"),
                 };
                 env.events().publish((topic, emitter, timestamp), payload);
             }
@@ -493,6 +889,13 @@ impl EventEmitter {
                 DidEvent::Updated { .. } => EventType::DidUpdated,
                 DidEvent::Deactivated { .. } => EventType::DidDeactivated,
             },
+            EventPayload::DidIdentity(did) => match did {
+                DidIdentityEvent::Created { .. } => EventType::DidRegistered,
+                DidIdentityEvent::Updated { .. } => EventType::DidUpdated,
+            },
+            EventPayload::Attestation(att) => match att {
+                AttestationEvent::Issued { .. } => EventType::AttestationIssued,
+            },
             EventPayload::Reputation(rep) => match rep {
                 ReputationEvent::ScoreSubmitted { .. } => EventType::ReputationScoreSubmitted,
             },
@@ -502,6 +905,48 @@ impl EventEmitter {
                 EscrowEvent::Disputed { .. } => EventType::EscrowDisputed,
                 EscrowEvent::Resolved { .. } => EventType::EscrowResolved,
                 EscrowEvent::Refunded { .. } => EventType::EscrowRefunded,
+            },
+            EventPayload::Oracle(oracle) => match oracle {
+                OracleEvent::Requested { .. } => EventType::OracleRequested,
+                OracleEvent::Responded { .. } => EventType::OracleResponded,
+                OracleEvent::FallbackUsed { .. } => EventType::OracleFallbackUsed,
+            },
+            EventPayload::Template(template) => match template {
+                TemplateEvent::Registered { .. } => EventType::TemplateRegistered,
+                TemplateEvent::VersionPublished { .. } => EventType::TemplateVersionPublished,
+                TemplateEvent::Purchased { .. } => EventType::TemplatePurchased,
+            },
+            EventPayload::Threshold(threshold) => match threshold {
+                ThresholdEvent::SignerSetUpdated { .. } => EventType::SignerSetUpdated,
+                ThresholdEvent::Signed { .. } => EventType::ThresholdSigned,
+            },
+            EventPayload::DidResolver(resolver) => match resolver {
+                DidResolverEvent::MethodRegistered { .. } => EventType::DidMethodRegistered,
+                DidResolverEvent::Resolved { .. } => EventType::DidResolved,
+            },
+            EventPayload::DidResolution(resolver) => match resolver {
+                DidResolutionEvent::Resolved { .. } => EventType::DidResolved,
+                DidResolutionEvent::ResolutionCached { .. } => EventType::DidResolutionCached,
+                DidResolutionEvent::PluginRegistered { .. } => EventType::DidResolverPluginRegistered,
+            },
+            EventPayload::Revocation(revocation) => match revocation {
+                RevocationEvent::RevokedBatch { .. } => EventType::CredentialRevokedBatch,
+                RevocationEvent::Reversed { .. } => EventType::RevocationReversed,
+                RevocationEvent::ProofGenerated { .. } => EventType::RevocationProofGenerated,
+            },
+            EventPayload::Staking(staking) => match staking {
+                StakingEvent::Deposited { .. } => EventType::StakeDeposited,
+                StakingEvent::Withdrawn { .. } => EventType::StakeWithdrawn,
+                StakingEvent::Slashed { .. } => EventType::StakeSlashed,
+                StakingEvent::RewardsDistributed { .. } => EventType::RewardsDistributed,
+                StakingEvent::DelegationCreated { .. } => EventType::DelegationCreated,
+            },
+            EventPayload::Presentation(presentation) => match presentation {
+                PresentationEvent::Created { .. } => EventType::PresentationCreated,
+                PresentationEvent::Verified { .. } => EventType::PresentationVerified,
+                PresentationEvent::TemplateRegistered { .. } => {
+                    EventType::PresentationTemplateRegistered
+                }
             },
             EventPayload::Custom(msg) => EventType::Custom(msg.clone()),
         }
@@ -704,6 +1149,235 @@ mod test {
         assert_eq!(
             EventEmitter::event_type_from_payload(&refunded_event),
             EventType::EscrowRefunded
+        );
+    }
+
+    #[test]
+    fn test_did_identity_event_type_from_payload() {
+        let env = Env::default();
+        let owner = Address::generate(&env);
+        let did = String::from_str(&env, "did:stellar:GABC");
+        let metadata_hash = BytesN::from_array(&env, &[7u8; 32]);
+
+        let created = EventPayload::DidIdentity(DidIdentityEvent::Created {
+            did: did.clone(),
+            owner: owner.clone(),
+            metadata_hash: metadata_hash.clone(),
+            created_at: 1,
+        });
+        assert_eq!(
+            EventEmitter::event_type_from_payload(&created),
+            EventType::DidRegistered
+        );
+
+        let updated = EventPayload::DidIdentity(DidIdentityEvent::Updated {
+            did,
+            owner,
+            metadata_hash,
+            updated_at: 2,
+        });
+        assert_eq!(
+            EventEmitter::event_type_from_payload(&updated),
+            EventType::DidUpdated
+        );
+    }
+
+    #[test]
+    fn test_attestation_event_type_from_payload() {
+        let env = Env::default();
+        let issuer = Address::generate(&env);
+        let attestation_id = BytesN::from_array(&env, &[8u8; 32]);
+
+        let issued = EventPayload::Attestation(AttestationEvent::Issued {
+            attestation_id,
+            did: String::from_str(&env, "did:stellar:GABC"),
+            issuer,
+            claim_type: String::from_str(&env, "Kyc"),
+            expiry: 99999,
+            issued_at: 1,
+        });
+        assert_eq!(
+            EventEmitter::event_type_from_payload(&issued),
+            EventType::AttestationIssued
+        );
+    }
+
+    #[test]
+    fn test_did_resolution_event_type_from_payload() {
+        let env = Env::default();
+        let did = String::from_str(&env, "did:stellar:GABC");
+        let doc_hash = BytesN::from_array(&env, &[2u8; 32]);
+        let plugin = Address::generate(&env);
+
+        let resolved = EventPayload::DidResolution(DidResolutionEvent::Resolved {
+            did: did.clone(),
+            method: 0,
+            document_hash: doc_hash.clone(),
+            resolved_at: 1,
+        });
+        assert_eq!(
+            EventEmitter::event_type_from_payload(&resolved),
+            EventType::DidResolved
+        );
+
+        let cached = EventPayload::DidResolution(DidResolutionEvent::ResolutionCached {
+            did: did.clone(),
+            document_hash: doc_hash.clone(),
+            expires_at: 100,
+            cached_at: 2,
+        });
+        assert_eq!(
+            EventEmitter::event_type_from_payload(&cached),
+            EventType::DidResolutionCached
+        );
+
+        let registered = EventPayload::DidResolution(DidResolutionEvent::PluginRegistered {
+            method: 1,
+            plugin,
+            registered_at: 3,
+        });
+        assert_eq!(
+            EventEmitter::event_type_from_payload(&registered),
+            EventType::DidResolverPluginRegistered
+        );
+    }
+
+    #[test]
+    fn test_revocation_event_type_from_payload() {
+        let env = Env::default();
+        let issuer = Address::generate(&env);
+        let cred_id = BytesN::from_array(&env, &[3u8; 32]);
+        let proof_hash = BytesN::from_array(&env, &[4u8; 32]);
+
+        let batch = EventPayload::Revocation(RevocationEvent::RevokedBatch {
+            issuer: issuer.clone(),
+            count: 10,
+            reason: 1,
+            revoked_at: 1,
+        });
+        assert_eq!(
+            EventEmitter::event_type_from_payload(&batch),
+            EventType::CredentialRevokedBatch
+        );
+
+        let reversed = EventPayload::Revocation(RevocationEvent::Reversed {
+            credential_id: cred_id.clone(),
+            issuer: issuer.clone(),
+            reversed_at: 2,
+        });
+        assert_eq!(
+            EventEmitter::event_type_from_payload(&reversed),
+            EventType::RevocationReversed
+        );
+
+        let proof = EventPayload::Revocation(RevocationEvent::ProofGenerated {
+            credential_id: cred_id,
+            proof_hash,
+            generated_at: 3,
+        });
+        assert_eq!(
+            EventEmitter::event_type_from_payload(&proof),
+            EventType::RevocationProofGenerated
+        );
+    }
+
+    #[test]
+    fn test_staking_event_type_from_payload() {
+        let env = Env::default();
+        let staker = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+
+        let deposited = EventPayload::Staking(StakingEvent::Deposited {
+            staker: staker.clone(),
+            amount: 100,
+            deposited_at: 1,
+        });
+        assert_eq!(
+            EventEmitter::event_type_from_payload(&deposited),
+            EventType::StakeDeposited
+        );
+
+        let withdrawn = EventPayload::Staking(StakingEvent::Withdrawn {
+            staker: staker.clone(),
+            amount: 100,
+            withdrawn_at: 2,
+        });
+        assert_eq!(
+            EventEmitter::event_type_from_payload(&withdrawn),
+            EventType::StakeWithdrawn
+        );
+
+        let slashed = EventPayload::Staking(StakingEvent::Slashed {
+            staker: staker.clone(),
+            amount: 50,
+            reason: 1,
+            slashed_at: 3,
+        });
+        assert_eq!(
+            EventEmitter::event_type_from_payload(&slashed),
+            EventType::StakeSlashed
+        );
+
+        let rewards = EventPayload::Staking(StakingEvent::RewardsDistributed {
+            staker: staker.clone(),
+            amount: 5,
+            distributed_at: 4,
+        });
+        assert_eq!(
+            EventEmitter::event_type_from_payload(&rewards),
+            EventType::RewardsDistributed
+        );
+
+        let delegation = EventPayload::Staking(StakingEvent::DelegationCreated {
+            delegator: staker,
+            delegatee,
+            amount: 25,
+            created_at: 5,
+        });
+        assert_eq!(
+            EventEmitter::event_type_from_payload(&delegation),
+            EventType::DelegationCreated
+        );
+    }
+
+    #[test]
+    fn test_presentation_event_type_from_payload() {
+        let env = Env::default();
+        let holder = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let pres_id = BytesN::from_array(&env, &[5u8; 32]);
+        let template_id = BytesN::from_array(&env, &[6u8; 32]);
+
+        let created = EventPayload::Presentation(PresentationEvent::Created {
+            presentation_id: pres_id.clone(),
+            holder,
+            credential_count: 2,
+            created_at: 1,
+        });
+        assert_eq!(
+            EventEmitter::event_type_from_payload(&created),
+            EventType::PresentationCreated
+        );
+
+        let verified = EventPayload::Presentation(PresentationEvent::Verified {
+            presentation_id: pres_id,
+            verifier,
+            verified_at: 2,
+        });
+        assert_eq!(
+            EventEmitter::event_type_from_payload(&verified),
+            EventType::PresentationVerified
+        );
+
+        let template = EventPayload::Presentation(PresentationEvent::TemplateRegistered {
+            template_id,
+            issuer,
+            registered_at: 3,
+        });
+        assert_eq!(
+            EventEmitter::event_type_from_payload(&template),
+            EventType::PresentationTemplateRegistered
         );
     }
 }

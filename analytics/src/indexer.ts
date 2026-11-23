@@ -15,10 +15,31 @@ import type { AnalyticsStore } from "./store";
 
 const EVENT_PAGE_LIMIT = 1000;
 const TX_PAGE_LIMIT = 200;
+/** Safety bound on event pages drained per tick, to avoid infinite loops. */
+const MAX_EVENT_PAGES_PER_TICK = 100;
 /** Cap on resolve_did simulations per tick, to stay polite to the RPC. */
 const COUNTRY_LOOKUPS_PER_TICK = 50;
 
 type RpcEvent = SorobanRpc.Api.EventResponse;
+
+/**
+ * All `ts` fields written by the indexer are unix epoch milliseconds in UTC.
+ * `Date.now()` is already UTC epoch ms; never build timestamps from
+ * local-time strings.
+ */
+function utcNowMs(): number {
+  return Date.now();
+}
+
+/**
+ * Parse an ISO-8601 ledger close time as UTC. RPC normally returns a `Z`
+ * suffix, but if the offset is missing we treat the value as UTC rather than
+ * letting `Date.parse` fall back to the server's local timezone.
+ */
+function parseUtcMs(value: string): number {
+  const hasZone = /(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(value);
+  return Date.parse(hasZone ? value : `${value}Z`);
+}
 
 function symbolOf(val: xdr.ScVal | undefined): string | undefined {
   try {
@@ -113,8 +134,10 @@ export class Indexer {
       },
     ];
 
-    // Drain all pages available right now.
-    for (;;) {
+    // Drain all pages available right now. A page is only "done" when it comes
+    // back empty; a short page can still be followed by more pages, so stopping
+    // on `length < EVENT_PAGE_LIMIT` would silently drop the remainder.
+    for (let page = 0; page < MAX_EVENT_PAGES_PER_TICK; page++) {
       const { eventCursor, eventStartLedger } = this.store.data.cursor;
       const request: SorobanRpc.Server.GetEventsRequest = eventCursor
         ? { filters, cursor: eventCursor, limit: EVENT_PAGE_LIMIT }
@@ -132,6 +155,7 @@ export class Indexer {
 
       const last = res.events[res.events.length - 1];
       if (last) {
+        // Persist after every page so a restart resumes from the right position.
         this.store.setCursor({ eventCursor: last.pagingToken, latestLedger: res.latestLedger });
       } else if (!eventCursor) {
         // Nothing yet: advance so the start ledger never ages out of RPC retention.
@@ -140,7 +164,7 @@ export class Indexer {
         this.store.setCursor({ latestLedger: res.latestLedger });
       }
 
-      if (res.events.length < EVENT_PAGE_LIMIT) break;
+      if (res.events.length === 0) break;
     }
   }
 
@@ -168,8 +192,15 @@ export class Indexer {
     if (!ev.inSuccessfulContractCall) return;
 
     const contractId = ev.contractId?.toString();
+    // Horizon/RPC payloads can carry a null/missing topic list or null entries;
+    // skip such events instead of throwing a TypeError that crashes the poller.
+    if (!Array.isArray(ev.topic) || ev.topic.length < 2 || ev.topic.some((t) => t == null)) {
+      console.warn(`[indexer] skipping event ${ev.id}: missing or null topic`);
+      return;
+    }
     const [ns, action] = ev.topic.map(symbolOf);
-    const ts = Date.parse(ev.ledgerClosedAt);
+    // ts is unix ms UTC, parsed from the ledger close time (UTC).
+    const ts = parseUtcMs(ev.ledgerClosedAt);
     const base = { id: ev.id, ledger: ev.ledger, ts };
     let fields: unknown[];
     try {
@@ -243,6 +274,7 @@ export class Indexer {
         if (ids === null) continue;
         const txId = `tx:${tx.txHash ?? `${tx.ledger}:${tx.applicationOrder}`}`;
         // One record per credential checked, so batch calls count each check.
+        // ts is unix ms UTC (createdAt is unix seconds UTC).
         (ids.length ? ids : [undefined]).forEach((credentialId, i) =>
           this.store.addVerification({ id: `${txId}:${i}`, source: "onchain", credentialId, ts: tx.createdAt * 1000 })
         );
@@ -289,6 +321,11 @@ export class Indexer {
       }
     }
     return null;
+  }
+
+  /** Current time as unix ms UTC, for any locally-generated records. */
+  private now(): number {
+    return utcNowMs();
   }
 
   private async rpc<T>(method: string, params: unknown): Promise<T> {

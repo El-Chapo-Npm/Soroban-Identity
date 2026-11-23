@@ -10,6 +10,7 @@ export interface FrontendNetworkConfig extends SorobanIdentityConfig {
 }
 
 const networkNames: NetworkName[] = ["testnet", "mainnet"];
+export const ACTIVE_NETWORK_STORAGE_KEY = "soroban_identity_active_network";
 
 export function normalizeNetworkName(value: string | undefined): NetworkName {
   return value === "mainnet" ? "mainnet" : "testnet";
@@ -57,7 +58,24 @@ export const NETWORK_OPTIONS = networkNames.map((name) => NETWORK_CONFIGS[name])
  * the safe default for development.
  */
 export function getActiveNetwork(): NetworkName {
+  if (typeof window !== "undefined") {
+    try {
+      const stored = window.localStorage.getItem(ACTIVE_NETWORK_STORAGE_KEY);
+      if (stored) return normalizeNetworkName(stored);
+    } catch {
+      // Storage may be unavailable in private browsing or restricted embeds.
+    }
+  }
   return DEFAULT_NETWORK;
+}
+
+export function persistActiveNetwork(network: NetworkName): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(ACTIVE_NETWORK_STORAGE_KEY, network);
+  } catch {
+    // Keep the in-memory selection usable when storage is unavailable.
+  }
 }
 
 export function getNetworkConfig(

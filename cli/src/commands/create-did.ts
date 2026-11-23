@@ -12,12 +12,30 @@ export function createDidCommand(): Command {
     .option('-s, --secret-key <secret>', 'controller secret key (or SOROBAN_SECRET_KEY)')
     .option('-m, --meta <key=value>', 'DID document metadata entry (repeatable)', collectMeta)
     .option('--meta-file <path>', 'JSON file with DID document metadata')
+    .option('--method <did:method>', 'DID method to register (admin) or create the DID under')
+    .option('--resolve <did>', 'resolve a DID string and print its DID document')
     .option('-y, --yes', 'skip the confirmation prompt')
     .action(async (opts, cmd: Command) => {
       const globals = cmd.optsWithGlobals<GlobalOptions>();
       const config = effectiveConfig(globals);
       const client = new IdentityClient(toSdkConfig(config, ['identityRegistryId']));
+
+      if (opts.resolve) {
+        info(`Resolving ${opts.resolve}...`);
+        const document = await client.resolveDidString(opts.resolve);
+        printResult(document, () =>
+          table([
+            ['DID', document.id],
+            ['Controller', document.controller ?? ''],
+            ['Method', document.method ?? ''],
+            ['Metadata', JSON.stringify(document.metadata ?? {})],
+          ])
+        );
+        return;
+      }
+
       const keypair = await resolveKeypair(opts.secretKey);
+=======
 
       let metadata: Record<string, string> = {
         ...(opts.metaFile ? readJsonObject(opts.metaFile) : {}),

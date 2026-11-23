@@ -293,7 +293,7 @@ export class RedisNonceStore {
  * @param {Function} [params.now]          - Injectable clock, milliseconds
  * @returns {{ok: true} | {ok: false, code: string, status: number, message: string}}
  */
-export function verifySignedRequest({
+export async function verifySignedRequest({
   headers = {},
   method,
   path,

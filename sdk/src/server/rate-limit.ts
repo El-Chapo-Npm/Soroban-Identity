@@ -8,7 +8,7 @@
 //   - 20 writes/minute
 
 import { SorobanIdentityError } from "../errors";
-import type { AuthContext } from "./api-keys";
+import type { AuthContext, ApiKeyMetadata } from "./api-keys";
 
 export type RateClass = "read" | "write";
 export type UserTier = "free" | "pro" | "enterprise";

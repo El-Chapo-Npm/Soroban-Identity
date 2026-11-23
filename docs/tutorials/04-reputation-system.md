@@ -38,3 +38,7 @@ Use `SorobanEventListener` to react to reputation events instead of polling. See
 2. Plot `getScoreHistory` output over time.
 
 API reference: `ReputationClient` in the [TypeDoc docs](../index.md).
+
+## Configure reputation decay
+
+Administrators can configure a subject-specific curve and preview its future score. See the [reputation decay formulas and benchmark instructions](../reputation-decay.md).

@@ -156,6 +156,142 @@ export class SorobanClient {
     });
   }
 
+  /**
+   * Submit a pre-signed transaction envelope (base64 XDR) to Soroban.
+   *
+   * The envelope is already signed by the caller, so no source account is
+   * required here. The submission is wrapped in the circuit breaker and
+   * retried on transient RPC failures, mirroring `invoke`.
+   *
+   * @param {string} signedXdr - Base64-encoded signed transaction envelope.
+   * @returns {Promise<{hash: string|null, status: string, ledger: number|null, error: object|null}>}
+   */
+  async submitSignedXdr(signedXdr) {
+    if (!signedXdr || typeof signedXdr !== 'string') {
+      throw new SorobanError('invalid_request', 'A signed transaction XDR is required.', 'signedXdr missing');
+    }
+
+    const commandArgs = [
+      'contract',
+      'invoke',
+      '--network', this.config.network,
+      '--rpc-url', this.config.rpcUrl,
+      '--',
+      '--xdr',
+      signedXdr,
+    ];
+
+    return this.circuitBreaker.call(async () => {
+      let attempt = 0;
+      while (true) {
+        const started = performance.now();
+        try {
+          const output = await traceSpan(
+            'soroban.submitSignedXdr',
+            () => runCommand(this.config.stellarCli, commandArgs, this.config.sorobanInvokeTimeoutMs),
+            {},
+          );
+          this.metrics?.observeRpcLatency((performance.now() - started) / 1000);
+          return parseSubmissionResult(output);
+        } catch (error) {
+          this.metrics?.observeRpcLatency((performance.now() - started) / 1000);
+
+          if (error instanceof SorobanTimeoutError) {
+            throw new SorobanError('timeout', 'The operation timed out.', error.message);
+          }
+
+          const errMsg = error.message.toLowerCase();
+          const isTransient =
+            errMsg.includes('timeout') ||
+            errMsg.includes('429') ||
+            errMsg.includes('503') ||
+            errMsg.includes('econnreset');
+
+          if (isTransient && attempt < this.config.rpcMaxRetries) {
+            attempt++;
+            if (this.metrics && typeof this.metrics.counters === 'object') {
+              this.metrics.counters.rpc_retries_total = (this.metrics.counters.rpc_retries_total || 0) + 1;
+            }
+            const maxDelay = this.config.rpcRetryBaseMs * Math.pow(this.config.rpcRetryBackoff, attempt);
+            const delay = Math.floor(Math.random() * maxDelay);
+            logger.warn(
+              { attempt, maxRetries: this.config.rpcMaxRetries, delayMs: delay, error: error.message },
+              'Retrying Soroban signed XDR submission',
+            );
+            await new Promise((r) => setTimeout(r, delay));
+            continue;
+          }
+
+          throw normalizeSubmissionError(error);
+        }
+      }
+    }).catch((error) => {
+      if (error instanceof SorobanUnavailableError) {
+        throw new SorobanError('rpc_unavailable', 'The Soroban RPC node is currently unavailable.', error.message);
+      }
+      throw error;
+    });
+  }
+
+  /**
+   * Build and submit an attestation contract call on behalf of an issuer.
+   *
+   * @param {string} issuer - Issuer Stellar address (G...).
+   * @param {object} payload - Attestation payload (subject, data, etc.).
+   * @returns {Promise<{hash: string|null, status: string, ledger: number|null, error: object|null}>}
+   */
+  async buildAndSubmitAttestation(issuer, payload = {}) {
+    if (!issuer) {
+      throw new SorobanError('invalid_request', 'An issuer address is required.', 'issuer missing');
+    }
+    if (!this.config.contracts?.attestation) {
+      throw new SorobanError('config_error', 'The attestation contract is not configured.', 'contracts.attestation missing');
+    }
+
+    const args = ['--issuer', issuer];
+    if (payload.subject !== undefined) args.push('--subject', String(payload.subject));
+    if (payload.data !== undefined) {
+      args.push('--data', typeof payload.data === 'string' ? payload.data : JSON.stringify(payload.data));
+    }
+    if (payload.expiresAt !== undefined) args.push('--expires_at', String(payload.expiresAt));
+
+    try {
+      const raw = await this.invoke(this.config.contracts.attestation, 'attest', args);
+      return parseSubmissionResult(raw);
+    } catch (error) {
+      throw normalizeSubmissionError(error);
+    }
+  }
+
+  /**
+   * Build and submit a revocation contract call.
+   *
+   * @param {string} attestationId - Identifier of the attestation to revoke.
+   * @param {string} caller - Address invoking the revocation (issuer or owner).
+   * @returns {Promise<{hash: string|null, status: string, ledger: number|null, error: object|null}>}
+   */
+  async buildAndSubmitRevocation(attestationId, caller) {
+    if (!attestationId) {
+      throw new SorobanError('invalid_request', 'An attestation id is required.', 'attestationId missing');
+    }
+    if (!caller) {
+      throw new SorobanError('invalid_request', 'A caller address is required.', 'caller missing');
+    }
+    if (!this.config.contracts?.attestation) {
+      throw new SorobanError('config_error', 'The attestation contract is not configured.', 'contracts.attestation missing');
+    }
+
+    try {
+      const raw = await this.invoke(this.config.contracts.attestation, 'revoke', [
+        '--id', String(attestationId),
+        '--caller', String(caller),
+      ]);
+      return parseSubmissionResult(raw);
+    } catch (error) {
+      throw normalizeSubmissionError(error);
+    }
+  }
+
   async pingAllContracts() {
     const entries = Object.entries(this.config.contracts);
     const results = await Promise.allSettled(entries.map(([name, id]) => this.invoke(id, 'ping').then(() => [name, true])));
@@ -187,8 +323,10 @@ export class SorobanClient {
     if (!address) return null;
 
     if (this.didCache) {
-      const cached = await this.didCache.get(address);
-      if (cached) return cached;
+      try {
+        const cached = await this.didCache.get(address);
+        if (cached) return cached;
+      } catch {}
     }
 
     const raw = await this.invoke(this.config.contracts.identity, 'get_did', ['--address', address]);
@@ -197,7 +335,9 @@ export class SorobanClient {
     // Only cache a real document. Caching a negative result would let a DID
     // created moments later stay invisible for the whole TTL.
     if (document && this.didCache) {
-      await this.didCache.set(address, document);
+      try {
+        await this.didCache.set(address, document);
+      } catch {}
     }
 
     return document;
@@ -233,16 +373,85 @@ export class SorobanClient {
     return result;
   }
 
+  /**
+   * Fetch the on-chain revision/version metadata for a DID document.
+   *
+   * Used by the history reconciler to detect when the contract's view of a
+   * document has advanced past the locally stored history. Returns null when
+   * the contract does not expose version metadata or the DID is unknown, so
+   * callers can fall back to local history only.
+   *
+   * @param {string} didOrAddress - `did:stellar:G...` or a bare `G...`
+   * @returns {Promise<{address: string, version: number, updatedAt: number}|null>}
+   */
+  async getDidVersion(didOrAddress) {
+    const address = String(didOrAddress ?? '').startsWith('did:stellar:')
+      ? String(didOrAddress).slice('did:stellar:'.length)
+      : String(didOrAddress ?? '');
+
+    if (!address) return null;
+
+    let raw;
+    try {
+      raw = await this.invoke(this.config.contracts.identity, 'get_did_version', ['--address', address]);
+    } catch (error) {
+      // Older contracts may not implement get_did_version; treat as unknown
+      // rather than failing the whole history request.
+      logger.warn({ address, error: error.message }, 'get_did_version unavailable; skipping on-chain version check');
+      return null;
+    }
+
+    return parseDidVersion(raw, address);
+  }
+
+  /**
+   * Fetch the on-chain revision history for a DID document, if the contract
+   * exposes it. Returns null when unsupported so the server can serve its
+   * locally stored history instead.
+   *
+   * @param {string} didOrAddress - `did:stellar:G...` or a bare `G...`
+   * @returns {Promise<Array<object>|null>}
+   */
+  async getDidHistory(didOrAddress) {
+    const address = String(didOrAddress ?? '').startsWith('did:stellar:')
+      ? String(didOrAddress).slice('did:stellar:'.length)
+      : String(didOrAddress ?? '');
+
+    if (!address) return null;
+
+    let raw;
+    try {
+      raw = await this.invoke(this.config.contracts.identity, 'get_did_history', ['--address', address]);
+    } catch (error) {
+      logger.warn({ address, error: error.message }, 'get_did_history unavailable; using local history');
+      return null;
+    }
+
+    return parseDidHistory(raw, address);
+  }
+
   async addIssuer(issuer) {
-    this.cache.delete(`${this.config.contracts.credential}:get_issuers:[]`);
-    await this.queryCache.invalidate('get_issuers');
-    return this.invoke(this.config.contracts.credential, 'add_issuer', ['--issuer', issuer]);
+    this.invalidateIssuerCaches();
+    const raw = await this.invoke(this.config.contracts.credential, 'add_issuer', ['--issuer', issuer]);
+    // The write may have succeeded even if the response is opaque; drop caches
+    // again so the next read reflects the new whitelist.
+    this.invalidateIssuerCaches();
+    return { issuer, action: 'add', result: raw };
   }
 
   async removeIssuer(issuer) {
+    this.invalidateIssuerCaches();
+    const raw = await this.invoke(this.config.contracts.credential, 'remove_issuer', ['--issuer', issuer]);
+    this.invalidateIssuerCaches();
+    return { issuer, action: 'remove', result: raw };
+  }
+
+  /** Drop every cache entry that can hold the issuer whitelist. */
+  invalidateIssuerCaches() {
     this.cache.delete(`${this.config.contracts.credential}:get_issuers:[]`);
-    await this.queryCache.invalidate('get_issuers');
-    return this.invoke(this.config.contracts.credential, 'remove_issuer', ['--issuer', issuer]);
+    // Fire-and-forget: the distributed cache is best-effort and must not make
+    // an otherwise successful write appear to fail.
+    Promise.resolve(this.queryCache.invalidate('get_issuers')).catch(() => {});
   }
 
   async getEvents(startLedger, { fallbackFn = null } = {}) {
@@ -267,7 +476,13 @@ export class SorobanClient {
         if (!response.ok) throw new Error(`RPC getEvents failed with HTTP ${response.status}`);
         const payload = await response.json();
         if (payload.error) throw new Error(payload.error.message ?? 'RPC getEvents failed');
-        return payload.result?.events ?? [];
+        // Stamp events with a UTC ISO-8601 timestamp. Never derive timestamps
+        // from local server time; all DB timestamps must be UTC (#1325).
+        const observedAt = new Date().toISOString();
+        return (payload.result?.events ?? []).map((event) => ({
+          ...event,
+          observedAt,
+        }));
       } finally {
         this.metrics?.observeRpcLatency((performance.now() - started) / 1000);
       }
@@ -277,6 +492,17 @@ export class SorobanClient {
       }
       throw error;
     });
+  }
+
+  /**
+   * Connection options for any DB handle opened on behalf of the indexer.
+   *
+   * The indexer must never write local-time timestamps, so the session
+   * timezone is forced to UTC regardless of the server's local timezone
+   * (#1325). Consumers spread this into their connection/pool options.
+   */
+  getDbConnectionOptions() {
+    return { timezone: this.config?.dbTimezone ?? 'UTC' };
   }
 
   /** Gracefully drain the worker pool before shutdown. */
@@ -329,6 +555,153 @@ function runCommand(command, args, timeoutMs) {
 function parseAddressList(raw) {
   const matches = raw.match(/G[A-Z0-9]{55}/g);
   return matches ? [...new Set(matches)] : [];
+}
+
+/**
+ * Normalize a CLI submission response into a stable shape for the HTTP layer.
+ *
+ * The CLI may print JSON or a plain hash; anything unparseable is treated as a
+ * successful submission with an unknown hash so callers can still respond.
+ */
+function parseSubmissionResult(raw) {
+  const text = typeof raw === 'string' ? raw.trim() : raw;
+  if (text && typeof text === 'object') {
+    return {
+      hash: text.hash ?? text.txHash ?? null,
+      status: text.status ?? 'success',
+      ledger: text.ledger ?? text.ledgerSequence ?? null,
+      error: text.error ?? null,
+    };
+  }
+  if (typeof text === 'string' && text !== '') {
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === 'object') {
+        return {
+          hash: parsed.hash ?? parsed.txHash ?? null,
+          status: parsed.status ?? 'success',
+          ledger: parsed.ledger ?? parsed.ledgerSequence ?? null,
+          error: parsed.error ?? null,
+        };
+      }
+    } catch {
+      // Not JSON — fall through and treat the text as a transaction hash.
+    }
+    return { hash: text, status: 'success', ledger: null, error: null };
+  }
+  return { hash: null, status: 'success', ledger: null, error: null };
+}
+
+/**
+ * Map an arbitrary submission error onto a `SorobanError` with a category the
+ * HTTP layer can translate into a status code.
+ */
+function normalizeSubmissionError(error) {
+  if (error instanceof SorobanError) return error;
+  const message = error?.message ?? String(error);
+  const errMsg = message.toLowerCase();
+
+  let category = 'unknown_error';
+  let publicMessage = 'An unknown error occurred.';
+
+  if (errMsg.includes('contracterror') || errMsg.includes('rejected') || errMsg.includes('panic') || errMsg.includes('trap')) {
+    category = 'contract_error';
+    publicMessage = 'The contract rejected this request.';
+  } else if (errMsg.includes('insufficient_fee') || errMsg.includes('tx_insufficient_fee')) {
+    category = 'insufficient_fee';
+    publicMessage = 'The transaction fee was insufficient.';
+  } else if (errMsg.includes('ledger_closed') || errMsg.includes('tx_bad_seq')) {
+    category = 'ledger_closed';
+    publicMessage = 'The ledger closed before the transaction could be included.';
+  } else if (errMsg.includes('timeout')) {
+    category = 'timeout';
+    publicMessage = 'The operation timed out.';
+  } else if (errMsg.includes('429') || errMsg.includes('503') || errMsg.includes('econnreset')) {
+    category = 'rpc_unavailable';
+    publicMessage = 'The Soroban RPC node is currently unavailable.';
+  } else if (errMsg.includes('invalid') || errMsg.includes('malformed') || errMsg.includes('xdr')) {
+    category = 'invalid_request';
+    publicMessage = 'The submitted transaction was invalid.';
+  }
+
+  return new SorobanError(category, publicMessage, message);
+}
+
+/**
+ * Parse a `get_did_version` contract response.
+ *
+ * Accepts either a bare integer revision or an object carrying
+ * `version`/`revision` and `updated_at`/`updatedAt`. Returns null when the
+ * response cannot be interpreted.
+ */
+export function parseDidVersion(raw, address) {
+  if (raw === null || raw === undefined || raw === '') return null;
+
+  let parsed = raw;
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (trimmed === '' || trimmed === 'null') return null;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      const asNumber = Number(trimmed);
+      if (Number.isFinite(asNumber)) parsed = asNumber;
+      else return null;
+    }
+  }
+
+  if (typeof parsed === 'number') {
+    if (!Number.isFinite(parsed)) return null;
+    return { address, version: parsed, updatedAt: 0 };
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+
+  const version = Number(parsed.version ?? parsed.revision ?? parsed.rev ?? NaN);
+  if (!Number.isFinite(version)) return null;
+
+  return {
+    address,
+    version,
+    updatedAt: Number(parsed.updated_at ?? parsed.updatedAt ?? 0) || 0,
+  };
+}
+
+/**
+ * Parse a `get_did_history` contract response into a list of revisions.
+ *
+ * Returns null when the response is not a list, so callers can distinguish
+ * "contract does not support history" from "history is empty".
+ */
+export function parseDidHistory(raw, address) {
+  if (raw === null || raw === undefined || raw === '') return null;
+
+  let parsed = raw;
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (trimmed === '' || trimmed === 'null') return null;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return null;
+    }
+  }
+
+  if (!Array.isArray(parsed)) return null;
+
+  return parsed
+    .map((entry, index) => {
+      if (!entry || typeof entry !== 'object') return null;
+      const version = Number(entry.version ?? entry.revision ?? index + 1);
+      if (!Number.isFinite(version)) return null;
+      return {
+        address,
+        version,
+        updatedAt: Number(entry.updated_at ?? entry.updatedAt ?? 0) || 0,
+        document: entry.document ?? entry.doc ?? null,
+      };
+    })
+    .filter(Boolean);
 }
 
 export { runCommand };

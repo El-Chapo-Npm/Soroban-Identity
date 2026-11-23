@@ -41,7 +41,10 @@ pub fn compute_stake_boost(stake_amount: i64) -> i64 {
     if stake_amount >= STAKE_BOOST_FULL_AMOUNT {
         return MAX_STAKE_BOOST;
     }
-    ((stake_amount as i128 * MAX_STAKE_BOOST as i128) / STAKE_BOOST_FULL_AMOUNT as i128) as i64
+    let scaled = (stake_amount as i128)
+        .saturating_mul(MAX_STAKE_BOOST as i128)
+        / STAKE_BOOST_FULL_AMOUNT as i128;
+    scaled.clamp(0, MAX_STAKE_BOOST as i128) as i64
 }
 
 /// Applies the stake boost to `score`, clamped to the configured score bounds.
@@ -107,6 +110,65 @@ pub fn get_stake_weighted_reputation(stakes: &[(i64, i64)]) -> Option<i64> {
     } else {
         Some(stats.weighted_score / stats.total_staked)
     }
+}
+
+/// Returns the total amount staked across all positive entries in `stakes`.
+///
+/// Non-positive stake amounts are ignored so the aggregate matches the
+/// accounting used by [`get_stake_stats`].
+pub fn get_total_staked(stakes: &[(i64, i64)]) -> i64 {
+    get_stake_stats(stakes).total_staked
+}
+
+/// Returns the mean stake amount over all positive entries in `stakes`.
+///
+/// Returns `0` when no positive stake is present.
+pub fn get_average_stake(stakes: &[(i64, i64)]) -> i64 {
+    get_stake_stats(stakes).average_stake
+}
+
+/// Returns the average reputation of stakers, weighted by stake amount.
+///
+/// This is the staking-aware counterpart to
+/// [`get_average_reputation_by_issuer`]: rather than treating every record
+/// equally it weights each `(stake_amount, score)` pair by the amount staked,
+/// so larger stakers contribute proportionally more. Returns `None` when no
+/// positive stake is present.
+pub fn get_average_stake_weighted_reputation(stakes: &[(i64, i64)]) -> Option<i64> {
+    get_stake_weighted_reputation(stakes)
+}
+
+/// Returns up to `limit` `(stake_amount, score)` pairs sorted by stake amount
+/// in descending order.
+///
+/// Ties are broken by score (higher first) so the ordering is deterministic
+/// across invocations. The result is bounded by `limit`, so the allocation is
+/// `O(limit)` regardless of how many entries are supplied. Non-positive stake
+/// amounts are skipped.
+pub fn get_top_stakers(stakes: &[(i64, i64)], limit: u32) -> Vec<(i64, i64)> {
+    let mut top: Vec<(i64, i64)> = Vec::new();
+    if limit == 0 {
+        return top;
+    }
+
+    for entry in stakes.iter() {
+        if entry.0 <= 0 {
+            continue;
+        }
+        if top.len() >= limit {
+            let worst_idx = worst_stake_index(&top);
+            let worst = top.get(worst_idx).unwrap();
+            if !is_better_stake(entry, &worst) {
+                continue;
+            }
+            top.set(worst_idx, *entry);
+        } else {
+            top.push_back(*entry);
+        }
+    }
+
+    sort_stakes_desc(&mut top);
+    top
 }
 
 /// Returns the average score attributed to `subject` by `issuer`.
@@ -189,11 +251,14 @@ pub fn get_reputation_percentile(records: &[ReputationRecord], score: i64) -> u3
     let mut below: u32 = 0;
     for record in records.iter() {
         if record.score < score {
-            below += 1;
+            below = below.saturating_add(1);
         }
     }
 
-    ((below as u64 * PERCENTILE_SCALE as u64) / records.len() as u64) as u32
+    let scaled = (below as u64)
+        .saturating_mul(PERCENTILE_SCALE as u64)
+        / records.len() as u64;
+    scaled.min(PERCENTILE_SCALE as u64) as u32
 }
 
 /// Returns the score at the given `percentile` (0..=10_000) of `records`.
@@ -213,7 +278,9 @@ pub fn get_percentile_threshold(records: &[ReputationRecord], percentile: u32) -
     };
 
     // Rank (1-based) of the target element within the sorted dataset.
-    let rank = ((clamped as u64 * records.len() as u64) + PERCENTILE_SCALE as u64 - 1)
+    let rank = (clamped as u64)
+        .saturating_mul(records.len() as u64)
+        .saturating_add(PERCENTILE_SCALE as u64 - 1)
         / PERCENTILE_SCALE as u64;
     let target = if rank == 0 { 1 } else { rank } as u32;
 
@@ -223,7 +290,7 @@ pub fn get_percentile_threshold(records: &[ReputationRecord], percentile: u32) -
     }
     sort_i64_asc(&mut sorted);
 
-    let idx = if target > sorted.len() {
+    let idx = if target >= sorted.len() {
         sorted.len() - 1
     } else {
         target - 1
@@ -257,6 +324,49 @@ fn is_better(candidate: &ReputationRecord, current: &ReputationRecord) -> bool {
         return candidate.score > current.score;
     }
     candidate.subject < current.subject
+}
+
+/// Returns `true` when `candidate` should rank above `current` by stake.
+fn is_better_stake(candidate: &(i64, i64), current: &(i64, i64)) -> bool {
+    if candidate.0 != current.0 {
+        return candidate.0 > current.0;
+    }
+    candidate.1 > current.1
+}
+
+/// Index of the lowest-ranked stake entry in `stakes` (assumes non-empty).
+fn worst_stake_index(stakes: &Vec<(i64, i64)>) -> u32 {
+    let mut idx: u32 = 0;
+    let mut i: u32 = 1;
+    while i < stakes.len() {
+        let current = stakes.get(i).unwrap();
+        let worst = stakes.get(idx).unwrap();
+        if is_better_stake(&worst, &current) {
+            idx = i;
+        }
+        i += 1;
+    }
+    idx
+}
+
+/// In-place insertion sort of stake entries by descending stake amount.
+fn sort_stakes_desc(stakes: &mut Vec<(i64, i64)>) {
+    let len = stakes.len();
+    let mut i: u32 = 1;
+    while i < len {
+        let key = stakes.get(i).unwrap();
+        let mut j = i;
+        while j > 0 {
+            let prev = stakes.get(j - 1).unwrap();
+            if is_better_stake(&prev, &key) {
+                break;
+            }
+            stakes.set(j, prev);
+            j -= 1;
+        }
+        stakes.set(j, key);
+        i += 1;
+    }
 }
 
 /// Index of the lowest-ranked entry in `records` (assumes non-empty).
@@ -435,5 +545,120 @@ mod tests {
         assert_eq!(get_stake_weighted_reputation(&stakes), None);
         let zero = [(0i64, 50i64)];
         assert_eq!(get_stake_weighted_reputation(&zero), None);
+    }
+
+    #[test]
+    fn total_and_average_stake_ignore_non_positive() {
+        let stakes = [(100i64, 10i64), (300, 20), (0, 99), (-50, 5)];
+        assert_eq!(get_total_staked(&stakes), 400);
+        assert_eq!(get_average_stake(&stakes), 200);
+        let empty: [(i64, i64); 0] = [];
+        assert_eq!(get_total_staked(&empty), 0);
+        assert_eq!(get_average_stake(&empty), 0);
+    }
+
+    #[test]
+    fn average_stake_weighted_reputation_matches_weighted() {
+        let stakes = [(100i64, 10i64), (300, 20)];
+        assert_eq!(
+            get_average_stake_weighted_reputation(&stakes),
+            Some((100 * 10 + 300 * 20) / 400)
+        );
+        let empty: [(i64, i64); 0] = [];
+        assert_eq!(get_average_stake_weighted_reputation(&empty), None);
+    }
+
+    #[test]
+    fn top_stakers_sorted_descending_and_bounded() {
+        let stakes = [(100i64, 10i64), (500, 5), (250, 20), (250, 30)];
+        let top = get_top_stakers(&stakes, 3);
+        assert_eq!(top.len(), 3);
+        assert_eq!(top.get(0).unwrap(), (500, 5));
+        assert_eq!(top.get(1).unwrap(), (250, 30));
+        assert_eq!(top.get(2).unwrap(), (250, 20));
+    }
+
+    #[test]
+    fn top_stakers_zero_limit_is_empty() {
+        let stakes = [(100i64, 10i64)];
+        assert_eq!(get_top_stakers(&stakes, 0).len(), 0);
+    }
+
+    #[test]
+    fn stake_boost_handles_extreme_amounts() {
+        assert_eq!(compute_stake_boost(i64::MIN), 0);
+        assert_eq!(compute_stake_boost(i64::MAX), MAX_STAKE_BOOST);
+        assert_eq!(apply_stake_boost(i64::MIN, i64::MAX), MAX_STAKE_BOOST);
+        assert_eq!(apply_stake_boost(i64::MAX, i64::MIN), MAX_STAKE_BOOST);
+    }
+
+    #[test]
+    fn stake_stats_handle_extreme_values() {
+        let stakes = [(i64::MAX, i64::MAX), (i64::MAX, i64::MIN), (i64::MIN, 1)];
+        let stats = get_stake_stats(&stakes);
+        assert_eq!(stats.count, 2);
+        assert_eq!(stats.total_staked, i64::MAX);
+        assert_eq!(stats.average_stake, i64::MAX / 2);
+        // Must not panic; result is whatever saturating math yields.
+        let _ = get_stake_weighted_reputation(&stakes);
+        let _ = get_total_staked(&stakes);
+        let _ = get_average_stake(&stakes);
+        let _ = get_average_stake_weighted_reputation(&stakes);
+    }
+
+    #[test]
+    fn top_stakers_handle_extreme_values() {
+        let stakes = [(i64::MAX, i64::MAX), (i64::MAX, i64::MIN), (i64::MIN, 0)];
+        let top = get_top_stakers(&stakes, 2);
+        assert_eq!(top.len(), 2);
+        assert_eq!(top.get(0).unwrap(), (i64::MAX, i64::MAX));
+        assert_eq!(top.get(1).unwrap(), (i64::MAX, i64::MIN));
+    }
+
+    #[test]
+    fn average_by_issuer_handles_extreme_scores() {
+        let env = Env::default();
+        let subject = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let mut a = record(&env, i64::MAX, 1);
+        a.subject = subject.clone();
+        let mut b = record(&env, i64::MAX, 1);
+        b.subject = subject.clone();
+        let mut c = record(&env, i64::MIN, 1);
+        c.subject = subject.clone();
+        let records = [a, b, c];
+        assert_eq!(
+            get_average_reputation_by_issuer(&records, &subject, &issuer),
+            Some(i64::MAX / 3)
+        );
+    }
+
+    #[test]
+    fn top_entities_handle_extreme_scores() {
+        let env = Env::default();
+        let records = [
+            record(&env, i64::MIN, 1),
+            record(&env, i64::MAX, 1),
+            record(&env, 0, 1),
+        ];
+        let top = get_top_entities(&records, 2);
+        assert_eq!(top.len(), 2);
+        assert_eq!(top.get(0).unwrap().score, i64::MAX);
+        assert_eq!(top.get(1).unwrap().score, 0);
+    }
+
+    #[test]
+    fn percentile_helpers_handle_extreme_scores() {
+        let env = Env::default();
+        let records = [
+            record(&env, i64::MIN, 1),
+            record(&env, 0, 1),
+            record(&env, i64::MAX, 1),
+        ];
+        assert_eq!(get_reputation_percentile(&records, i64::MIN), 0);
+        assert_eq!(get_reputation_percentile(&records, i64::MAX), 6_666);
+        assert_eq!(get_percentile_threshold(&records, 0), Some(i64::MIN));
+        assert_eq!(get_percentile_threshold(&records, 10_000), Some(i64::MAX));
+        assert_eq!(get_percentile_threshold(&records, u32::MAX), Some(i64::MAX));
     }
 }

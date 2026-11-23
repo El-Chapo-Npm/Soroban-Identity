@@ -105,6 +105,105 @@ export function unregister(): void {
 }
 
 /**
+ * PWA install prompt support.
+ *
+ * Browsers fire a `beforeinstallprompt` event when the app is installable.
+ * We capture and defer it so the UI can trigger the native install prompt
+ * later (e.g. from a button in the app).
+ */
+
+interface BeforeInstallPromptEvent extends Event {
+  readonly platforms: string[];
+  readonly userChoice: Promise<{
+    outcome: 'accepted' | 'dismissed';
+    platform: string;
+  }>;
+  prompt(): Promise<void>;
+}
+
+type InstallStateListener = (canInstall: boolean) => void;
+
+let deferredPrompt: BeforeInstallPromptEvent | null = null;
+let installInitialized = false;
+const installStateListeners = new Set<InstallStateListener>();
+
+function notifyInstallState(): void {
+  const canInstall = deferredPrompt !== null;
+  installStateListeners.forEach((listener) => {
+    try {
+      listener(canInstall);
+    } catch (err) {
+      console.error('Error in install state listener:', err);
+    }
+  });
+}
+
+/**
+ * Start listening for the `beforeinstallprompt` and `appinstalled` events.
+ * Safe to call multiple times; listeners are only attached once.
+ */
+export function initInstallPrompt(): void {
+  if (installInitialized || typeof window === 'undefined') {
+    return;
+  }
+  installInitialized = true;
+
+  window.addEventListener('beforeinstallprompt', (event: Event) => {
+    // Prevent the mini-infobar from appearing on mobile
+    event.preventDefault();
+    deferredPrompt = event as BeforeInstallPromptEvent;
+    notifyInstallState();
+  });
+
+  window.addEventListener('appinstalled', () => {
+    deferredPrompt = null;
+    notifyInstallState();
+  });
+}
+
+/**
+ * Whether the app can currently be installed (a deferred prompt is available).
+ */
+export function canInstall(): boolean {
+  return deferredPrompt !== null;
+}
+
+/**
+ * Trigger the native install prompt. Resolves to the user's choice outcome,
+ * or null if no prompt is available.
+ */
+export async function install(): Promise<'accepted' | 'dismissed' | null> {
+  if (!deferredPrompt) {
+    return null;
+  }
+
+  const promptEvent = deferredPrompt;
+  // The prompt can only be used once
+  deferredPrompt = null;
+
+  try {
+    await promptEvent.prompt();
+    const choice = await promptEvent.userChoice;
+    notifyInstallState();
+    return choice.outcome;
+  } catch (err) {
+    console.error('Failed to show install prompt:', err);
+    notifyInstallState();
+    return null;
+  }
+}
+
+/**
+ * Subscribe to changes in install availability. Returns an unsubscribe function.
+ */
+export function onInstallStateChange(listener: InstallStateListener): () => void {
+  installStateListeners.add(listener);
+  return () => {
+    installStateListeners.delete(listener);
+  };
+}
+
+/**
  * Request notification permissions and register push notifications for credential expiry
  */
 export async function subscribeToCredentialExpiryPush(): Promise<PushSubscription | null> {

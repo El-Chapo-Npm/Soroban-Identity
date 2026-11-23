@@ -14,11 +14,24 @@ use soroban_sdk::{
 #[derive(Arbitrary, Debug)]
 struct ResolveInput {
     chain_selector: u8,
+    method_selector: u8,
     did: Vec<u8>,
     document: Vec<u8>,
     siblings: Vec<[u8; 32]>,
     on_left: Vec<bool>,
     publish_matching_root: bool,
+    fallback_selector: u8,
+    register_custom_resolver: bool,
+    cache_first: bool,
+}
+
+fn method_name(env: &Env, selector: u8) -> String {
+    match selector % 4 {
+        0 => String::from_str(env, "stellar"),
+        1 => String::from_str(env, "ethr"),
+        2 => String::from_str(env, "web"),
+        _ => String::from_str(env, "custom"),
+    }
 }
 
 fn ascii(env: &Env, bytes: &[u8]) -> String {
@@ -50,6 +63,14 @@ libfuzzer_sys::fuzz_target!(|input: ResolveInput| {
     };
     let _ = client.try_set_chain(&admin, &chain_id, &name, &true);
 
+    let method = method_name(&env, input.method_selector);
+    let _ = client.try_register_did_method(&admin, &method, &true);
+
+    if input.register_custom_resolver {
+        let custom = method_name(&env, input.method_selector.wrapping_add(3));
+        let _ = client.try_register_custom_resolver(&admin, &custom, &resolver);
+    }
+
     let did = ascii(&env, &input.did);
     let document = Bytes::from_slice(&env, &input.document[..input.document.len().min(128)]);
     if input.publish_matching_root {
@@ -68,6 +89,17 @@ libfuzzer_sys::fuzz_target!(|input: ResolveInput| {
         siblings.push_back(BytesN::from_array(&env, sibling));
         on_left.push_back(*left);
     }
+
+    let mut fallback = SorobanVec::new(&env);
+    let fallback_count = (input.fallback_selector % 3) as usize;
+    for i in 0..fallback_count {
+        fallback.push_back(method_name(&env, input.fallback_selector.wrapping_add(i as u8)));
+    }
+
+    if input.cache_first {
+        let _ = client.try_get_cached_did(&chain_id, &did);
+    }
+
     let result = client.try_resolve_external_did(
         &resolver,
         &chain_id,
@@ -75,8 +107,14 @@ libfuzzer_sys::fuzz_target!(|input: ResolveInput| {
         &document,
         &siblings,
         &on_left,
+        &fallback,
     );
+
+    let cached = client.try_get_cached_did(&chain_id, &did);
     if result.is_err() {
-        let _ = client.try_get_cached_did(&chain_id, &did);
+        // A rejected resolution must never create a cache entry.
+        if let Ok(Ok(Some(_))) = cached {
+            panic!("rejected resolution created a cache entry");
+        }
     }
 });

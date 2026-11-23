@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 interface ServiceWorkerState {
   isSupported: boolean;
@@ -35,10 +35,13 @@ export function useServiceWorker() {
           setState((prev) => ({ ...prev, isUpdating: true }));
         });
 
-        // Handle controller change
+        // Reload once when an updated worker takes over. On the very first
+        // install there is no previous controller: clients.claim() fires
+        // controllerchange too, and reloading then would be pointless (#1079).
+        const hadController = Boolean(navigator.serviceWorker.controller);
         let refreshing = false;
         navigator.serviceWorker.addEventListener("controllerchange", () => {
-          if (refreshing) return;
+          if (!hadController || refreshing) return;
           refreshing = true;
           window.location.reload();
         });
@@ -96,8 +99,9 @@ export function useBackgroundSync() {
     const registerSync = async () => {
       try {
         const registration = await navigator.serviceWorker.ready;
-        if (registration.sync) {
-          await registration.sync.register("sync-credentials");
+        const syncReg = registration as unknown as { sync?: { register: (tag: string) => Promise<void> } };
+        if (syncReg.sync) {
+          await syncReg.sync.register("sync-credentials");
         }
       } catch (error) {
         console.error("Background sync registration failed:", error);
@@ -114,6 +118,92 @@ export function useBackgroundSync() {
   return { isSyncing };
 }
 
+interface BeforeInstallPromptEvent extends Event {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
+}
+
+interface InstallPromptState {
+  isInstallable: boolean;
+  isInstalled: boolean;
+}
+
+/**
+ * Hook to manage the PWA install prompt.
+ *
+ * Captures the deferred `beforeinstallprompt` event so the UI can trigger the
+ * native install flow on demand, and tracks whether the app is already running
+ * in standalone (installed) mode.
+ */
+export function useInstallPrompt() {
+  const [state, setState] = useState<InstallPromptState>(() => ({
+    isInstallable: false,
+    isInstalled:
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(display-mode: standalone)").matches,
+  }));
+  const deferredPromptRef = useRef<BeforeInstallPromptEvent | null>(null);
+
+  useEffect(() => {
+    const handleBeforeInstallPrompt = (event: Event) => {
+      // Prevent the mini-infobar from appearing on mobile so we can show our
+      // own install UI instead.
+      event.preventDefault();
+      deferredPromptRef.current = event as BeforeInstallPromptEvent;
+      setState((prev) => ({ ...prev, isInstallable: true }));
+    };
+
+    const handleAppInstalled = () => {
+      deferredPromptRef.current = null;
+      setState({ isInstallable: false, isInstalled: true });
+    };
+
+    const mediaQuery =
+      typeof window.matchMedia === "function"
+        ? window.matchMedia("(display-mode: standalone)")
+        : null;
+    const handleDisplayModeChange = (event: MediaQueryListEvent) => {
+      setState((prev) => ({ ...prev, isInstalled: event.matches }));
+    };
+
+    window.addEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+    window.addEventListener("appinstalled", handleAppInstalled);
+    mediaQuery?.addEventListener("change", handleDisplayModeChange);
+
+    return () => {
+      window.removeEventListener(
+        "beforeinstallprompt",
+        handleBeforeInstallPrompt
+      );
+      window.removeEventListener("appinstalled", handleAppInstalled);
+      mediaQuery?.removeEventListener("change", handleDisplayModeChange);
+    };
+  }, []);
+
+  const promptInstall = async (): Promise<"accepted" | "dismissed" | null> => {
+    const deferredPrompt = deferredPromptRef.current;
+    if (!deferredPrompt) return null;
+
+    try {
+      await deferredPrompt.prompt();
+      const { outcome } = await deferredPrompt.userChoice;
+      // The prompt can only be used once.
+      deferredPromptRef.current = null;
+      setState((prev) => ({ ...prev, isInstallable: false }));
+      return outcome;
+    } catch (error) {
+      console.error("Install prompt failed:", error);
+      return null;
+    }
+  };
+
+  return { ...state, promptInstall };
+}
+
+/** Must match API_CACHE in public/sw.js. */
+export const API_CACHE_NAME = "soroban-identity-api-v2";
+
 /**
  * Hook to cache API responses
  */
@@ -122,9 +212,15 @@ export function useCacheAPI() {
     if (!("caches" in window)) return;
 
     try {
-      const cache = await caches.open("soroban-identity-v1");
-      const responseClone = response.clone();
-      await cache.put(url, responseClone);
+      const cache = await caches.open(API_CACHE_NAME);
+      // The service worker ignores entries without this timestamp.
+      const headers = new Headers(response.headers);
+      headers.set("sw-cached-at", String(Date.now()));
+      const body = await response.clone().blob();
+      await cache.put(
+        url,
+        new Response(body, { status: response.status, statusText: response.statusText, headers })
+      );
     } catch (error) {
       console.error("Failed to cache response:", error);
     }
@@ -134,7 +230,7 @@ export function useCacheAPI() {
     if (!("caches" in window)) return null;
 
     try {
-      const cache = await caches.open("soroban-identity-v1");
+      const cache = await caches.open(API_CACHE_NAME);
       return await cache.match(url);
     } catch (error) {
       console.error("Failed to get cached response:", error);

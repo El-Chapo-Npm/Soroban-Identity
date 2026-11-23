@@ -33,6 +33,24 @@ function isUserRejection(err: unknown): boolean {
   );
 }
 
+/** User-facing message shown when signing is attempted outside a user gesture. */
+export const SIGNING_GESTURE_REQUIRED_MESSAGE =
+  "Please click the button again to open the Freighter signing window.";
+
+/**
+ * Browsers block extension popups that are not opened from a direct user
+ * gesture (click/keypress). Where the User Activation API is available we
+ * check it so signing is only ever started from a click handler's activation
+ * window. When the API is unavailable we cannot tell, so we allow the call.
+ */
+function hasUserGesture(): boolean {
+  if (typeof navigator === "undefined") return true;
+  const activation = (navigator as Navigator & {
+    userActivation?: { isActive: boolean };
+  }).userActivation;
+  return activation ? activation.isActive : true;
+}
+
 /**
  * Handles transaction signing for whichever wallet is currently active.
  * Single responsibility: sign an XDR string and return the signed XDR.
@@ -49,13 +67,20 @@ export function useWalletSigning({
   wcTopicRef,
 }: UseWalletSigningOptions) {
   const [signingError, setSigningError] = useState<string | null>(null);
+  // Set to `true` whenever the most recent attempt was rejected by the user.
+  // Callers must rebuild the transaction (fresh XDR) before retrying rather
+  // than resubmitting the previously rejected XDR, which would broadcast a
+  // duplicate transaction.
+  const [signingRejected, setSigningRejected] = useState(false);
 
   const signTransaction = useCallback(
     async (xdr: string): Promise<string> => {
       if (!state.connected) throw new Error("Wallet not connected");
 
-      // Clear any previous rejection message before each attempt.
+      // Clear any previous rejection message/flag before each attempt so a
+      // stale rejection never leaks into a new signing flow.
       setSigningError(null);
+      setSigningRejected(false);
       setState((s) => ({ ...s, txLoading: true }));
 
       try {
@@ -81,6 +106,13 @@ export function useWalletSigning({
           throw new Error("Freighter not available");
         }
 
+        if (!hasUserGesture()) {
+          // Do not call Freighter: the browser would block the popup and the
+          // user would see no feedback. Ask for a fresh click instead.
+          setSigningError(SIGNING_GESTURE_REQUIRED_MESSAGE);
+          throw new Error(SIGNING_GESTURE_REQUIRED_MESSAGE);
+        }
+
         try {
           return await window.freighter.signTransaction(xdr, {
             networkPassphrase: state.networkPassphrase,
@@ -89,6 +121,9 @@ export function useWalletSigning({
           if (isUserRejection(freighterErr)) {
             // User cancelled — surface a friendly message, keep the panel alive.
             setSigningError("Transaction signing was cancelled.");
+            // Mark the attempt as rejected so callers know they must rebuild
+            // the transaction instead of resubmitting the old XDR.
+            setSigningRejected(true);
             // Return a rejected promise so the caller knows signing did not
             // complete, but do NOT re-throw so the ErrorBoundary is bypassed.
             return Promise.reject(new Error("Transaction signing was cancelled."));
@@ -111,5 +146,15 @@ export function useWalletSigning({
     ]
   );
 
-  return { signTransaction, signingError, clearSigningError: () => setSigningError(null) };
+  const clearSigningError = useCallback(() => {
+    setSigningError(null);
+    setSigningRejected(false);
+  }, []);
+
+  return {
+    signTransaction,
+    signingError,
+    signingRejected,
+    clearSigningError,
+  };
 }

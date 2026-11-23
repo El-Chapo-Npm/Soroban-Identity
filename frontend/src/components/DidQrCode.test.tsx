@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { axe } from 'vitest-axe';
 import DidQrCode, { buildDid, qrFileName } from './DidQrCode';
 
 const ADDRESS = 'GABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVW';
@@ -134,6 +135,12 @@ describe('DidQrCode', () => {
     expect(dialog.getAttribute('aria-modal')).toBe('true');
     expect(dialog.getAttribute('aria-labelledby')).toBe('did-qr-title');
     expect(screen.getByRole('button', { name: /close qr code dialog/i })).toBeTruthy();
+  });
+
+  it('has no axe-core WCAG violations in modal mode', async () => {
+    const { container } = render(<DidQrCode address={ADDRESS} asModal onClose={() => {}} />);
+
+    expect((await axe(container)).violations).toHaveLength(0);
   });
 
   it('moves focus to the close button when the modal opens', async () => {

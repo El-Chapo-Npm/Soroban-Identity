@@ -11,7 +11,8 @@
     "identity": "身份 (DID)",
     "credentials": "凭证",
     "issuerAnalytics": "发证方分析",
-    "label": "导航"
+    "label": "导航",
+    "connectedAccounts": "关联账户"
   },
   "wallet": {
     "connect": "连接钱包",
@@ -165,5 +166,39 @@
     "toggleTheme": "切换主题",
     "showHelp": "显示快捷键",
     "closeDialog": "关闭对话框或弹窗"
+  },
+  "accounts": {
+    "title": "关联账户",
+    "description": "关联并管理 GitHub 和已验证的电子邮件身份。",
+    "connectWallet": "连接钱包以管理关联账户。",
+    "authenticateDescription": "验证钱包所有权以安全管理关联账户。钱包会要求你签署一次性挑战。",
+    "authenticate": "验证钱包",
+    "authenticating": "正在验证钱包…",
+    "loading": "正在加载关联账户…",
+    "error": "发生错误，请重试。",
+    "github": "GitHub",
+    "email": "电子邮件",
+    "notLinked": "未关联",
+    "linkedAs": "已连接为 {{account}}",
+    "verified": "已验证",
+    "unlink": "解除关联",
+    "unlinkConfirm": "确定要解除 {{provider}} 账户关联吗？此操作无法撤销。",
+    "unlinked": "账户已解除关联。",
+    "linkGithub": "关联 GitHub",
+    "openingGithub": "正在打开 GitHub…",
+    "githubLinked": "GitHub 账户已关联。",
+    "popupBlocked": "浏览器阻止了授权弹窗。请允许弹窗后重试。",
+    "emailLabel": "电子邮件地址",
+    "sendVerification": "发送验证邮件",
+    "sending": "正在发送…",
+    "emailSent": "如果该地址可以关联，验证邮件已发送。",
+    "emailConfirmed": "电子邮件已验证并关联。",
+    "confirmEmail": "确认电子邮件关联",
+    "confirmDescription": "此链接中包含验证令牌。请先确认，再提交令牌以关联电子邮件。",
+    "confirming": "正在确认…",
+    "dismiss": "暂不",
+    "sessionExpiry": "钱包会话将于 {{expiry}} 过期。",
+    "walletChanged": "验证期间连接的钱包已更改，请重新开始。",
+    "networkMismatch": "该挑战属于其他 Stellar 网络。请切换网络后重试。"
   }
 }

@@ -84,6 +84,12 @@ interface VirtualizedListProps<T> {
   onScroll?: (scrollTop: number) => void;
   overscan?: number;
   estimatedItemHeight?: number;
+  /** Callback to load the next page of items (#1323). */
+  onLoadMore?: () => void | Promise<void>;
+  /** Whether another page of items is available (#1323). */
+  hasNextPage?: boolean;
+  /** Distance from the bottom (px) at which to trigger onLoadMore (#1323). */
+  loadMoreThreshold?: number;
 }
 
 export function VirtualizedList<T>({
@@ -95,10 +101,24 @@ export function VirtualizedList<T>({
   onScroll,
   overscan = 3,
   estimatedItemHeight = 80,
+  onLoadMore,
+  hasNextPage = false,
+  loadMoreThreshold = 200,
 }: VirtualizedListProps<T>) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const prefersReducedMotion = usePrefersReducedMotion();
+
+  // Guard against duplicate load-more requests while a fetch is in flight (#1323).
+  const isLoadingRef = useRef(false);
+  // Keep the latest callback/state in refs so the scroll handler stays stable.
+  const onLoadMoreRef = useRef(onLoadMore);
+  const hasNextPageRef = useRef(hasNextPage);
+  useEffect(() => {
+    onLoadMoreRef.current = onLoadMore;
+    hasNextPageRef.current = hasNextPage;
+  }, [onLoadMore, hasNextPage]);
+=======
 
   useListAnimationStyles();
 
@@ -154,10 +174,32 @@ export function VirtualizedList<T>({
     return { startIndex: start, endIndex: end, offsetY };
   }, [scrollTop, items.length, offsets, itemHeights, containerHeight, overscan, estimatedItemHeight]);
 
+  const maybeLoadMore = (scrollTopValue: number) => {
+    const loadMore = onLoadMoreRef.current;
+    if (!loadMore) return;
+    if (isLoadingRef.current) return;
+    if (!hasNextPageRef.current) return;
+
+    const distanceFromBottom =
+      totalHeight - (scrollTopValue + containerHeight);
+    if (distanceFromBottom > loadMoreThreshold) return;
+
+    isLoadingRef.current = true;
+    Promise.resolve()
+      .then(() => loadMore())
+      .catch(() => {
+        // Swallow errors here; the caller is responsible for surfacing them.
+      })
+      .finally(() => {
+        isLoadingRef.current = false;
+      });
+  };
+
   const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const newScrollTop = (e.target as HTMLDivElement).scrollTop;
     setScrollTop(newScrollTop);
     onScroll?.(newScrollTop);
+    maybeLoadMore(newScrollTop);
   };
 
   const visibleItems = items.slice(startIndex, endIndex);

@@ -1,4 +1,4 @@
-import type { Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 
 /** Valid ed25519 StrKey. Display and SDK parsing only; no matching secret is used. */
 export const FREIGHTER_PUBLIC_KEY =
@@ -25,6 +25,13 @@ export async function installFreighter(page: Page, opts?: { connected?: boolean;
     },
     { publicKey: FREIGHTER_PUBLIC_KEY, connected, passphrase },
   );
+}
+
+/** Connect the mocked Freighter wallet through the picker and wait for the account. */
+export async function connectFreighter(page: Page) {
+  await page.getByRole("button", { name: "Connect Freighter wallet" }).click();
+  await page.getByRole("button", { name: "🪐 Freighter" }).click();
+  await expect(page.getByText("via Freighter")).toBeVisible();
 }
 
 /** Soroban RPC stub. Health succeeds. Every other method fails in a structured way. */

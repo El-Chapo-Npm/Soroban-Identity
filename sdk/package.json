@@ -24,6 +24,7 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
+    "test:integration": "vitest run src/integration",
     "type-check": "tsc --noEmit",
     "lint": "eslint src --max-warnings 0",
     "format:check": "prettier --check \"src/**/*.ts\""

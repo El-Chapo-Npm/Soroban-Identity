@@ -31,6 +31,13 @@ export const RATE_LIMIT_TIERS = {
     writeLimit: 500,
     maxRequests: 1200,
   },
+  issuer: {
+    name: 'issuer',
+    windowMs: 60 * 1000,
+    readLimit: 1000,
+    writeLimit: 1000,
+    maxRequests: 1000,
+  },
 };
 
 /**
@@ -270,6 +277,9 @@ export class TieredRateLimiter {
    * budget. Denials are logged so violations are visible in the access log.
    */
   check(req, pathname) {
+    if (String((req ?? request)?.method ?? "").toUpperCase() === "OPTIONS") {
+      return { allowed: true, whitelisted: true, bypass: "cors_preflight", scope: "preflight" };
+    }
     const ip = this.resolveIp(req);
 
     if (isWhitelisted(ip, this.whitelist)) {

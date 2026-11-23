@@ -11,7 +11,8 @@
     "identity": "Identidad (DID)",
     "credentials": "Credenciales",
     "issuerAnalytics": "Analíticas del Emisor",
-    "label": "Secciones"
+    "label": "Secciones",
+    "connectedAccounts": "Cuentas conectadas"
   },
   "wallet": {
     "connect": "Conectar Billetera",
@@ -157,5 +158,39 @@
     "toggleTheme": "Cambiar tema",
     "showHelp": "Mostrar atajos de teclado",
     "closeDialog": "Cerrar diálogo o modal"
+  },
+  "accounts": {
+    "title": "Cuentas conectadas",
+    "description": "Vincula y administra tus identidades de GitHub y correo verificado.",
+    "connectWallet": "Conecta una billetera para administrar las cuentas vinculadas.",
+    "authenticateDescription": "Verifica la propiedad de la billetera para administrar las cuentas. La billetera te pedirá firmar un desafío de un solo uso.",
+    "authenticate": "Verificar billetera",
+    "authenticating": "Verificando billetera…",
+    "loading": "Cargando cuentas vinculadas…",
+    "error": "Ocurrió un error. Inténtalo de nuevo.",
+    "github": "GitHub",
+    "email": "Correo electrónico",
+    "notLinked": "No vinculado",
+    "linkedAs": "Conectado como {{account}}",
+    "verified": "Verificado",
+    "unlink": "Desvincular",
+    "unlinkConfirm": "¿Desvincular tu cuenta de {{provider}}? Esta acción no se puede deshacer.",
+    "unlinked": "Cuenta desvinculada.",
+    "linkGithub": "Vincular GitHub",
+    "openingGithub": "Abriendo GitHub…",
+    "githubLinked": "Cuenta de GitHub vinculada.",
+    "popupBlocked": "El navegador bloqueó la ventana de autorización. Permite las ventanas emergentes e inténtalo de nuevo.",
+    "emailLabel": "Correo electrónico",
+    "sendVerification": "Enviar correo de verificación",
+    "sending": "Enviando…",
+    "emailSent": "Si se puede vincular la dirección, se ha enviado un correo de verificación.",
+    "emailConfirmed": "Correo verificado y vinculado.",
+    "confirmEmail": "Confirmar vínculo de correo",
+    "confirmDescription": "Este enlace contiene un token de verificación. Confirma antes de enviarlo para vincular tu correo.",
+    "confirming": "Confirmando…",
+    "dismiss": "Ahora no",
+    "sessionExpiry": "La sesión de billetera vence {{expiry}}.",
+    "walletChanged": "La billetera conectada cambió durante la verificación. Inicia el proceso de nuevo.",
+    "networkMismatch": "El desafío corresponde a otra red de Stellar. Cambia de red e inténtalo de nuevo."
   }
 }

@@ -66,6 +66,12 @@ export const DEFAULT_RECONNECT_DELAY_MS = 3_000;
 /** Maximum backoff delay (ms) between reconnect attempts. */
 export const MAX_RECONNECT_DELAY_MS = 30_000;
 
+/** Base reconnect delay (ms) for exponential backoff. */
+export const RECONNECT_BASE_MS = DEFAULT_RECONNECT_DELAY_MS;
+
+/** Maximum reconnect delay (ms) for exponential backoff. */
+export const RECONNECT_MAX_MS = MAX_RECONNECT_DELAY_MS;
+
 export interface PresenceClientOptions {
   url: string;
   userId: string;
@@ -107,6 +113,8 @@ export class PresenceClient {
   private isOffline = false;
   private closed = false;
   private currentResourceId: string | null = null;
+  private readonly handleOnlineBound = () => this.handleOnline();
+  private readonly handleOfflineBound = () => this.handleOffline();
 
   private readonly handleOnline = (): void => {
     if (this.closed) return;
@@ -163,8 +171,18 @@ export class PresenceClient {
       return;
     }
     this.clearReconnectTimer();
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      this.setConnection('disconnected');
+      return;
+    }
     this.setConnection('connecting');
-    const socket = this.socketFactory(this.options.url);
+    let socket: WebSocket;
+    try {
+      socket = this.socketFactory(this.options.url);
+    } catch {
+      this.handleDrop();
+      return;
+    }
     this.socket = socket;
 
     socket.onopen = () => {
@@ -245,6 +263,22 @@ export class PresenceClient {
     this.locks = new Map();
     this.setConnection('disconnected');
     this.connect();
+  }
+
+  private handleOnline(): void {
+    if (this.closed) return;
+    this.isOffline = false;
+    this.handleNetworkChange();
+  }
+
+  private handleOffline(): void {
+    if (this.closed) return;
+    this.isOffline = true;
+    this.clearReconnectTimer();
+    this.teardownSocket();
+    this.collaborators = new Map();
+    this.locks = new Map();
+    this.setConnection('disconnected');
   }
 
   private handleMessage(raw: unknown): void {
@@ -336,6 +370,9 @@ export class PresenceClient {
       this.reconnectTimer !== null ||
       this.reconnectAttempts >= this.maxReconnectAttempts
     ) {
+      return;
+    }
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
       return;
     }
     this.reconnectAttempts += 1;

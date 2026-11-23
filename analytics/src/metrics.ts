@@ -47,7 +47,29 @@ export interface Summary {
   issuedByType: Array<{ type: string; issued: number }>;
   /** Daily verifications, split by where they were observed. */
   verificationsDaily: Array<{ t: number; onchain: number; reported: number }>;
-  verificationOutcomes: { valid: number; invalid: number; unknown: number; reasons: Record<string, number> };
+  /** Daily verification outcomes with success/failure rate for charting. */
+  verificationDailyOutcomes: Array<{
+    t: number;
+    valid: number;
+    invalid: number;
+    unknown: number;
+    total: number;
+    /** valid / (valid + invalid), 0 when no decided outcomes. */
+    successRate: number;
+    /** invalid / (valid + invalid), 0 when no decided outcomes. */
+    failureRate: number;
+  }>;
+  verificationOutcomes: {
+    valid: number;
+    invalid: number;
+    unknown: number;
+    total: number;
+    /** valid / (valid + invalid), 0 when no decided outcomes. */
+    successRate: number;
+    /** invalid / (valid + invalid), 0 when no decided outcomes. */
+    failureRate: number;
+    reasons: Record<string, number>;
+  };
   geography: {
     countries: Array<{ country: string; dids: number }>;
     withCountry: number;
@@ -171,6 +193,9 @@ export function computeSummary(data: StoreData, now = Date.now()): Summary {
   let valid = 0;
   let invalid = 0;
   let unknown = 0;
+  const validPerDay = countBy(data.verifications.filter((v) => v.valid === true), (v) => floorTo(v.ts, DAY));
+  const invalidPerDay = countBy(data.verifications.filter((v) => v.valid === false), (v) => floorTo(v.ts, DAY));
+  const unknownPerDay = countBy(data.verifications.filter((v) => v.valid == null), (v) => floorTo(v.ts, DAY));
   for (const v of data.verifications) {
     if (v.valid === true) valid++;
     else if (v.valid === false) {
@@ -179,6 +204,24 @@ export function computeSummary(data: StoreData, now = Date.now()): Summary {
       reasons[r] = (reasons[r] ?? 0) + 1;
     } else unknown++;
   }
+  const decided = valid + invalid;
+  const successRate = decided > 0 ? valid / decided : 0;
+  const failureRate = decided > 0 ? invalid / decided : 0;
+  const verificationDailyOutcomes = dayBuckets.map((t) => {
+    const dayValid = validPerDay.get(t) ?? 0;
+    const dayInvalid = invalidPerDay.get(t) ?? 0;
+    const dayUnknown = unknownPerDay.get(t) ?? 0;
+    const dayDecided = dayValid + dayInvalid;
+    return {
+      t,
+      valid: dayValid,
+      invalid: dayInvalid,
+      unknown: dayUnknown,
+      total: dayValid + dayInvalid + dayUnknown,
+      successRate: dayDecided > 0 ? dayValid / dayDecided : 0,
+      failureRate: dayDecided > 0 ? dayInvalid / dayDecided : 0,
+    };
+  });
 
   // ── Geography ───────────────────────────────────────────────────────────────
   const perCountry = new Map<string, number>();
@@ -222,7 +265,8 @@ export function computeSummary(data: StoreData, now = Date.now()): Summary {
       .map(([type, n]) => ({ type, issued: n }))
       .sort((a, b) => b.issued - a.issued),
     verificationsDaily,
-    verificationOutcomes: { valid, invalid, unknown, reasons },
+    verificationDailyOutcomes,
+    verificationOutcomes: { valid, invalid, unknown, total: valid + invalid + unknown, successRate, failureRate, reasons },
     geography: {
       countries: [...perCountry.entries()]
         .map(([country, dids]) => ({ country, dids }))

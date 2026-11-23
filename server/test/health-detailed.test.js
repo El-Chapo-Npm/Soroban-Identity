@@ -7,6 +7,7 @@ import {
   STATUS,
   aggregateStatus,
   checkContracts,
+  checkDatabase,
   checkRedis,
   checkRpc,
   checkStorage,
@@ -126,6 +127,28 @@ test('checkRedis pings a configured client', async () => {
   assert.equal(result.response, 'PONG');
 });
 
+test('checkDatabase reports disabled when no database is configured', async () => {
+  const config = await makeConfig();
+  const result = await checkDatabase(config, null);
+
+  assert.equal(result.status, STATUS.DISABLED);
+  assert.match(result.reason, /DATABASE_URL/);
+});
+
+test('checkDatabase runs SELECT 1 on a configured client', async () => {
+  const config = await makeConfig({ databaseUrl: 'postgres://localhost/soroban' });
+  const queries = [];
+  const result = await checkDatabase(config, {
+    query: async (sql) => {
+      queries.push(sql);
+      return { rows: [{ '?column?': 1 }] };
+    },
+  });
+
+  assert.equal(result.status, STATUS.UP);
+  assert.deepEqual(queries, ['SELECT 1']);
+});
+
 test('aggregateStatus ignores disabled dependencies', () => {
   assert.equal(
     aggregateStatus([{ status: STATUS.UP }, { status: STATUS.DISABLED }]),
@@ -169,10 +192,14 @@ test('collectHealth reports every dependency with version and uptime', async () 
 
     assert.deepEqual(Object.keys(health.dependencies).sort(), [
       'contracts',
+      'database',
+      'eventStore',
+      'readReplicas',
       'redis',
       'rpc',
       'storage',
     ]);
+    assert.equal(health.dependencies.database.status, STATUS.DISABLED);
     assert.equal(health.dependencies.redis.status, STATUS.DISABLED);
     for (const dependency of Object.values(health.dependencies)) {
       assert.ok(Number.isInteger(dependency.latencyMs));
@@ -229,6 +256,7 @@ test('a hung dependency times out instead of stalling the whole report', async (
   const config = await makeConfig({ healthProbeTimeoutMs: 50 });
   const originalFetch = globalThis.fetch;
   globalThis.fetch = () => new Promise(() => {});
+  const keepAlive = setInterval(() => {}, 10);
 
   try {
     const started = Date.now();
@@ -242,11 +270,33 @@ test('a hung dependency times out instead of stalling the whole report', async (
     assert.match(health.dependencies.rpc.error, /timed out/);
     assert.ok(Date.now() - started < 2000);
   } finally {
+    clearInterval(keepAlive);
     globalThis.fetch = originalFetch;
   }
 });
 
-test('collectReadiness gates only on storage and RPC', async () => {
+test('collectHealth marks the service unhealthy when the database is down', async () => {
+  const config = await makeConfig({ databaseUrl: 'postgres://localhost/soroban' });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = okRpc();
+
+  try {
+    const health = await collectHealth({
+      config,
+      soroban: sorobanStub({ identity: true, credential: true, reputation: true }),
+      dbClient: { query: async () => { throw new Error('ECONNREFUSED'); } },
+      version: '1.0.0',
+    });
+
+    assert.equal(health.status, 'unhealthy');
+    assert.equal(health.dependencies.database.status, STATUS.DOWN);
+    assert.match(health.dependencies.database.error, /ECONNREFUSED/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('collectReadiness gates on storage, RPC and a configured database', async () => {
   const config = await makeConfig();
   const originalFetch = globalThis.fetch;
   globalThis.fetch = okRpc();
@@ -260,7 +310,14 @@ test('collectReadiness gates only on storage and RPC', async () => {
     });
 
     assert.equal(readiness.ready, true);
-    assert.deepEqual(Object.keys(readiness.checks).sort(), ['rpc', 'storage']);
+    assert.deepEqual(Object.keys(readiness.checks).sort(), [
+      'database',
+      'eventStore',
+      'readReplicas',
+      'rpc',
+      'storage',
+    ]);
+    assert.equal(readiness.checks.database.status, STATUS.DISABLED);
     assert.equal(readiness.failing, undefined);
   } finally {
     globalThis.fetch = originalFetch;
@@ -281,6 +338,26 @@ test('collectReadiness reports not ready and names the failing dependency', asyn
 
     assert.equal(readiness.ready, false);
     assert.deepEqual(readiness.failing, ['rpc']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('collectReadiness reports not ready when a configured database is down', async () => {
+  const config = await makeConfig({ databaseUrl: 'postgres://localhost/soroban' });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = okRpc();
+
+  try {
+    const readiness = await collectReadiness({
+      config,
+      soroban: sorobanStub({ identity: true, credential: true, reputation: true }),
+      dbClient: { query: async () => { throw new Error('database unavailable'); } },
+      version: '1.0.0',
+    });
+
+    assert.equal(readiness.ready, false);
+    assert.deepEqual(readiness.failing, ['database']);
   } finally {
     globalThis.fetch = originalFetch;
   }

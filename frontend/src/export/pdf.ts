@@ -160,6 +160,15 @@ const COMPARISON_ACCENT = "#4f46e5";
 const COMPARISON_DIFF_BG = "#fef3c7";
 const COMPARISON_ALT_BG = "#f8fafc";
 
+const DEFAULT_COMPARISON_TEMPLATE: ExportTemplate = {
+  id: "comparison",
+  name: "Comparison Template",
+  title: "Credential comparison",
+  accentColor: COMPARISON_ACCENT,
+  fields: [],
+  includeQr: false,
+};
+
 function normalizeValue(value: string): string {
   return value.trim().toLowerCase();
 }
@@ -210,6 +219,8 @@ export function buildComparisonRows(input: ComparisonInput): ComparisonRow[] {
     "Verification",
     credentials.map((_, i) => verificationStatuses[i] ?? "Unverified")
   );
+  // Expiry and issuance dates are compared as normalized ISO dates so that
+  // differing timezones or formats do not produce false positives.
   push(
     "expiresAt",
     "Expiry date",
@@ -229,8 +240,8 @@ export function buildComparisonRows(input: ComparisonInput): ComparisonRow[] {
   for (const key of Array.from(claimKeys).sort()) {
     push(
       key,
-      DEFAULT_FIELD_LABELS[key] ?? key,
-      credentials.map((c) => fieldValue(c, key) || "—")
+      (DEFAULT_FIELD_LABELS as Record<string, string>)[key] ?? key,
+      credentials.map((c) => c.claims?.[key] || "—")
     );
   }
 
@@ -272,7 +283,7 @@ function drawComparison(
     doc.text("ATTRIBUTE", PAGE_MARGIN + 6, y + 3);
     credentials.forEach((cred, i) => {
       const x = PAGE_MARGIN + labelWidth + columnWidth * i + 6;
-      const title = fieldValue(cred, "name") || fieldValue(cred, "id") || `Credential ${i + 1}`;
+      const title = cred.claims?.["name"] || fieldValue(cred, "id") || `Credential ${i + 1}`;
       doc.text(doc.splitTextToSize(title, columnWidth - 12)[0], x, y + 3);
     });
     y += 22;
@@ -293,7 +304,12 @@ function drawComparison(
     }
 
     if (row.differs) {
+      // Highlight the whole row (including the attribute label) so the
+      // difference is visible in both the PDF and the PNG export.
       doc.setFillColor(COMPARISON_DIFF_BG);
+      doc.rect(PAGE_MARGIN, y - 12, contentWidth, rowHeight, "F");
+    } else if (rows.indexOf(row) % 2 === 1) {
+      doc.setFillColor(COMPARISON_ALT_BG);
       doc.rect(PAGE_MARGIN, y - 12, contentWidth, rowHeight, "F");
     }
 
@@ -310,6 +326,14 @@ function drawComparison(
       doc.text(lines, x, y);
     });
 
+    // Emphasize the attribute label of differing rows.
+    if (row.differs) {
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(9);
+      doc.setTextColor("#92400e");
+      doc.text(doc.splitTextToSize(row.label, labelWidth - 12), PAGE_MARGIN + 6, y);
+    }
+
     y += rowHeight;
     doc.setDrawColor("#e2e8f0");
     doc.line(PAGE_MARGIN, y - 12, pageWidth - PAGE_MARGIN, y - 12);
@@ -325,11 +349,24 @@ function drawComparison(
   );
 }
 
+const MIN_COMPARISON_CREDENTIALS = 2;
+const MAX_COMPARISON_CREDENTIALS = 4;
+
+function assertComparable(input: ComparisonInput): void {
+  const count = input.credentials.length;
+  if (count < MIN_COMPARISON_CREDENTIALS || count > MAX_COMPARISON_CREDENTIALS) {
+    throw new Error(
+      `Comparison requires between ${MIN_COMPARISON_CREDENTIALS} and ${MAX_COMPARISON_CREDENTIALS} credentials (received ${count}).`
+    );
+  }
+}
+
 /** Build a side-by-side comparison PDF for 2-4 credentials. */
 export function comparisonToPdf(
   input: ComparisonInput,
-  template: ExportTemplate = { title: "Credential comparison", accentColor: COMPARISON_ACCENT, fields: [] }
+  template: ExportTemplate = DEFAULT_COMPARISON_TEMPLATE
 ): Blob {
+  assertComparable(input);
   const doc = new jsPDF({ unit: "pt", format: "a4" });
   doc.setProperties({
     title: template.title || "Credential comparison",
@@ -343,8 +380,9 @@ export function comparisonToPdf(
 /** Build a PNG image of the side-by-side comparison table. */
 export function comparisonToImage(
   input: ComparisonInput,
-  template: ExportTemplate = { title: "Credential comparison", accentColor: COMPARISON_ACCENT, fields: [] }
+  template: ExportTemplate = DEFAULT_COMPARISON_TEMPLATE
 ): Blob {
+  assertComparable(input);
   const doc = new jsPDF({ unit: "pt", format: "a4" });
   drawComparison(doc, input, template);
   const dataUrl = doc.output("datauristring");
@@ -361,7 +399,41 @@ export function downloadComparisonPdf(
   filename = "credential-comparison.pdf",
   template?: ExportTemplate
 ): void {
-  downloadFile(comparisonToPdf(input, template), filename);
+  downloadFile({
+    data: comparisonToPdf(input, template),
+    filename,
+    mimeType: "application/pdf",
+  });
+}
+
+/**
+ * Build a shareable comparison link. The credential ids are encoded in the
+ * query string so the comparison view can be restored from the URL.
+ */
+export function buildComparisonLink(
+  input: ComparisonInput,
+  baseUrl?: string
+): string {
+  const origin =
+    baseUrl ??
+    (typeof window !== "undefined" && window.location
+      ? `${window.location.origin}${window.location.pathname}`
+      : "");
+  const params = new URLSearchParams();
+  params.set("compare", input.credentials.map((c) => c.id).join(","));
+  return `${origin}?${params.toString()}`;
+}
+
+/** Copy a shareable comparison link to the clipboard. */
+export async function copyComparisonLink(
+  input: ComparisonInput,
+  baseUrl?: string
+): Promise<string> {
+  const link = buildComparisonLink(input, baseUrl);
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(link);
+  }
+  return link;
 }
 
 /** Export the comparison as a PNG image and trigger a download. */
@@ -370,5 +442,17 @@ export function downloadComparisonImage(
   filename = "credential-comparison.png",
   template?: ExportTemplate
 ): void {
-  downloadFile(comparisonToImage(input, template), filename);
+  downloadFile({
+    data: comparisonToImage(input, template),
+    filename,
+    mimeType: "image/png",
+  });
+}
+
+export function exportToPdf(input: any, filename = "credential-comparison.pdf"): void {
+  downloadComparisonPdf(input, filename);
+}
+
+export function exportToPng(input: any, filename = "credential-comparison.png"): void {
+  downloadComparisonImage(input, filename);
 }

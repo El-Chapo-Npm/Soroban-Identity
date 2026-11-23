@@ -19,6 +19,9 @@
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 
+// Force UTC so any timestamps produced or forwarded by this worker are UTC.
+process.env.TZ = process.env.TZ || 'UTC';
+
 const DEFAULT_TIMEOUT_MS = 10000;
 
 const rl = createInterface({ input: process.stdin, terminal: false });
@@ -41,7 +44,9 @@ rl.on('line', async (line) => {
 });
 
 function reply(obj) {
-  process.stdout.write(JSON.stringify(obj) + '\n');
+  // Include a UTC timestamp (ISO 8601) alongside the response payload.
+  const payload = { ...obj, timestamp: new Date().toISOString() };
+  process.stdout.write(JSON.stringify(payload) + '\n');
 }
 
 function runCommand(command, args, timeoutMs) {
