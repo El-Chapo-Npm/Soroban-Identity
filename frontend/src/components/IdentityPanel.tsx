@@ -847,6 +847,8 @@ export default function IdentityPanel() {
           </div>
         )}
 
+        {resolvedAddress && <AuditLogViewer did={`did:stellar:${resolvedAddress}`} />}
+
         {resolvedDoc?.metadata && Object.keys(resolvedDoc.metadata).length > 0 && (
           <div
             className="card"
