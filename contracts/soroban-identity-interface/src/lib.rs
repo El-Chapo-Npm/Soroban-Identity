@@ -36,15 +36,16 @@ pub use reputation_trait::ReputationInterface;
 // dependencies on `identity-registry` / `credential-manager` / `reputation`
 // just to name the types in those trait signatures.
 pub use identity_registry::{
-    ContractError as IdentityRegistryError, DidDocument, IdentityStorageStats, ServiceEndpoint,
+    ContractError as IdentityRegistryError, DidDocument, DidMethod, DidResolutionResult,
+    IdentityStorageStats, ResolverMethod, ResolverPlugin, ServiceEndpoint,
 };
 
 pub use credential_manager::{
-    Credential, CredentialIdsPage, CredentialStorageStats, CredentialTypeDescriptor,
-    CredentialType, ContractError as CredentialManagerError, IssuersPage,
+    ContractError as CredentialManagerError, Credential, CredentialIdsPage, CredentialStorageStats,
+    CredentialType, CredentialTypeDescriptor, IssuersPage,
 };
 
 pub use reputation::{
-    ContractError as ReputationError, DecayConfig, DecayMode, ReportersPage, ReputationRecord,
-    ReputationStorageStats, ScoreEntriesPage, ScoreEntry,
+    ContractError as ReputationError, DecayAlgorithm, DecayConfig, DecayMode, DecayParameters,
+    ReportersPage, ReputationRecord, ReputationStorageStats, ScoreEntriesPage, ScoreEntry,
 };

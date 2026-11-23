@@ -47,7 +47,9 @@ export function withRequestLogging(handler, log = logger) {
         method: req.method,
         url: sanitizeString(req.url ?? ''),
         status: res.statusCode,
+        latencyMs: Date.now() - start,
         durationMs: Date.now() - start,
+        did: extractDid(req),
         headers: sanitizeHeaders(req.headers),
       });
     });
@@ -65,7 +67,39 @@ export function getRequestLogFields(store = requestContextStore.getStore()) {
     ...(store.correlationId ? { correlationId: store.correlationId } : {}),
     ...(store.traceId ? { traceId: store.traceId } : {}),
     ...(store.spanId ? { spanId: store.spanId } : {}),
+    ...(store.did ? { did: store.did } : {}),
+    ...(typeof store.latencyMs === 'number' ? { latencyMs: store.latencyMs } : {}),
   };
+}
+
+/**
+ * Extract a DID from route params (e.g. /identity/:did) or a raw path.
+ * Returns undefined when no DID is present.
+ */
+export function extractDid(req) {
+  const fromParams = req?.params?.did;
+  if (typeof fromParams === 'string' && fromParams) return fromParams;
+  const path = req?.path ?? req?.url ?? '';
+  const match = /\/identity\/([^/?#]+)/.exec(path);
+  return match ? decodeURIComponent(match[1]) : undefined;
+}
+
+/**
+ * Build a request-scoped child logger carrying requestId, did and latencyMs.
+ * Latency is computed from the supplied start time (defaults to now).
+ */
+export function createRequestLogger(req, { start = Date.now(), bindings = {} } = {}) {
+  const requestId = req?.id ?? req?.requestId ?? req?.headers?.['x-request-id'];
+  const did = extractDid(req);
+  return logger.child({
+    ...(requestId ? { requestId } : {}),
+    ...(did ? { did } : {}),
+    ...bindings,
+  }).child({
+    get latencyMs() {
+      return Date.now() - start;
+    },
+  });
 }
 
 /**
@@ -89,8 +123,20 @@ function createLogger() {
     timestamp: pino.stdTimeFunctions.isoTime,
     base: undefined, // Remove default pid/hostname
     mixin() {
-      // Inject requestId and correlationId (#946) from the request context
+      // Inject requestId, correlationId (#946), did and latencyMs from the request context
       return getRequestLogFields();
+    },
+    redact: {
+      paths: [
+        'req.headers.authorization',
+        'req.headers.cookie',
+        '*.password',
+        '*.secret',
+        '*.token',
+        '*.apiKey',
+        '*.privateKey',
+      ],
+      censor: REDACTED,
     },
   });
 }

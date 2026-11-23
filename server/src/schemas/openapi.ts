@@ -19,7 +19,10 @@ export interface OpenApiDocument {
   openapi: string;
   info: { title: string; version: string; description?: string };
   paths: Record<string, unknown>;
-  components: { schemas: Record<string, unknown> };
+  components: {
+    schemas: Record<string, unknown>;
+    securitySchemes: Record<string, unknown>;
+  };
 }
 
 const toSchema = (schema: z.ZodTypeAny, name: string): Record<string, unknown> =>
@@ -60,6 +63,7 @@ export function generateOpenApiSpec(version = '1.0.0'): OpenApiDocument {
       '/reputation/submit-score': {
         post: {
           operationId: 'submitScore',
+          security: [{ BearerAuth: [] }],
           requestBody: jsonBody(SubmitScoreRequestSchema, 'SubmitScoreRequest'),
           responses: {
             '200': jsonResponse(SubmitScoreResponseSchema, 'SubmitScoreResponse', 'Score submitted'),
@@ -92,6 +96,13 @@ export function generateOpenApiSpec(version = '1.0.0'): OpenApiDocument {
         GetReputationRequest: toSchema(GetReputationRequestSchema, 'GetReputationRequest'),
         GetReputationResponse: toSchema(GetReputationResponseSchema, 'GetReputationResponse'),
         ErrorResponse: toSchema(ErrorResponseSchema, 'ErrorResponse'),
+      },
+      securitySchemes: {
+        BearerAuth: {
+          type: 'http',
+          scheme: 'bearer',
+          bearerFormat: 'JWT',
+        },
       },
     },
   };

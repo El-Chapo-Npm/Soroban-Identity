@@ -12,7 +12,9 @@
     "credentials": "Credentials",
     "issuerAnalytics": "Issuer Analytics",
     "networkStatistics": "Network Statistics",
-    "label": "Sections"
+    "activityFeed": "Activity Feed",
+    "label": "Sections",
+    "connectedAccounts": "Connected Accounts"
   },
   "networkStatistics": {
     "title": "Network Statistics",
@@ -295,5 +297,39 @@
     "unavailableHint": "Please use a supported browser to use voice commands.",
     "noSpeechDetected": "No speech was detected. Please try again.",
     "visualFeedback": "Voice input active"
+  },
+  "accounts": {
+    "title": "Connected accounts",
+    "description": "Link and manage your GitHub and verified email identities.",
+    "connectWallet": "Connect a wallet to manage linked accounts.",
+    "authenticateDescription": "Verify wallet ownership to securely manage linked accounts. Your wallet will ask you to sign a one-time challenge.",
+    "authenticate": "Verify wallet",
+    "authenticating": "Verifying wallet…",
+    "loading": "Loading linked accounts…",
+    "error": "Something went wrong. Please try again.",
+    "github": "GitHub",
+    "email": "Email",
+    "notLinked": "Not linked",
+    "linkedAs": "Connected as {{account}}",
+    "verified": "Verified",
+    "unlink": "Unlink",
+    "unlinkConfirm": "Unlink your {{provider}} account? This cannot be undone.",
+    "unlinked": "Account unlinked.",
+    "linkGithub": "Link GitHub",
+    "openingGithub": "Opening GitHub…",
+    "githubLinked": "GitHub account linked.",
+    "popupBlocked": "Your browser blocked the authorization popup. Allow popups and try again.",
+    "emailLabel": "Email address",
+    "sendVerification": "Send verification email",
+    "sending": "Sending…",
+    "emailSent": "If the address can be linked, a verification email has been sent.",
+    "emailConfirmed": "Email address verified and linked.",
+    "confirmEmail": "Confirm email link",
+    "confirmDescription": "A verification token is present in this link. Confirm before submitting it to link your email address.",
+    "confirming": "Confirming…",
+    "dismiss": "Not now",
+    "sessionExpiry": "Wallet session expires {{expiry}}.",
+    "walletChanged": "The connected wallet changed during verification. Please start again.",
+    "networkMismatch": "The challenge is for a different Stellar network. Switch networks and try again."
   }
 }

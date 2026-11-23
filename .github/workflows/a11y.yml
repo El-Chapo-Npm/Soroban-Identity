@@ -25,3 +25,35 @@ jobs:
         with:
           name: a11y-report
           path: tests/a11y/reports
+
+  pa11y-lighthouse:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+        working-directory: frontend
+      - name: Runtime a11y unit checks (axe-core helpers)
+        run: npx vitest run src/a11y
+        working-directory: frontend
+      - name: Build
+        run: npx vite build
+        working-directory: frontend
+      - name: Pa11y CI gate (WCAG2AA)
+        working-directory: frontend
+        run: |
+          npx vite preview --port 4173 &
+          npx wait-on http://localhost:4173
+          npx pa11y-ci@3.1.0 --config .pa11yci.json --json > pa11y-report.json
+      - name: Lighthouse accessibility gate
+        working-directory: frontend
+        run: npx @lhci/cli@0.14.0 autorun --config=lighthouserc.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pa11y-lighthouse-report
+          path: |
+            frontend/pa11y-report.json
+            frontend/lighthouse-report

@@ -47,12 +47,80 @@ export function detectCountry(req) {
 export class AnalyticsService {
   constructor(options = {}) {
     this.maxLogs = options.maxLogs ?? 1000;
+    this.maxShareEvents = options.maxShareEvents ?? 1000;
     this.logs = [];
     this.endpoints = new Map();
     this.consumers = new Map();
     this.geography = new Map();
     this.timeSeries = [];
+    this.shareEvents = [];
     this.startTime = Date.now();
+  }
+
+  /**
+   * Record a credential share analytics event.
+   *
+   * @param {object} event
+   * @param {string} event.platform Social platform (twitter, linkedin, facebook, ...).
+   * @param {string} [event.credentialType] Credential type being shared.
+   * @param {string} [event.privacyMode] Privacy mode (public/private/selective).
+   * @param {string} [event.shortId] Short link identifier.
+   * @param {string} event.event Event type (share_created, share_opened, ...).
+   * @param {Date} [event.timestamp] Event timestamp.
+   */
+  recordShareEvent({
+    platform,
+    credentialType,
+    privacyMode,
+    shortId,
+    event,
+    timestamp = new Date(),
+  }) {
+    this.shareEvents.push({
+      id: crypto.randomUUID
+        ? crypto.randomUUID()
+        : Math.random().toString(36).substring(2),
+      timestamp: timestamp.toISOString(),
+      platform: platform ? String(platform).toLowerCase() : "unknown",
+      credentialType: credentialType || "unknown",
+      privacyMode: privacyMode || "unknown",
+      shortId: shortId || null,
+      event: event || "unknown",
+    });
+    if (this.shareEvents.length > this.maxShareEvents) {
+      this.shareEvents.shift();
+    }
+  }
+
+  /**
+   * Aggregate share analytics grouped by platform and event type.
+   *
+   * @returns {object} Share statistics payload.
+   */
+  getShareStatistics() {
+    const byPlatform = {};
+    const byEvent = {};
+    const byPrivacyMode = {};
+    const byCredentialType = {};
+
+    for (const shareEvent of this.shareEvents) {
+      byPlatform[shareEvent.platform] =
+        (byPlatform[shareEvent.platform] || 0) + 1;
+      byEvent[shareEvent.event] = (byEvent[shareEvent.event] || 0) + 1;
+      byPrivacyMode[shareEvent.privacyMode] =
+        (byPrivacyMode[shareEvent.privacyMode] || 0) + 1;
+      byCredentialType[shareEvent.credentialType] =
+        (byCredentialType[shareEvent.credentialType] || 0) + 1;
+    }
+
+    return {
+      total: this.shareEvents.length,
+      byPlatform,
+      byEvent,
+      byPrivacyMode,
+      byCredentialType,
+      recentEvents: this.shareEvents.slice(-50),
+    };
   }
 
   recordRequest({

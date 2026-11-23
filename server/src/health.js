@@ -122,6 +122,14 @@ export async function checkContracts(soroban) {
   return { status, contracts, reachable, total: values.length };
 }
 
+export async function checkDatabase(config, dbClient) {
+  if (!config.databaseUrl || !dbClient) {
+    return { status: STATUS.DISABLED, reason: 'DATABASE_URL is not configured' };
+  }
+  await dbClient.query('SELECT 1');
+  return { status: STATUS.UP };
+}
+
 /**
  * Probe Redis when one is configured. An unconfigured cache reports `disabled`
  * rather than `down`, since running without Redis is a supported deployment.
@@ -214,13 +222,14 @@ export function uptimeSeconds(now = Date.now()) {
  * @param {object} deps.config
  * @param {object} deps.soroban
  * @param {object} [deps.redisClient]
+ * @param {object} [deps.dbClient]
  * @param {string} deps.version
  * @param {object} [options]
  * @param {number} [options.timeoutMs]
  * @returns {Promise<object>} Health report with a top-level `status`.
  */
 export async function collectHealth(
-  { config, soroban, redisClient = null, eventStore = null, replicaRegistry = null, version },
+  { config, soroban, redisClient = null, dbClient = null, eventStore = null, replicaRegistry = null, version },
   options = {},
 ) {
   const timeoutMs = options.timeoutMs ?? config.healthProbeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
@@ -228,6 +237,7 @@ export async function collectHealth(
   const results = await Promise.all([
     runProbe('storage', timeoutMs, () => checkStorage(config)),
     runProbe('rpc', timeoutMs, () => checkRpc(config)),
+    runProbe('database', timeoutMs, () => checkDatabase(config, dbClient)),
     runProbe('contracts', timeoutMs, () => checkContracts(soroban)),
     runProbe('redis', timeoutMs, () => checkRedis(config, redisClient)),
     runProbe('eventStore', timeoutMs, () => checkEventStore(config, eventStore)),
@@ -255,9 +265,9 @@ export async function collectHealth(
  *
  * Readiness answers "can this instance serve traffic right now", which is a
  * narrower question than liveness: only the dependencies required to answer a
- * request count. Storage and RPC are required; contracts and Redis are
- * reported but do not gate readiness, since a single unreachable contract or a
- * cold cache still leaves most endpoints serviceable.
+ * request count. Storage, RPC and a configured database are required; contracts
+ * and Redis are reported but do not gate readiness, since a single unreachable
+ * contract or a cold cache still leaves most endpoints serviceable.
  *
  * The event store gates readiness only when event sourcing is enabled, and the
  * read replicas gate readiness only when replicas are configured and every
@@ -265,7 +275,7 @@ export async function collectHealth(
  * serves reads from the primary.
  */
 export async function collectReadiness(
-  { config, soroban, redisClient = null, eventStore = null, replicaRegistry = null, version },
+  { config, soroban, redisClient = null, dbClient = null, eventStore = null, replicaRegistry = null, version },
   options = {},
 ) {
   const timeoutMs = options.timeoutMs ?? config.healthProbeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
@@ -273,6 +283,7 @@ export async function collectReadiness(
   const required = await Promise.all([
     runProbe('storage', timeoutMs, () => checkStorage(config)),
     runProbe('rpc', timeoutMs, () => checkRpc(config)),
+    runProbe('database', timeoutMs, () => checkDatabase(config, dbClient)),
   ]);
 
   const optional = await Promise.all([

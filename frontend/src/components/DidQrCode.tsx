@@ -144,6 +144,9 @@ export default function DidQrCode({ address, did, asModal = false, onClose }: Di
           background: '#fff',
           padding: '0.75rem',
           borderRadius: '0.5rem',
+          maxWidth: '100%',
+          boxSizing: 'border-box',
+          overflow: 'hidden',
         }}
       >
         <QRCodeCanvas
@@ -151,6 +154,8 @@ export default function DidQrCode({ address, did, asModal = false, onClose }: Di
           size={QR_SIZE}
           level="M"
           marginSize={2}
+          aria-label={`QR code for ${value}`}
+          style={{ width: '100%', height: 'auto', maxWidth: QR_SIZE, display: 'block' }}
         />
       </div>
 
@@ -189,7 +194,16 @@ export default function DidQrCode({ address, did, asModal = false, onClose }: Di
 
   if (!asModal) {
     return (
-      <div className="card" style={{ marginTop: '0.75rem', textAlign: 'center' }}>
+      <div
+        className="card"
+        style={{
+          marginTop: '0.75rem',
+          textAlign: 'center',
+          maxWidth: '100%',
+          boxSizing: 'border-box',
+          overflow: 'hidden',
+        }}
+      >
         {body}
       </div>
     );
@@ -222,6 +236,8 @@ export default function DidQrCode({ address, did, asModal = false, onClose }: Di
           width: '100%',
           textAlign: 'center',
           background: 'var(--card-bg, #fff)',
+          boxSizing: 'border-box',
+          overflow: 'hidden',
         }}
       >
         {body}

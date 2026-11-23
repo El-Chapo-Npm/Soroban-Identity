@@ -16,9 +16,51 @@ const MOCK_CREDENTIALS = [
   },
 ];
 
-function respond(res, status, body) {
-  sendJson(res, status, body, { 'cache-control': 'no-store' });
+const SIMULATED_ERRORS = {
+  400: { error: 'invalid_request', message: 'Simulated bad request.' },
+  401: { error: 'unauthorized', message: 'Simulated missing or invalid credentials.' },
+  403: { error: 'forbidden', message: 'Simulated insufficient permissions.' },
+  404: { error: 'not_found', message: 'Simulated missing resource.' },
+  409: { error: 'conflict', message: 'Simulated conflicting state.' },
+  429: { error: 'rate_limit_exceeded', message: 'Simulated rate limit.' },
+  500: { error: 'internal_server_error', message: 'Simulated server error.' },
+  503: { error: 'service_unavailable', message: 'Simulated upstream outage.' },
+};
+const MAX_SIMULATED_DELAY_MS = 5_000;
+
+function respond(res, status, body, headers = {}) {
+  sendJson(res, status, body, { 'cache-control': 'no-store', ...headers });
   return true;
+}
+
+/**
+ * Read the client's requested failure scenario from `?mockStatus=` /
+ * `X-Mock-Status` and `?mockDelayMs=` / `X-Mock-Delay-Ms`. The query
+ * parameter wins so a browser, which cannot easily set headers, can use it.
+ *
+ * @returns {{ status: number|null, delayMs: number, error: string|null }}
+ */
+function readScenario(req, url) {
+  const rawStatus = url.searchParams.get('mockStatus') ?? req.headers?.['x-mock-status'];
+  const rawDelay = url.searchParams.get('mockDelayMs') ?? req.headers?.['x-mock-delay-ms'];
+
+  let status = null;
+  if (rawStatus !== undefined && rawStatus !== null && rawStatus !== '') {
+    status = Number(rawStatus);
+    if (!Object.hasOwn(SIMULATED_ERRORS, status)) {
+      return { status: null, delayMs: 0, error: `mockStatus must be one of ${Object.keys(SIMULATED_ERRORS).join(', ')}.` };
+    }
+  }
+
+  let delayMs = 0;
+  if (rawDelay !== undefined && rawDelay !== null && rawDelay !== '') {
+    delayMs = Number(rawDelay);
+    if (!Number.isInteger(delayMs) || delayMs < 0 || delayMs > MAX_SIMULATED_DELAY_MS) {
+      return { status: null, delayMs: 0, error: `mockDelayMs must be an integer from 0 to ${MAX_SIMULATED_DELAY_MS}.` };
+    }
+  }
+
+  return { status, delayMs, error: null };
 }
 
 function decodePathSegment(value) {
@@ -47,6 +89,20 @@ export async function handleMockApiRequest(req, res, config = {}) {
   if (req.method === 'GET' && url.pathname === `${PREFIX}/health`) {
     return respond(res, 200, { status: 'ok', mock: true });
   }
+
+  // Health stays unconditional so a test harness can always tell the mock
+  // server is up; every other route honours the requested scenario.
+  const scenario = readScenario(req, url);
+  if (scenario.error) {
+    return respond(res, 400, { error: 'invalid_mock_scenario', message: scenario.error, mock: true });
+  }
+  if (scenario.delayMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, scenario.delayMs));
+  }
+  if (scenario.status !== null) {
+    const headers = scenario.status === 429 || scenario.status === 503 ? { 'retry-after': '1' } : {};
+    return respond(res, scenario.status, { ...SIMULATED_ERRORS[scenario.status], simulated: true, mock: true }, headers);
+  }
   if (req.method === 'GET' && url.pathname === `${PREFIX}/info`) {
     return respond(res, 200, {
       name: 'Soroban Identity Mock API',
@@ -60,6 +116,10 @@ export async function handleMockApiRequest(req, res, config = {}) {
         'GET /mock/v1/dids/:address',
         'GET /mock/v1/reputation/:address',
       ],
+      scenarios: {
+        mockStatus: Object.keys(SIMULATED_ERRORS).map(Number),
+        mockDelayMs: { min: 0, max: MAX_SIMULATED_DELAY_MS },
+      },
     });
   }
   if (req.method === 'GET' && url.pathname === `${PREFIX}/credentials`) {

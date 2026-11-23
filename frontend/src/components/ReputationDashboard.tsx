@@ -170,7 +170,7 @@ function CategoryBreakdown({ categories }: { categories: CategoryScore[] }) {
             ))}
           </Pie>
           <Tooltip
-            formatter={(value: number) => `${value.toFixed(1)}`}
+            formatter={((value: any) => `${Number(value).toFixed(1)}`) as any}
             contentStyle={{ background: "var(--card-bg)", border: "1px solid var(--border-input)" }}
           />
           <Legend />
@@ -210,7 +210,7 @@ function ScorePrediction({ history, networkAverage }: { history: ScoreHistoryEnt
     const recent = history.slice(-10);
     const deltas = recent.map((e) => e.delta);
     const avgDelta = deltas.reduce((a, b) => a + b, 0) / deltas.length;
-    const currentScore = recent[recent.length - 1].score || 0;
+    const currentScore = (recent[recent.length - 1] as any)?.score ?? networkAverage ?? 0;
     const predictedScore = Math.max(0, Math.min(100, currentScore + avgDelta * 7)); // 7 days prediction
 
     // Calculate confidence based on consistency
@@ -368,7 +368,7 @@ RECENT EVENTS
 ${dashboardData.recentEvents?.slice(0, 10).map((e) => `${e.title}: ${e.delta > 0 ? "+" : ""}${e.delta.toFixed(1)}`).join("\n")}
 
 HISTORY (Last 30 entries)
-${dashboardData.history.slice(-30).map((e) => `${new Date(e.submittedAt * 1000).toLocaleDateString()}: ${e.score.toFixed(1)} (${e.delta > 0 ? "+" : ""}${e.delta.toFixed(1)})`).join("\n")}
+${dashboardData.history.slice(-30).map((e) => `${new Date(e.submittedAt * 1000).toLocaleDateString()}: ${(e as any).score !== undefined ? (e as any).score.toFixed(1) : ''} (${e.delta > 0 ? "+" : ""}${e.delta.toFixed(1)})`).join("\n")}
   `;
 
   const blob = new Blob([content], { type: "text/plain" });
@@ -446,7 +446,7 @@ export default function ReputationDashboard({
                 <YAxis tick={{ fontSize: 11, fill: "var(--text-muted)" }} domain={[0, 100]} />
                 <Tooltip
                   contentStyle={{ background: "var(--card-bg)", border: "1px solid var(--border-input)" }}
-                  labelFormatter={(ts) => new Date(ts * 1000).toLocaleString()}
+                  labelFormatter={(ts: any) => ts ? new Date(Number(ts) * 1000).toLocaleString() : ''}
                 />
                 <Legend />
                 <Line

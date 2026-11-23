@@ -30,6 +30,7 @@ export function useFreighterAccountSync({
             networkPassphrase,
             connected: true,
             connecting: false,
+            reconnecting: false,
             walletType: "freighter",
             txLoading: false,
             error: null,

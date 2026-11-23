@@ -122,15 +122,63 @@ export class DataLoader {
 /**
  * Instantiate request-scoped DataLoaders for DIDs, Credentials, and Reputation.
  *
+ * Credential-backed loaders share one request-scoped snapshot of the store
+ * (#1078). The first loader (or an explicit `prefetchCredentials()` call)
+ * reads the store once; every other credential, list, and reputation lookup
+ * in the same request reuses that read instead of making its own round trip.
+ * Once loaded, every credential in the snapshot is primed into
+ * `credentialLoader`, so by-id lookups resolve from cache.
+ *
  * @param {object} context
  * @param {object} context.config
  * @param {object} [context.soroban]
+ * @param {(config: object) => Promise<object[]>} [context.readAll] - Store
+ *   reader, injectable for tests. Defaults to `readCredentials`.
  * @returns {object}
  */
-export function createDataLoaders({ config, soroban }) {
+export function createDataLoaders({ config, soroban, readAll = readCredentials }) {
+  let credentialSnapshot = null;
+
+  /**
+   * Read every credential once for this request and reuse the result.
+   * A failed read is not memoised, so a later call can retry.
+   *
+   * @returns {Promise<object[]>}
+   */
+  function prefetchCredentials() {
+    if (!credentialSnapshot) {
+      const pending = Promise.resolve()
+        .then(() => readAll(config))
+        .then((all) => {
+          const list = Array.isArray(all) ? all : [];
+          for (const credential of list) {
+            if (credential && credential.id != null) {
+              credentialLoader.prime(credential.id, credential);
+            }
+          }
+          return list;
+        });
+      pending.catch(() => {
+        if (credentialSnapshot === pending) credentialSnapshot = null;
+      });
+      credentialSnapshot = pending;
+    }
+    return credentialSnapshot;
+  }
+
+  /**
+   * Drop the snapshot and every credential-derived cache entry. Mutations
+   * call this so reads later in the same request see the write.
+   */
+  function invalidateCredentials() {
+    credentialSnapshot = null;
+    credentialLoader.clearAll();
+    reputationLoader.clearAll();
+  }
+
   // Batch loader for Credentials
   const credentialLoader = new DataLoader(async (ids) => {
-    const allCredentials = await readCredentials(config);
+    const allCredentials = await prefetchCredentials();
     const map = new Map(allCredentials.map((c) => [c.id, c]));
     return ids.map((id) => map.get(id) || null);
   });
@@ -165,12 +213,20 @@ export function createDataLoaders({ config, soroban }) {
 
   // Batch loader for Reputation Scores
   const reputationLoader = new DataLoader(async (dids) => {
-    const allCredentials = await readCredentials(config);
+    const allCredentials = await prefetchCredentials();
+    // Index once per batch rather than scanning the store for every DID.
+    const bySubject = new Map();
+    for (const c of allCredentials) {
+      const bucket = bySubject.get(c.subject);
+      if (bucket) bucket.push(c);
+      else bySubject.set(c.subject, [c]);
+    }
     return dids.map((did) => {
       const subject = did.startsWith('did:stellar:') ? did.slice('did:stellar:'.length) : did;
-      const matchingCreds = allCredentials.filter(
-        (c) => c.subject === subject || c.subject === did
-      );
+      const matchingCreds =
+        subject === did
+          ? bySubject.get(subject) ?? []
+          : [...(bySubject.get(subject) ?? []), ...(bySubject.get(did) ?? [])];
       const validCreds = matchingCreds.filter((c) => !c.revoked);
       const credentialCount = validCreds.length;
       const score = Math.min(100, credentialCount * 25 + 10);
@@ -194,5 +250,7 @@ export function createDataLoaders({ config, soroban }) {
     credentialLoader,
     didLoader,
     reputationLoader,
+    prefetchCredentials,
+    invalidateCredentials,
   };
 }

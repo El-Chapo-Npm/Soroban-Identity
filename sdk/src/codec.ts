@@ -61,12 +61,31 @@ export function encodeString(value: string): xdr.ScVal {
   return nativeToScVal(value, { type: "string" });
 }
 
+function normalizeTimestamp(val: unknown): number {
+  if (typeof val === "bigint") {
+    return Number(val);
+  }
+  if (typeof val === "string") {
+    const parsed = Number(val);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  if (typeof val === "number") {
+    return val < 0 ? val >>> 0 : val;
+  }
+  return 0;
+}
+
 export function decodeDidDocument(val: xdr.ScVal): DidDocument {
   const result = scValToNative(val);
   if (result == null || typeof result !== "object") {
     throw new Error("decodeDidDocument: malformed ScVal");
   }
-  return result as DidDocument;
+  const doc = result as Record<string, unknown>;
+  return {
+    ...doc,
+    createdAt: normalizeTimestamp(doc.createdAt ?? doc.created_at),
+    updatedAt: normalizeTimestamp(doc.updatedAt ?? doc.updated_at),
+  } as DidDocument;
 }
 
 export function decodeCredential(val: xdr.ScVal): Credential {
@@ -88,11 +107,11 @@ export function decodeCredential(val: xdr.ScVal): Credential {
   };
   return {
     ...credential,
-    issuedAt: toSafeTimestamp(credential.issuedAt ?? credential.issued_at),
-    expiresAt: toSafeTimestamp(credential.expiresAt ?? credential.expires_at),
-    activationTime: toSafeTimestamp(credential.activationTime ?? credential.activation_time),
-    lastModifiedAt: toSafeTimestamp(credential.lastModifiedAt ?? credential.last_modified_at),
     credentialType: assertCredentialType(credential.credentialType ?? credential.credential_type),
+    issuedAt: toSafeTimestamp(credential.issuedAt ?? credential.issued_at),
+    lastModifiedAt: toSafeTimestamp(credential.lastModifiedAt ?? credential.last_modified_at),
+    activationTime: toSafeTimestamp(credential.activationTime ?? credential.activation_time),
+    expiresAt: toSafeTimestamp(credential.expiresAt ?? credential.expires_at),
   } as Credential;
 }
 

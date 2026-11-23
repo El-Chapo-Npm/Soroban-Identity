@@ -1,5 +1,8 @@
 import crypto from 'node:crypto';
 import { logger } from './logger.js';
+import { decryptRequestJson, encryptSensitiveFields } from './payload-encryption.js';
+import { getClientAddress, isAdminIpAllowed } from './ip-whitelist.js';
+import { isJwtToken, verifyJwt } from './jwt-auth.js';
 
 /**
  * Constant-time string comparison using crypto.timingSafeEqual.
@@ -96,6 +99,17 @@ export async function readJson(req, config) {
   const { tooLarge, buffer } = await readRawBody(req, config);
   if (tooLarge) return { __payloadTooLarge: true };
 
+  if (req.payloadEncryption) {
+    const parsed = await decryptRequestJson(
+      req,
+      req.payloadEncryption.sessionStore,
+      req.payloadEncryption.sessionId,
+      req.payloadEncryption.ownerId,
+      buffer,
+    );
+    req.loggedBody = { encrypted: true };
+    return parsed;
+  }
   if (buffer.length === 0) return {};
   const raw = buffer.toString("utf8");
   if (!raw.trim()) return {};
@@ -124,11 +138,21 @@ export async function readJson(req, config) {
 }
 
 export function sendJson(res, statusCode, body, headers = {}) {
+  const encryption = res.payloadEncryption;
+  const responseBody = encryption
+    ? encryptSensitiveFields(body, {
+        ...encryption,
+        method: encryption.method,
+        path: encryption.path,
+        statusCode,
+      })
+    : body;
   res.writeHead(statusCode, {
     "content-type": "application/json; charset=utf-8",
+    ...(encryption ? { "cache-control": "no-store" } : {}),
     ...headers,
   });
-  res.end(JSON.stringify(body));
+  res.end(JSON.stringify(responseBody));
 }
 
 export function sendText(res, statusCode, body, headers = {}) {
@@ -336,6 +360,9 @@ export function negotiateContentType(acceptHeader) {
  * Returns 406 Not Acceptable if client requested an unsupported format.
  */
 export function sendFormatted(req, res, statusCode, body, headers = {}) {
+  if (res.payloadEncryption) {
+    return sendJson(res, statusCode, body, headers);
+  }
   const accept = req?.headers ? req.headers["accept"] : undefined;
   const matchedFormat = negotiateContentType(accept);
 
@@ -400,6 +427,48 @@ export function notFound(res, req = null) {
 }
 
 /**
+ * Send a 400 Bad Request response with a descriptive error code and message.
+ *
+ * Route handlers use this to turn malformed client input into a consistent
+ * client error instead of letting an exception bubble up as a 500.
+ *
+ * @param {object} req - HTTP request object (for content negotiation)
+ * @param {object} res - HTTP response object
+ * @param {string} message - Human-readable description of the problem
+ * @param {string} [code="BAD_REQUEST"] - Machine-readable error code
+ * @param {object} [extra={}] - Additional fields to include in the body
+ */
+export function badRequest(req, res, message, code = "BAD_REQUEST", extra = {}) {
+  const body = {
+    error: "bad_request",
+    code,
+    message,
+    ...extra,
+  };
+  if (req) {
+    return sendFormatted(req, res, 400, body);
+  }
+  sendJson(res, 400, body);
+}
+
+/**
+ * Send a 400 response describing a malformed DID input.
+ *
+ * @param {object} req - HTTP request object (for content negotiation)
+ * @param {object} res - HTTP response object
+ * @param {*} did - The offending DID value supplied by the client
+ * @param {string} [detail] - Optional extra detail about why it is invalid
+ */
+export function badDid(req, res, did, detail) {
+  const message = detail
+    ? `Invalid DID: ${detail}`
+    : "Invalid DID: expected a string in the form did:<method>:<identifier>";
+  return badRequest(req, res, message, "INVALID_DID", {
+    did: typeof did === "string" ? did : undefined,
+  });
+}
+
+/**
  * Authenticate and authorize a request with optional scope requirements.
  * 
  * @param {object} req - HTTP request object
@@ -409,6 +478,37 @@ export function notFound(res, req = null) {
  * @returns {boolean} True if authenticated and authorized, false otherwise
  */
 export async function requireAuth(req, res, config, requiredScopes = []) {
+  let pathname = "";
+  try {
+    pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+  } catch {
+    pathname = "";
+  }
+  const isAdminRequest =
+    pathname === "/admin" || pathname.startsWith("/admin/") ||
+    requiredScopes.some((scope) => scope.startsWith("admin:"));
+  if (isAdminRequest && !isAdminIpAllowed(req, config)) {
+    const allowlist = config.adminIpAllowlist ?? [];
+    if (allowlist.length === 0 && config.adminIpAllowlistRequired === true) {
+      sendFormatted(req, res, 503, {
+        error: "admin_ip_allowlist_not_configured",
+        code: "ADMIN_IP_ALLOWLIST_NOT_CONFIGURED",
+        message: "Admin access is disabled until ADMIN_IP_ALLOWLIST is configured",
+      });
+    } else {
+      sendFormatted(req, res, 403, {
+        error: "admin_ip_not_allowed",
+        code: "ADMIN_IP_NOT_ALLOWED",
+        message: "This client address is not permitted to access admin endpoints",
+      });
+    }
+    logger.warn(
+      { clientIp: getClientAddress(req, config.trustProxy === true), pathname },
+      "Blocked admin request from a non-allowlisted IP address",
+    );
+    return false;
+  }
+
   const token =
     req.headers["x-api-key"] ||
     req.headers.authorization?.replace(/^Bearer\s+/i, "");
@@ -420,6 +520,40 @@ export async function requireAuth(req, res, config, requiredScopes = []) {
       message: "Missing API key"
     });
     return false;
+  }
+
+  // Signed JWTs are issuer credentials. Bind the Stellar public-key subject to
+  // the request so handlers and rate limiting never trust client headers.
+  if (isJwtToken(token)) {
+    const verdict = verifyJwt(token, {
+      secret: config.jwtSecret,
+      publicKey: config.jwtPublicKey,
+      algorithms: config.jwtAlgorithms,
+      issuer: config.jwtIssuer,
+      audience: config.jwtAudience,
+      clockSkewSeconds: config.jwtClockSkewSeconds ?? 30,
+    });
+    if (!verdict.ok) {
+      sendJson(res, verdict.code === 'JWT_NOT_CONFIGURED' ? 503 : 401, {
+        error: 'unauthorized', code: verdict.code, message: verdict.message,
+      });
+      return false;
+    }
+    req.userId = verdict.auth.subject;
+    req.issuer = verdict.auth.subject;
+    req.apiKeyScopes = verdict.auth.scopes.length > 0 ? verdict.auth.scopes : ['*'];
+    req.userTier = 'issuer';
+    req.auth = { jwt: verdict.auth, claims: verdict.claims };
+    if (requiredScopes.length > 0) {
+      const hasWildcard = req.apiKeyScopes.includes('*');
+      const hasAllScopes = requiredScopes.every((required) => hasWildcard || req.apiKeyScopes.includes(required));
+      if (!hasAllScopes) {
+        const missingScopes = requiredScopes.filter((scope) => !req.apiKeyScopes.includes(scope));
+        sendJson(res, 403, { error: 'forbidden', code: 'INSUFFICIENT_SCOPE', requiredScopes, missingScopes });
+        return false;
+      }
+    }
+    return true;
   }
 
   // 1. Try validating with ApiKeyService if available

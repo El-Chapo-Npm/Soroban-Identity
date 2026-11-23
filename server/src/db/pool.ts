@@ -449,6 +449,7 @@ export class DatabasePool {
         if (isWriteStatement(text)) {
           this.lastWriteAt = Date.now();
         }
+        client.release();
         return result;
       } catch (err) {
         lastError = err;

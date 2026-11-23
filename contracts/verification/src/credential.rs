@@ -12,6 +12,14 @@ use crate::{atomically, require_auth, valid_addr, Abort, Addr, CallResult, ADDRS
 pub const CREDS: usize = 3;
 pub type CredId = u8;
 
+/// Number of signers in the threshold-signature model universe.
+pub const SIGNERS: usize = 3;
+pub type SignerId = u8;
+
+/// Number of oracle responses in the staleness model universe.
+pub const ORACLE_RESPONSES: usize = 3;
+pub type ResponseId = u8;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(kani, derive(kani::Arbitrary))]
 pub struct Credential {
@@ -33,6 +41,10 @@ pub struct Manager {
     pub creds: [Option<Credential>; CREDS],
     /// `REVOKED_CNT`
     pub revoked_cnt: u32,
+    /// Threshold-signature policy for credential operations.
+    pub threshold: ThresholdConfig,
+    /// Oracle data feed used for off-chain credential verification.
+    pub oracle: OracleFeed,
 }
 
 impl Manager {
@@ -43,6 +55,7 @@ impl Manager {
                 .iter()
                 .flatten()
                 .all(|c| valid_addr(c.issuer) && valid_addr(c.subject))
+            && self.threshold.threshold > 0
     }
 
     pub fn revoked_total(&self) -> u32 {
@@ -219,6 +232,124 @@ impl Manager {
     }
 }
 
+/// Model of the threshold-signature configuration used to authorise
+/// credential operations (issue #1126).
+///
+/// A signer set is a fixed-size vector of `(weight, enabled)` entries plus a
+/// `threshold`. A signature bundle carries, per signer, whether that signer
+/// signed and the timestamp at which the signature was produced. Validation
+/// must reject bundles whose aggregate weight is below the threshold, whose
+/// signatures have expired, or that reference disabled signers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(kani, derive(kani::Arbitrary))]
+pub struct ThresholdConfig {
+    /// Per-signer weight; `0` means the signer is disabled.
+    pub weights: [u16; SIGNERS],
+    /// Minimum aggregate weight required to authorise an operation.
+    pub threshold: u16,
+    /// Signatures older than `now - max_age` are rejected. `0` disables expiry.
+    pub max_age: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(kani, derive(kani::Arbitrary))]
+pub struct SignatureBundle {
+    /// Whether each signer produced a signature.
+    pub signed: [bool; SIGNERS],
+    /// Timestamp of each signature (only meaningful when `signed[i]`).
+    pub signed_at: [u64; SIGNERS],
+}
+
+impl ThresholdConfig {
+    /// Aggregate weight of the signers that signed and are still enabled.
+    pub fn aggregate_weight(&self, bundle: &SignatureBundle) -> u16 {
+        let mut total: u16 = 0;
+        let mut i = 0;
+        while i < SIGNERS {
+            if bundle.signed[i] && self.weights[i] > 0 {
+                total = total.saturating_add(self.weights[i]);
+            }
+            i += 1;
+        }
+        total
+    }
+
+    /// `validate_threshold_signatures`: returns `Ok` only when the aggregate
+    /// weight meets the threshold and every counted signature is fresh.
+    pub fn validate(&self, bundle: &SignatureBundle, now: u64) -> CallResult {
+        // A zero threshold would let an empty bundle authorise anything.
+        if self.threshold == 0 {
+            return Err(Abort::Error("InvalidThreshold"));
+        }
+        let mut total: u16 = 0;
+        let mut i = 0;
+        while i < SIGNERS {
+            if bundle.signed[i] {
+                if self.weights[i] == 0 {
+                    return Err(Abort::Error("SignerDisabled"));
+                }
+                if self.max_age != 0 {
+                    let signed_at = bundle.signed_at[i];
+                    // Reject future-dated signatures and expired ones.
+                    if signed_at > now {
+                        return Err(Abort::Error("SignatureFromFuture"));
+                    }
+                    if now - signed_at > self.max_age {
+                        return Err(Abort::Error("SignatureExpired"));
+                    }
+                }
+                total = total.saturating_add(self.weights[i]);
+            }
+            i += 1;
+        }
+        if total < self.threshold {
+            return Err(Abort::Error("ThresholdNotMet"));
+        }
+        Ok(())
+    }
+}
+
+/// Model of an oracle data feed and its staleness checks (issue #1124).
+///
+/// Each response records the value reported by the oracle, the round it was
+/// reported in, and the timestamp at which it was observed. Consumers must
+/// reject responses that are stale, from the future, or from an older round
+/// than the latest one already observed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(kani, derive(kani::Arbitrary))]
+pub struct OracleResponse {
+    pub value: u64,
+    pub round: u32,
+    pub observed_at: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(kani, derive(kani::Arbitrary))]
+pub struct OracleFeed {
+    /// Maximum permitted age of a response. `0` disables the staleness check.
+    pub max_staleness: u64,
+    /// Highest round observed so far; `0` means none.
+    pub latest_round: u32,
+    pub responses: [Option<OracleResponse>; ORACLE_RESPONSES],
+}
+
+impl OracleFeed {
+    /// `read_oracle`: returns the value of a fresh, monotonic response.
+    pub fn read(&self, id: ResponseId, now: u64) -> CallResult<u64> {
+        let resp = self.responses[id as usize].ok_or(Abort::Error("OracleResponseMissing"))?;
+        if resp.round <= self.latest_round {
+            return Err(Abort::Error("StaleRound"));
+        }
+        if resp.observed_at > now {
+            return Err(Abort::Error("ResponseFromFuture"));
+        }
+        if self.max_staleness != 0 && now - resp.observed_at > self.max_staleness {
+            return Err(Abort::Error("StaleResponse"));
+        }
+        Ok(resp.value)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(kani, derive(kani::Arbitrary))]
 pub enum Op {
@@ -230,6 +361,10 @@ pub enum Op {
     Revoke { issuer: Addr, id: CredId },
     Expire { caller: Addr, id: CredId },
     Renew { issuer: Addr, id: CredId, new_expires_at: u64 },
+    /// Threshold-signature authorisation of a credential operation.
+    ValidateThreshold { bundle: SignatureBundle },
+    /// Oracle read with staleness checks.
+    ReadOracle { id: ResponseId },
 }
 
 impl Op {
@@ -241,6 +376,8 @@ impl Op {
             Op::Issue { issuer, subject, id, .. } => valid_addr(issuer) && valid_addr(subject) && id_ok(id),
             Op::Revoke { issuer, id } | Op::Renew { issuer, id, .. } => valid_addr(issuer) && id_ok(id),
             Op::Expire { caller, id } => valid_addr(caller) && id_ok(id),
+            Op::ValidateThreshold { .. } => true,
+            Op::ReadOracle { id } => (id as usize) < ORACLE_RESPONSES,
         }
     }
 
@@ -256,6 +393,13 @@ impl Op {
             Op::Revoke { issuer, id } => m.revoke(signer, issuer, id),
             Op::Expire { caller, id } => m.expire(signer, caller, id, now),
             Op::Renew { issuer, id, new_expires_at } => m.renew(signer, issuer, id, new_expires_at),
+            // Threshold and oracle checks are validated against the manager's
+            // configured policy; they never mutate credential state.
+            Op::ValidateThreshold { bundle } => m
+                .threshold
+                .validate(&bundle, now)
+                .map(|_| ()),
+            Op::ReadOracle { id } => m.oracle.read(id, now).map(|_| ()),
         }
     }
 }

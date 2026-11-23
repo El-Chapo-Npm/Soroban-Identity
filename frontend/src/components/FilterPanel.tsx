@@ -94,7 +94,7 @@ const DEFAULT_RULE: FilterRule = {
   id: "rule-initial-1",
   field: "credentialType",
   operator: "equals",
-  value: "Kyc",
+  value: "All",
 };
 
 /**
@@ -103,8 +103,12 @@ const DEFAULT_RULE: FilterRule = {
 export function validateRule(rule: FilterRule): string | null {
   if (rule.field === "issuer" && rule.value.trim()) {
     const trimmed = rule.value.trim();
-    if (trimmed.length > 0 && !validateStellarAddress(trimmed)) {
-      return `Invalid Stellar address for issuer: "${trimmed}"`;
+    if (trimmed.length > 0) {
+      try {
+        validateStellarAddress(trimmed);
+      } catch {
+        return `Invalid Stellar address for issuer: "${trimmed}"`;
+      }
     }
   }
 
@@ -318,14 +322,7 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
   };
 
   const handleReset = () => {
-    const resetRules: FilterRule[] = [
-      {
-        id: `rule-${Date.now()}`,
-        field: "credentialType",
-        operator: "equals",
-        value: "All",
-      },
-    ];
+    const resetRules: FilterRule[] = [{ ...DEFAULT_RULE, id: `rule-${Date.now()}` }];
     const resetState: FilterState = {
       logic: "AND",
       rules: resetRules,
@@ -378,7 +375,7 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
         id: `rule-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
         field: "credentialType",
         operator: "equals",
-        value: "Kyc",
+        value: "All",
       },
     ]);
   };
@@ -713,7 +710,7 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
               onChange={(e) =>
                 updateRule(rule.id, {
                   field: e.target.value as FilterField,
-                  value: e.target.value === "credentialType" ? "Kyc" : "",
+                  value: e.target.value === "credentialType" ? "All" : "",
                   claimKey: "",
                 })
               }

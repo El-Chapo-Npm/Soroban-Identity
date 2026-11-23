@@ -1,0 +1,26 @@
+name: Deployment script tests
+on:
+  pull_request:
+    paths:
+      - "infrastructure/deployment/**"
+      - ".github/workflows/deployment-scripts.yml"
+  push:
+    branches: [main]
+    paths:
+      - "infrastructure/deployment/**"
+      - ".github/workflows/deployment-scripts.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check shell syntax
+        run: bash -n infrastructure/deployment/*.sh
+      - name: Test blue-green and migration rollback behavior
+        run: ./infrastructure/deployment/test-deployment.sh
+      - name: Validate Docker Compose configuration
+        run: docker compose -f infrastructure/deployment/docker-compose.yml config --quiet

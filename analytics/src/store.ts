@@ -9,7 +9,8 @@ export interface DidEvent {
   kind: "created" | "updated" | "deactivated" | "reactivated";
   controller: string;
   ledger: number;
-  ts: number; // unix ms
+  /** UTC unix epoch milliseconds (no local-timezone conversion). */
+  ts: number;
 }
 
 export interface CredentialEvent {
@@ -21,6 +22,7 @@ export interface CredentialEvent {
   /** Kyc, Reputation, Achievement, Custom … (issued events only). */
   credentialType?: string;
   ledger: number;
+  /** UTC unix epoch milliseconds (no local-timezone conversion). */
   ts: number;
 }
 
@@ -29,6 +31,7 @@ export interface IssuerEvent {
   kind: "added" | "removed";
   issuer: string;
   ledger: number;
+  /** UTC unix epoch milliseconds (no local-timezone conversion). */
   ts: number;
 }
 
@@ -39,6 +42,7 @@ export interface VerificationEvent {
   credentialId?: string;
   valid?: boolean;
   reason?: string;
+  /** UTC unix epoch milliseconds (no local-timezone conversion). */
   ts: number;
 }
 
@@ -103,6 +107,13 @@ export class AnalyticsStore extends EventEmitter {
       return empty();
     }
   }
+
+  /**
+   * Timestamps are stored as UTC unix epoch milliseconds. Serialization uses
+   * JSON.stringify on the raw numbers, so no local-timezone conversion is
+   * applied on write or read. If an ISO string is ever needed, format with
+   * `new Date(ts).toISOString()` (always UTC).
+   */
 
   private add<T extends { id: string }>(list: T[], record: T): boolean {
     if (this.seen.has(record.id)) return false;

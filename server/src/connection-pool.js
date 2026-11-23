@@ -85,9 +85,10 @@ export class ConnectionPool {
         this.poolStats.activeConnections = this.inUse.size;
         return conn;
       } else {
-        // Remove unhealthy connection
+        // Remove and close the unhealthy connection so its socket is not leaked
         this.connections.delete(conn.id);
         this.poolStats.totalConnections--;
+        await this._closeQuietly(conn);
       }
     }
 
@@ -133,16 +134,38 @@ export class ConnectionPool {
       return;
     }
 
-    // Return to available pool if healthy
+    // Return to available pool if healthy, otherwise close it
     if (await this._isConnectionHealthy(conn)) {
       this.available.push(conn);
     } else {
       this.connections.delete(conn.id);
       this.poolStats.totalConnections--;
+      await this._closeQuietly(conn);
     }
 
     this.poolStats.activeConnections = this.inUse.size;
     this.poolStats.idleConnections = this.available.length;
+  }
+
+  /**
+   * Run `fn` with a pooled connection, always releasing it afterwards
+   * (including when `fn` throws). Prefer this over manual acquire/release.
+   */
+  async withConnection(fn) {
+    const conn = await this.acquire();
+    try {
+      return await fn(conn);
+    } finally {
+      await this.release(conn);
+    }
+  }
+
+  async _closeQuietly(conn) {
+    try {
+      await conn.close?.();
+    } catch (error) {
+      logger.warn({ pool: this.name, connId: conn.id, error: error.message }, 'Error closing connection');
+    }
   }
 
   /**

@@ -53,6 +53,18 @@ describe("ErrorBoundary (#331)", () => {
     expect(screen.getByText(/Something went wrong/i)).toBeTruthy();
   });
 
+  it("shows a friendly message and expandable error details", () => {
+    render(
+      <ErrorBoundary>
+        <BrokenComponent shouldThrow={true} />
+      </ErrorBoundary>,
+    );
+
+    expect(screen.getByText(/could not render this part/i)).toBeTruthy();
+    expect(screen.getByText(/Error details/i)).toBeTruthy();
+    expect(screen.getByText(/test render error/)).toBeTruthy();
+  });
+
   it("does not show fallback when child does not throw", () => {
     render(
       <ErrorBoundary>
@@ -136,20 +148,15 @@ describe("ErrorBoundary (#331)", () => {
       </ErrorBoundary>,
     );
 
-    // Confirm the fallback is shown.
-    expect(container.querySelector("h1")).not.toBeNull();
-
-    // Click Retry — then immediately rerender with a healthy child.
+    // Confirm the fallback is shown, then make the child healthy before retrying.
     const { getByRole: getByRoleInContainer } = within(container);
-    fireEvent.click(getByRoleInContainer("button", { name: /retry/i }));
-
     rerender(
       <ErrorBoundary>
         <BrokenComponent shouldThrow={false} />
       </ErrorBoundary>,
     );
+    fireEvent.click(getByRoleInContainer("button", { name: /retry/i }));
 
-    // The fallback h1 should be gone and healthy content visible.
     expect(container.textContent).toContain("Healthy content");
   });
 

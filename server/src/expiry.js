@@ -39,6 +39,22 @@ function createConcurrencyPool(concurrency) {
   return run;
 }
 
+export function normalizeExpirySeconds(value) {
+  if (typeof value === 'bigint') return Number(value);
+  const num = Number(value);
+  if (!Number.isFinite(num)) return 0;
+  return num < 0 ? num >>> 0 : num;
+}
+
+export function safeIsoFromUnixSeconds(seconds) {
+  const sec = normalizeExpirySeconds(seconds);
+  if (sec <= 0) return null;
+  const ms = sec * 1000;
+  if (ms > 8_640_000_000_000_000) return `+${Math.floor(sec / 31557600) + 1970}-01-01T00:00:00.000Z`;
+  const d = new Date(ms);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
 /**
  * Build a sorted index of credentials that have an `expires_at` value, ordered
  * ascending by expiry time. Pass this to `findExpiringCredentials` to avoid
@@ -49,8 +65,8 @@ function createConcurrencyPool(concurrency) {
  */
 export function buildExpiryIndex(credentials) {
   return credentials
-    .filter((c) => Number(c.expires_at) > 0)
-    .sort((a, b) => Number(a.expires_at) - Number(b.expires_at));
+    .filter((c) => normalizeExpirySeconds(c.expires_at ?? c.expiresAt) > 0)
+    .sort((a, b) => normalizeExpirySeconds(a.expires_at ?? a.expiresAt) - normalizeExpirySeconds(b.expires_at ?? b.expiresAt));
 }
 
 function lowerBound(index, nowMs) {
@@ -58,7 +74,7 @@ function lowerBound(index, nowMs) {
   let hi = index.length;
   while (lo < hi) {
     const mid = (lo + hi) >>> 1;
-    if (Number(index[mid].expires_at) * 1000 < nowMs) lo = mid + 1;
+    if (normalizeExpirySeconds(index[mid].expires_at ?? index[mid].expiresAt) * 1000 < nowMs) lo = mid + 1;
     else hi = mid;
   }
   return lo;
@@ -69,7 +85,7 @@ function upperBound(index, upper) {
   let hi = index.length;
   while (lo < hi) {
     const mid = (lo + hi) >>> 1;
-    if (Number(index[mid].expires_at) * 1000 <= upper) lo = mid + 1;
+    if (normalizeExpirySeconds(index[mid].expires_at ?? index[mid].expiresAt) * 1000 <= upper) lo = mid + 1;
     else hi = mid;
   }
   return lo;
@@ -411,7 +427,7 @@ export class ExpiryNotificationJob {
    * channel was skipped. Throws when all configured channels failed.
    */
   async dispatch(credential) {
-    const expiresAt = Number(credential.expires_at || credential.expiresAt);
+    const expiresAt = normalizeExpirySeconds(credential.expires_at ?? credential.expiresAt);
     const now = Math.floor(Date.now() / 1000);
     const daysRemaining =
       credential.daysRemaining ?? Math.max(0, Math.ceil((expiresAt - now) / (24 * 3600)));
@@ -534,7 +550,7 @@ export class ExpiryNotificationJob {
         issuer: credential.issuer,
         credentialType: credential.credentialType,
         expires_at: expiresAt,
-        expiry_date: new Date(expiresAt * 1000).toISOString(),
+        expiry_date: safeIsoFromUnixSeconds(expiresAt),
         issued_at: credential.issued_at || credential.issuedAt,
         claims: credential.claims,
       },
@@ -632,7 +648,9 @@ export function credentialFromEvent(event) {
   const id = value.id ?? value.credential_id;
   const subject = value.subject;
   const issuer = value.issuer;
-  const expires_at = Number(value.expires_at);
+  const rawExpiry = value.expires_at ?? value.expiresAt;
+  const numExpiry = typeof rawExpiry === 'bigint' ? Number(rawExpiry) : Number(rawExpiry);
+  const expires_at = numExpiry < 0 ? numExpiry >>> 0 : numExpiry;
   
   if (id && subject && issuer && Number.isFinite(expires_at)) {
     return { id, subject, issuer, expires_at, source: 'event' };

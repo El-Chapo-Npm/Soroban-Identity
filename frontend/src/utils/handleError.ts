@@ -3,7 +3,7 @@ import {
   type SorobanErrorCode,
 } from '../../../sdk/src/errors';
 
-const CODE_MESSAGES: Record<SorobanErrorCode, string> = {
+const CODE_MESSAGES: Partial<Record<SorobanErrorCode, string>> = {
   NOT_FOUND: 'The requested record was not found.',
   UNAUTHORIZED: 'You are not authorized to perform this action.',
   NETWORK_ERROR: 'Unable to reach the Soroban network. Please try again later.',
@@ -31,7 +31,7 @@ function messageForSorobanError(error: SorobanIdentityError): string {
   if (error.code === 'NOT_FOUND' || error.code === 'VALIDATION_ERROR') {
     return error.message;
   }
-  return CODE_MESSAGES[error.code];
+  return CODE_MESSAGES[error.code] || error.message;
 }
 
 /**
@@ -44,7 +44,7 @@ export function handleError(error: unknown): string {
   }
 
   if (isNetworkError(error)) {
-    return CODE_MESSAGES.NETWORK_ERROR;
+    return CODE_MESSAGES.NETWORK_ERROR || 'Unable to reach the Soroban network. Please try again later.';
   }
 
   if (error instanceof Error) {
@@ -52,5 +52,5 @@ export function handleError(error: unknown): string {
   }
 
   console.error('Unexpected error:', error);
-  return CODE_MESSAGES.UNKNOWN;
+  return CODE_MESSAGES.UNKNOWN || 'An unexpected error occurred. Please try again.';
 }

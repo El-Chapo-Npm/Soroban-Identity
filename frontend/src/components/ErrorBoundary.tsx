@@ -97,8 +97,27 @@ export default class ErrorBoundary extends Component<Props, State> {
               Oops! Something went wrong
             </h1>
             <p style={{ marginBottom: "1rem", fontSize: "0.95rem" }}>
-              {this.state.error?.message || "An unexpected error occurred"}
+              We could not render this part of the application. Try again, or refresh the page if the problem continues.
             </p>
+            {this.state.error?.message && (
+              <details style={{ marginBottom: "1rem", textAlign: "left" }}>
+                <summary style={{ cursor: "pointer" }}>Error details</summary>
+                <pre
+                  style={{
+                    margin: "0.75rem 0 0",
+                    padding: "0.75rem",
+                    overflow: "auto",
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-word",
+                    fontSize: "0.8rem",
+                    backgroundColor: "var(--error-details-bg, rgba(0, 0, 0, 0.05))",
+                    borderRadius: "0.25rem",
+                  }}
+                >
+                  {this.state.error.message}{this.state.error.stack ? `\n\n${this.state.error.stack}` : ""}
+                </pre>
+              </details>
+            )}
             <button
               onClick={this.resetError}
               style={{

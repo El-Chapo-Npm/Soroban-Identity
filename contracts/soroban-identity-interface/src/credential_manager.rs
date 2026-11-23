@@ -2,8 +2,11 @@
 
 use credential_manager::{
     BatchVerifyResult, Credential, CredentialIdsPage, CredentialManager, CredentialStorageStats,
-    CredentialTypeDescriptor, CredentialType, ContractError, Escrow, EscrowConditions,
-    EscrowDeposit, EscrowStatus, IssuersPage, RevocationReason, RevocationRecord,
+    CredentialTemplate, CredentialTypeDescriptor, CredentialType, ContractError, DataFeedSchema,
+    Escrow, EscrowConditions, EscrowDeposit, EscrowStatus, IssuersPage, OracleConfig,
+    OracleRequest, OracleResponse, PresentationTemplate, RevocationProof, RevocationReason,
+    RevocationRecord, RevocationStats, Role, SignatureScheme, SignedPayload, SignerSet,
+    VerifiablePresentation,
 };
 use soroban_sdk::{Address, Bytes, BytesN, Env, Map, String, Vec};
 
@@ -33,6 +36,27 @@ pub trait CredentialManagerInterface {
         new_wasm_hash: BytesN<32>,
         timelock_duration: Option<u32>,
     ) -> Result<(), ContractError>;
+
+    // ── Role-based access control (#1270) ───────────────────────────────────
+
+    /// Grant `role` to `account`. Only the owner (admin) may grant roles.
+    fn grant_role(
+        env: Env,
+        admin: Address,
+        account: Address,
+        role: Role,
+    ) -> Result<(), ContractError>;
+
+    /// Revoke `role` from `account`. Only the owner (admin) may revoke roles.
+    fn revoke_role(
+        env: Env,
+        admin: Address,
+        account: Address,
+        role: Role,
+    ) -> Result<(), ContractError>;
+
+    /// The role currently held by `account`, if any.
+    fn get_role(env: Env, account: Address) -> Option<Role>;
 
     fn add_issuer(env: Env, issuer: Address) -> Result<(), ContractError>;
 
@@ -124,6 +148,79 @@ pub trait CredentialManagerInterface {
         env: Env,
         credential_id: BytesN<32>,
     ) -> Result<RevocationRecord, ContractError>;
+
+    // ── Attestation revocation (#1269) ──────────────────────────────────────
+
+    /// Mark an attestation claim as revoked. Only the attestation's issuer
+    /// (or the owner) may revoke it.
+    fn revoke_attestation(
+        env: Env,
+        caller: Address,
+        credential_id: BytesN<32>,
+        reason: RevocationReason,
+    ) -> Result<(), ContractError>;
+
+    /// Verify an attestation, failing if it has been revoked.
+    fn verify_attestation(
+        env: Env,
+        credential_id: BytesN<32>,
+    ) -> Result<(), ContractError>;
+
+    // ── Bitmap revocation list (#1121) ──────────────────────────────────────
+
+    /// Revoke up to 50 credentials in one call, recording the same reason for
+    /// each. Returns the number of credentials newly revoked.
+    fn batch_revoke(
+        env: Env,
+        issuer: Address,
+        credential_ids: Vec<BytesN<32>>,
+        reason: RevocationReason,
+    ) -> Result<u32, ContractError>;
+
+    /// Generate a merkle proof that `credential_id` is (or is not) revoked.
+    fn generate_revocation_proof(
+        env: Env,
+        credential_id: BytesN<32>,
+    ) -> Result<RevocationProof, ContractError>;
+
+    /// Verify a revocation proof against the on-chain revocation root.
+    fn verify_revocation_proof(env: Env, proof: RevocationProof) -> bool;
+
+    /// Aggregate revocation statistics for the bitmap revocation list.
+    fn get_revocation_stats(env: Env) -> RevocationStats;
+
+    // ── Verifiable presentations (#1123) ────────────────────────────────────
+
+    /// Create a W3C Verifiable Presentation bundling the given credentials.
+    fn create_presentation(
+        env: Env,
+        holder: Address,
+        credential_ids: Vec<BytesN<32>>,
+        challenge: Option<String>,
+        expires_at: u64,
+        template_name: Option<String>,
+    ) -> Result<BytesN<32>, ContractError>;
+
+    /// Verify a verifiable presentation, including its proofs and expiry.
+    fn verify_presentation(
+        env: Env,
+        presentation: VerifiablePresentation,
+        challenge: Option<String>,
+    ) -> Result<(), ContractError>;
+
+    /// Register a reusable presentation template.
+    fn register_presentation_template(
+        env: Env,
+        admin: Address,
+        template_name: String,
+        template: PresentationTemplate,
+    ) -> Result<(), ContractError>;
+
+    /// Fetch a registered presentation template by name.
+    fn get_presentation_template(
+        env: Env,
+        template_name: String,
+    ) -> Result<PresentationTemplate, ContractError>;
 
     fn expire_credential(
         env: Env,
@@ -229,6 +326,128 @@ pub trait CredentialManagerInterface {
 
     /// List escrows targeting a subject.
     fn list_subject_escrows(env: Env, subject: Address) -> Vec<BytesN<32>>;
+
+    // ── Oracle integration (#1124) ──────────────────────────────────────────
+
+    /// Register an oracle node and its configuration.
+    fn register_oracle(
+        env: Env,
+        admin: Address,
+        oracle: Address,
+        config: OracleConfig,
+    ) -> Result<(), ContractError>;
+
+    /// Define or update the schema for an off-chain data feed.
+    fn set_feed_schema(
+        env: Env,
+        admin: Address,
+        feed_id: BytesN<32>,
+        schema: DataFeedSchema,
+    ) -> Result<(), ContractError>;
+
+    /// Configure the fee charged by an oracle for a request.
+    fn set_oracle_fee(
+        env: Env,
+        admin: Address,
+        oracle: Address,
+        fee: i128,
+    ) -> Result<(), ContractError>;
+
+    /// Configure the ordered list of fallback oracles.
+    fn set_fallback_oracles(
+        env: Env,
+        admin: Address,
+        oracles: Vec<Address>,
+    ) -> Result<(), ContractError>;
+
+    /// Submit an off-chain data request to an oracle.
+    fn request_offchain_data(
+        env: Env,
+        requester: Address,
+        oracle: Address,
+        feed_id: BytesN<32>,
+        payload: Bytes,
+    ) -> Result<BytesN<32>, ContractError>;
+
+    /// Oracle callback delivering the response for a request.
+    fn oracle_callback(
+        env: Env,
+        oracle: Address,
+        request_id: BytesN<32>,
+        response: OracleResponse,
+    ) -> Result<(), ContractError>;
+
+    /// Whether a stored oracle response is still within its staleness window.
+    fn is_response_fresh(env: Env, request_id: BytesN<32>) -> bool;
+
+    // ── Credential templates (#1125) ────────────────────────────────────────
+
+    /// Register a reusable credential template.
+    fn register_template(
+        env: Env,
+        issuer: Address,
+        template: CredentialTemplate,
+    ) -> Result<BytesN<32>, ContractError>;
+
+    /// Publish a new version of an existing template.
+    fn publish_template_version(
+        env: Env,
+        issuer: Address,
+        template_id: BytesN<32>,
+        template: CredentialTemplate,
+    ) -> Result<(), ContractError>;
+
+    /// Validate claims against a template's rules.
+    fn validate_against_template(
+        env: Env,
+        template_id: BytesN<32>,
+        claims: Map<String, String>,
+    ) -> Result<bool, ContractError>;
+
+    /// List a template for sale in the template marketplace.
+    fn list_template_for_sale(
+        env: Env,
+        issuer: Address,
+        template_id: BytesN<32>,
+        price: i128,
+    ) -> Result<(), ContractError>;
+
+    /// Purchase a template listed in the marketplace.
+    fn buy_template(
+        env: Env,
+        buyer: Address,
+        template_id: BytesN<32>,
+    ) -> Result<(), ContractError>;
+
+    // ── Threshold signatures (#1126) ────────────────────────────────────────
+
+    /// Configure the initial signer set and threshold.
+    fn set_signers(
+        env: Env,
+        admin: Address,
+        signers: SignerSet,
+    ) -> Result<(), ContractError>;
+
+    /// Update the signer set (weights, threshold, membership).
+    fn update_signers(
+        env: Env,
+        admin: Address,
+        signers: SignerSet,
+    ) -> Result<(), ContractError>;
+
+    /// Validate that a set of signatures meets the configured threshold.
+    fn validate_threshold(
+        env: Env,
+        payload: SignedPayload,
+        scheme: SignatureScheme,
+    ) -> Result<bool, ContractError>;
+
+    /// Aggregate multiple signatures into a single payload.
+    fn aggregate_signatures(
+        env: Env,
+        payload: SignedPayload,
+        scheme: SignatureScheme,
+    ) -> Result<Bytes, ContractError>;
 }
 
 /// Blanket implementation delegating to `CredentialManager`'s existing
@@ -262,6 +481,28 @@ impl CredentialManagerInterface for CredentialManager {
         timelock_duration: Option<u32>,
     ) -> Result<(), ContractError> {
         Self::upgrade(env, admin, new_wasm_hash, timelock_duration)
+    }
+
+    fn grant_role(
+        env: Env,
+        admin: Address,
+        account: Address,
+        role: Role,
+    ) -> Result<(), ContractError> {
+        Self::grant_role(env, admin, account, role)
+    }
+
+    fn revoke_role(
+        env: Env,
+        admin: Address,
+        account: Address,
+        role: Role,
+    ) -> Result<(), ContractError> {
+        Self::revoke_role(env, admin, account, role)
+    }
+
+    fn get_role(env: Env, account: Address) -> Option<Role> {
+        Self::get_role(env, account)
     }
 
     fn add_issuer(env: Env, issuer: Address) -> Result<(), ContractError> {
@@ -391,6 +632,81 @@ impl CredentialManagerInterface for CredentialManager {
         credential_id: BytesN<32>,
     ) -> Result<RevocationRecord, ContractError> {
         Self::get_revocation(env, credential_id)
+    }
+
+    fn revoke_attestation(
+        env: Env,
+        caller: Address,
+        credential_id: BytesN<32>,
+        reason: RevocationReason,
+    ) -> Result<(), ContractError> {
+        Self::revoke_attestation(env, caller, credential_id, reason)
+    }
+
+    fn verify_attestation(
+        env: Env,
+        credential_id: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        Self::verify_attestation(env, credential_id)
+    }
+
+    fn batch_revoke(
+        env: Env,
+        issuer: Address,
+        credential_ids: Vec<BytesN<32>>,
+        reason: RevocationReason,
+    ) -> Result<u32, ContractError> {
+        Self::batch_revoke(env, issuer, credential_ids, reason)
+    }
+
+    fn generate_revocation_proof(
+        env: Env,
+        credential_id: BytesN<32>,
+    ) -> Result<RevocationProof, ContractError> {
+        Self::generate_revocation_proof(env, credential_id)
+    }
+
+    fn verify_revocation_proof(env: Env, proof: RevocationProof) -> bool {
+        Self::verify_revocation_proof(env, proof)
+    }
+
+    fn get_revocation_stats(env: Env) -> RevocationStats {
+        Self::get_revocation_stats(env)
+    }
+
+    fn create_presentation(
+        env: Env,
+        holder: Address,
+        credential_ids: Vec<BytesN<32>>,
+        challenge: Option<String>,
+        expires_at: u64,
+        template_name: Option<String>,
+    ) -> Result<BytesN<32>, ContractError> {
+        Self::create_presentation(env, holder, credential_ids, challenge, expires_at, template_name)
+    }
+
+    fn verify_presentation(
+        env: Env,
+        presentation: VerifiablePresentation,
+        challenge: Option<String>,
+    ) -> Result<(), ContractError> {
+        Self::verify_presentation(env, presentation, challenge)
+    }
+
+    fn register_presentation_template(
+        env: Env,
+        admin: Address,
+        template_name: String,
+        template: PresentationTemplate,
+    ) -> Result<(), ContractError> {
+        Self::register_presentation_template(env, admin, template_name, template)
+    }
+
+    fn get_presentation_template(
+        env: Env,
+        template_name: String,
+    ) -> Result<PresentationTemplate, ContractError> {
+        Self::get_presentation_template(env, template_name)
     }
 
     fn expire_credential(
@@ -526,5 +842,137 @@ impl CredentialManagerInterface for CredentialManager {
 
     fn list_subject_escrows(env: Env, subject: Address) -> Vec<BytesN<32>> {
         Self::list_subject_escrows(env, subject)
+    }
+
+    fn register_oracle(
+        env: Env,
+        admin: Address,
+        oracle: Address,
+        config: OracleConfig,
+    ) -> Result<(), ContractError> {
+        Self::register_oracle(env, admin, oracle, config)
+    }
+
+    fn set_feed_schema(
+        env: Env,
+        admin: Address,
+        feed_id: BytesN<32>,
+        schema: DataFeedSchema,
+    ) -> Result<(), ContractError> {
+        Self::set_feed_schema(env, admin, feed_id, schema)
+    }
+
+    fn set_oracle_fee(
+        env: Env,
+        admin: Address,
+        oracle: Address,
+        fee: i128,
+    ) -> Result<(), ContractError> {
+        Self::set_oracle_fee(env, admin, oracle, fee)
+    }
+
+    fn set_fallback_oracles(
+        env: Env,
+        admin: Address,
+        oracles: Vec<Address>,
+    ) -> Result<(), ContractError> {
+        Self::set_fallback_oracles(env, admin, oracles)
+    }
+
+    fn request_offchain_data(
+        env: Env,
+        requester: Address,
+        oracle: Address,
+        feed_id: BytesN<32>,
+        payload: Bytes,
+    ) -> Result<BytesN<32>, ContractError> {
+        Self::request_offchain_data(env, requester, oracle, feed_id, payload)
+    }
+
+    fn oracle_callback(
+        env: Env,
+        oracle: Address,
+        request_id: BytesN<32>,
+        response: OracleResponse,
+    ) -> Result<(), ContractError> {
+        Self::oracle_callback(env, oracle, request_id, response)
+    }
+
+    fn is_response_fresh(env: Env, request_id: BytesN<32>) -> bool {
+        Self::is_response_fresh(env, request_id)
+    }
+
+    fn register_template(
+        env: Env,
+        issuer: Address,
+        template: CredentialTemplate,
+    ) -> Result<BytesN<32>, ContractError> {
+        Self::register_template(env, issuer, template)
+    }
+
+    fn publish_template_version(
+        env: Env,
+        issuer: Address,
+        template_id: BytesN<32>,
+        template: CredentialTemplate,
+    ) -> Result<(), ContractError> {
+        Self::publish_template_version(env, issuer, template_id, template)
+    }
+
+    fn validate_against_template(
+        env: Env,
+        template_id: BytesN<32>,
+        claims: Map<String, String>,
+    ) -> Result<bool, ContractError> {
+        Self::validate_against_template(env, template_id, claims)
+    }
+
+    fn list_template_for_sale(
+        env: Env,
+        issuer: Address,
+        template_id: BytesN<32>,
+        price: i128,
+    ) -> Result<(), ContractError> {
+        Self::list_template_for_sale(env, issuer, template_id, price)
+    }
+
+    fn buy_template(
+        env: Env,
+        buyer: Address,
+        template_id: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        Self::buy_template(env, buyer, template_id)
+    }
+
+    fn set_signers(
+        env: Env,
+        admin: Address,
+        signers: SignerSet,
+    ) -> Result<(), ContractError> {
+        Self::set_signers(env, admin, signers)
+    }
+
+    fn update_signers(
+        env: Env,
+        admin: Address,
+        signers: SignerSet,
+    ) -> Result<(), ContractError> {
+        Self::update_signers(env, admin, signers)
+    }
+
+    fn validate_threshold(
+        env: Env,
+        payload: SignedPayload,
+        scheme: SignatureScheme,
+    ) -> Result<bool, ContractError> {
+        Self::validate_threshold(env, payload, scheme)
+    }
+
+    fn aggregate_signatures(
+        env: Env,
+        payload: SignedPayload,
+        scheme: SignatureScheme,
+    ) -> Result<Bytes, ContractError> {
+        Self::aggregate_signatures(env, payload, scheme)
     }
 }

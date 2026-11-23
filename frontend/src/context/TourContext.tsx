@@ -312,6 +312,7 @@ export const TourProvider: React.FC<TourProviderProps> = ({
 }) => {
   const resolvedConfig = useMemo<TourConfig>(
     () => ({ ...DEFAULT_CONFIG, ...config }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [config?.enabled, config?.version],
   );
 
@@ -544,6 +545,26 @@ export const TourProvider: React.FC<TourProviderProps> = ({
     [enabled, status, emit],
   );
 
+  /* ------------------------------ auto-start ------------------------------ */
+
+  useEffect(() => {
+    if (!enabled || !hydrated) {
+      return;
+    }
+
+    // First-time visitors (no persisted progress) get the tour started
+    // automatically so the walkthrough is discoverable.
+    if (status === 'idle' && !completed && !skipped) {
+      const targetSteps = TOUR_STEPS[path] ?? [];
+      if (targetSteps.length > 0) {
+        setStatus('active');
+        setStepIndex(0);
+        emit('start', { path, stepIndex: 0 });
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, hydrated]);
+
   /* -------------------------------- derived ------------------------------- */
 
   const currentStep = status === 'active' ? steps[stepIndex] ?? null : null;
@@ -601,6 +622,8 @@ export const TourProvider: React.FC<TourProviderProps> = ({
   return <TourContext.Provider value={value}>{children}</TourContext.Provider>;
 };
 
+TourProvider.displayName = 'TourProvider';
+
 /* -------------------------------------------------------------------------- */
 /*                                   Hook                                     */
 /* -------------------------------------------------------------------------- */
@@ -613,6 +636,18 @@ export const useTour = (): TourContextValue => {
   }
 
   return context;
+};
+
+/**
+ * Convenience selector for the restart control: exposes whether the tour
+ * can be (re)started and the action to do so.
+ */
+export const useTourRestart = (): {
+  canRestart: boolean;
+  restart: (path?: TourPath) => void;
+} => {
+  const { enabled, restart } = useTour();
+  return { canRestart: enabled, restart };
 };
 
 export default TourContext;

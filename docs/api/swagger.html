@@ -20,14 +20,42 @@
   <script>
     // When served by the API at /api/docs the server substitutes the spec URL;
     // when opened statically it falls back to the committed spec.
+    // The spec (openapi.yaml / openapi.json) defines the `BearerAuth`
+    // securityScheme (HTTP bearer, JWT) and applies it to the issuer routes,
+    // so Swagger UI renders the "Authorize" button and marks those endpoints
+    // as protected. persistAuthorization keeps the token across reloads.
     var specUrl = "__SPEC_URL__";
     if (specUrl.indexOf("__") === 0) specUrl = "../openapi.yaml";
+
+    // Local-testing convenience: allow pre-filling the bearer token from a
+    // `?token=...` query param or a previously stored `swagger_bearer_token`
+    // localStorage entry. This only seeds the Authorize dialog; it does not
+    // bypass the spec's security requirements.
+    function prefillBearerToken() {
+      var token = null;
+      try {
+        var params = new URLSearchParams(window.location.search);
+        token = params.get("token");
+      } catch (e) { /* URLSearchParams unsupported */ }
+      if (!token) {
+        try { token = window.localStorage.getItem("swagger_bearer_token"); } catch (e) { /* ignore */ }
+      }
+      return token || null;
+    }
+
+    var prefillToken = prefillBearerToken();
+
     window.ui = SwaggerUIBundle({
       url: specUrl,
       dom_id: "#swagger-ui",
       deepLinking: true,
       tryItOutEnabled: true,
       persistAuthorization: true,
+      onComplete: function () {
+        if (prefillToken && window.ui && window.ui.preauthorizeApiKey) {
+          window.ui.preauthorizeApiKey("BearerAuth", prefillToken);
+        }
+      },
       displayRequestDuration: true,
       filter: true,
       requestSnippetsEnabled: true,

@@ -1,33 +1,144 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
+import {
+  applyTheme,
+  resetTheme as clearAppliedTheme,
+  validateContrast as getContrastWarnings,
+  loadTheme as loadPersistedTheme,
+  saveTheme as persistTheme,
+  clearTheme as clearPersistedTheme,
+  PRESET_THEMES as prebuiltThemes,
+  type ContrastWarning,
+  type Theme,
+} from "../theme";
+import { useTheme as useThemePreference, type ThemePreference } from "../hooks/useTheme";
+import { applyThemePreference, getSystemThemeQuery } from "../utils/themePreference";
 
 interface ThemeContextValue {
   isDark: boolean;
+  themePreference: ThemePreference;
+  setThemePreference: (theme: ThemePreference) => void;
   toggleTheme: () => void;
+  currentTheme: Theme | null;
+  setCustomTheme: (theme: Theme) => void;
+  resetTheme: () => void;
+  availableThemes: Theme[];
+  contrastWarnings: ContrastWarning[];
 }
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
+function readPreHydrationDark(): boolean | null {
+  if (typeof document === "undefined") return null;
+  const root = document.documentElement;
+  if (root.classList.contains("dark")) return true;
+  if (root.classList.contains("light")) return false;
+  const attr = root.getAttribute("data-theme");
+  if (attr === "dark") return true;
+  if (attr === "light") return false;
+  return null;
+}
+
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [isDark, setIsDark] = useState<boolean>(() => {
-    const stored = localStorage.getItem("dark-mode");
-    if (stored !== null) return stored === "true";
-    return window.matchMedia("(prefers-color-scheme: dark)").matches;
+  const [themePreference, setThemePreference, isDark] = useThemePreference();
+
+  // Sync the preference hook with the theme already applied by the head script
+  // so the first render matches the pre-hydration theme and no flash occurs.
+  useEffect(() => {
+    const preHydrationDark = readPreHydrationDark();
+    if (preHydrationDark === null) return;
+    if (preHydrationDark !== isDark) {
+      setThemePreference(preHydrationDark ? "dark" : "light");
+    }
+    // Only run once on mount; subsequent changes are handled by the hook.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const [currentTheme, setCurrentTheme] = useState<Theme | null>(() => {
+    try {
+      return loadPersistedTheme();
+    } catch {
+      return null;
+    }
   });
 
+  const availableThemes = useMemo<Theme[]>(() => prebuiltThemes, []);
+
+  const contrastWarnings = useMemo<ContrastWarning[]>(() => {
+    if (!currentTheme) return [];
+    try {
+      return getContrastWarnings(currentTheme);
+    } catch {
+      return [];
+    }
+  }, [currentTheme]);
+
+  // Apply custom theme via the theming engine, re-applying on mode changes.
   useEffect(() => {
-    const html = document.documentElement;
-    html.classList.toggle("dark", isDark);
-    html.classList.toggle("light", !isDark);
-    localStorage.setItem("dark-mode", String(isDark));
-  }, [isDark]);
+    if (currentTheme) {
+      try {
+        applyTheme({ ...currentTheme, mode: isDark ? 'dark' : 'light' });
+        document.documentElement.setAttribute('data-custom-theme', 'true');
+      } catch {
+        // Ignore application errors; keep base theme intact.
+      }
+    } else {
+      try {
+        clearAppliedTheme();
+        document.documentElement.removeAttribute('data-custom-theme');
+      } catch {
+        // Ignore cleanup errors.
+      }
+    }
+    applyThemePreference(themePreference, isDark);
+  }, [currentTheme, isDark, themePreference]);
 
-  const toggleTheme = () => setIsDark((d) => !d);
+  const toggleTheme = useCallback(() => setThemePreference(isDark ? 'light' : 'dark'), [isDark, setThemePreference]);
 
-  return (
-    <ThemeContext.Provider value={{ isDark, toggleTheme }}>
-      {children}
-    </ThemeContext.Provider>
+  const setCustomTheme = useCallback((theme: Theme) => {
+    setCurrentTheme(theme);
+    try {
+      persistTheme(theme);
+    } catch {
+      // Ignore persistence errors.
+    }
+  }, []);
+
+  const resetTheme = useCallback(() => {
+    setCurrentTheme(null);
+    try {
+      clearPersistedTheme();
+      clearAppliedTheme();
+      document.documentElement.removeAttribute('data-custom-theme');
+      applyThemePreference(themePreference, getSystemThemeQuery()?.matches ?? false);
+    } catch {
+      // Ignore cleanup errors.
+    }
+  }, [themePreference]);
+
+  const value = useMemo<ThemeContextValue>(
+    () => ({
+      isDark,
+      themePreference,
+      setThemePreference,
+      toggleTheme,
+      currentTheme,
+      setCustomTheme,
+      resetTheme,
+      availableThemes,
+      contrastWarnings,
+    }),
+    [isDark, themePreference, setThemePreference, toggleTheme, currentTheme, setCustomTheme, resetTheme, availableThemes, contrastWarnings]
   );
+
+  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 }
 
 export function useTheme(): ThemeContextValue {

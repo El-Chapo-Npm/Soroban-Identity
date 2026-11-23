@@ -17,6 +17,7 @@ const REV_BITMAP: Symbol = symbol_short!("REVBM");
 const REV_REASON: Symbol = symbol_short!("REVRSN");
 const REV_COUNT: Symbol = symbol_short!("REVCNT");
 const TOTAL_REV: Symbol = symbol_short!("TOTREV");
+const REASON_CNT: Symbol = symbol_short!("RSNCNT");
 const TTL_MAX: u32 = 6_312_000;
 /// Extend a persistent entry's TTL only once it has dropped below this many
 /// ledgers (#866). With the threshold equal to the target, every access
@@ -28,6 +29,12 @@ const TTL_MIN: u32 = 17_280;
 const PAGE_CAP: u32 = 100;
 const BITMAP_WORDS: u32 = 16;
 const MAX_BATCH_SIZE: u32 = 100;
+/// Number of u64 words packed into a single bitmap page. A page is the unit of
+/// persistent storage and of the merkle tree, so a proof only needs the leaf
+/// page plus a logarithmic path instead of the whole bitmap.
+const WORDS_PER_PAGE: u32 = 4;
+/// Maximum number of pages a bitmap may span (16 words / 4 words per page).
+const MAX_PAGES: u32 = BITMAP_WORDS / WORDS_PER_PAGE;
 
 #[contracterror]
 #[derive(Clone, Debug, PartialEq, Copy)]
@@ -58,6 +65,57 @@ pub struct RevocationBitmap {
     pub word_count: u32,
     /// Bitmap words, each representing 64 credential slots.
     pub words: Vec<u64>,
+}
+
+/// A single page of the bitmap: a fixed-size run of u64 words. Pages are the
+/// leaves of the merkle tree used for revocation proofs.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BitmapPage {
+    pub page_index: u32,
+    pub words: Vec<u64>,
+}
+
+/// Merkle inclusion proof for a credential's revocation bit.
+///
+/// The verifier recomputes the leaf from `word` (the bitmap word containing the
+/// credential's bit) and folds it with `siblings` to obtain `root`. If the
+/// resulting root matches the issuer's published root, `word` is authentic and
+/// the bit at `bit_index` gives the revocation status.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RevocationProof {
+    pub issuer: Address,
+    pub credential_index: u32,
+    /// Bitmap word containing the credential's bit.
+    pub word: u64,
+    /// Bit position within `word` (0..63).
+    pub bit_index: u32,
+    /// Whether the credential is revoked according to `word`.
+    pub revoked: bool,
+    /// Merkle path from the leaf page to the root (bottom-up).
+    pub siblings: Vec<BytesN<32>>,
+    /// Root the proof folds to.
+    pub root: BytesN<32>,
+}
+
+/// Aggregate revocation statistics for an issuer.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RevocationStats {
+    pub issuer: Address,
+    /// Number of currently revoked credentials.
+    pub revoked_count: u32,
+    /// Number of revocations ever recorded (including reversed ones).
+    pub total_revocations: u32,
+    /// Number of revocations that have been reversed.
+    pub reversed_count: u32,
+    /// Total credential slots available in the bitmap.
+    pub capacity: u32,
+    /// Number of bitmap pages in use.
+    pub page_count: u32,
+    /// Current merkle root over the bitmap pages.
+    pub root: BytesN<32>,
 }
 
 /// A single revocation record with reason and timestamp.
@@ -101,6 +159,8 @@ pub const REASON_AFFILIATION_CHANGED: u32 = 3;
 pub const REASON_SUPERSEDED: u32 = 4;
 pub const REASON_ASSERTION_REVOKED: u32 = 5;
 pub const REASON_TEMPORARY_HOLD: u32 = 6;
+/// Highest reason code tracked by the per-reason statistics counters.
+pub const MAX_REASON_CODE: u32 = 6;
 
 #[contract]
 pub struct RevocationRegistry;
@@ -201,6 +261,14 @@ impl RevocationRegistry {
             .persistent()
             .extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
 
+        // Materialize the bitmap pages so proofs and the merkle root are
+        // available immediately after initialization.
+        let page_count = Self::page_count(word_count);
+        for page_index in 0..page_count {
+            let page = Self::empty_page(&env, page_index);
+            Self::write_page(&env, &issuer, &page);
+        }
+
         env.events().publish(
             (REV_MAP, symbol_short!("init")),
             (EVENT_VERSION, issuer, word_count * 64),
@@ -224,7 +292,7 @@ impl RevocationRegistry {
         Self::require_not_paused(&env)?;
 
         let key = Self::bitmap_key(&issuer);
-        let mut bitmap: RevocationBitmap = env
+        let bitmap: RevocationBitmap = env
             .storage()
             .persistent()
             .get(&key)
@@ -236,17 +304,17 @@ impl RevocationRegistry {
 
         let word_idx = credential_index / 64;
         let bit_idx = credential_index % 64;
-        let word = bitmap.words.get(word_idx).unwrap();
+        let page_index = word_idx / WORDS_PER_PAGE;
+        let mut page = Self::read_page(&env, &issuer, page_index);
+        let local = word_idx % WORDS_PER_PAGE;
+        let word = page.words.get(local).unwrap();
 
         if (word >> bit_idx) & 1 == 1 {
             return Err(ContractError::AlreadyRevoked);
         }
 
-        bitmap.words.set(word_idx, word | (1u64 << bit_idx));
-        env.storage().persistent().set(&key, &bitmap);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
+        page.words.set(local, word | (1u64 << bit_idx));
+        Self::write_page(&env, &issuer, &page);
 
         let now = env.ledger().timestamp();
         let record = RevocationRecord {
@@ -266,18 +334,7 @@ impl RevocationRegistry {
             .persistent()
             .extend_ttl(&record_key, TTL_BUMP_THRESHOLD, TTL_MAX);
 
-        let cnt: u32 = env
-            .storage()
-            .instance()
-            .get(&REV_COUNT)
-            .unwrap_or(0);
-        env.storage().instance().set(&REV_COUNT, &(cnt + 1));
-        let total: u32 = env
-            .storage()
-            .instance()
-            .get(&TOTAL_REV)
-            .unwrap_or(0);
-        env.storage().instance().set(&TOTAL_REV, &(total + 1));
+        Self::bump_revocation_counters(&env, reason_code, 1);
 
         env.events().publish(
             (REV_MAP, symbol_short!("revoked")),
@@ -313,12 +370,13 @@ impl RevocationRegistry {
         }
 
         let key = Self::bitmap_key(&issuer);
-        let mut bitmap: RevocationBitmap = env
+        let bitmap: RevocationBitmap = env
             .storage()
             .persistent()
             .get(&key)
             .ok_or(ContractError::CredentialNotFound)?;
 
+        // Validate every entry before mutating anything so the batch is atomic.
         for i in 0..credential_ids.len() {
             let idx = credential_indices.get(i).unwrap();
             if idx >= bitmap.word_count * 64 {
@@ -326,61 +384,59 @@ impl RevocationRegistry {
             }
             let word_idx = idx / 64;
             let bit_idx = idx % 64;
-            let word = bitmap.words.get(word_idx).unwrap();
+            let page_index = word_idx / WORDS_PER_PAGE;
+            let page = Self::read_page(&env, &issuer, page_index);
+            let word = page.words.get(word_idx % WORDS_PER_PAGE).unwrap();
             if (word >> bit_idx) & 1 == 1 {
                 return Err(ContractError::AlreadyRevoked);
             }
         }
 
-        for i in 0..credential_ids.len() {
-            let idx = credential_indices.get(i).unwrap();
-            let cred_id = credential_ids.get(i).unwrap();
-            let word_idx = idx / 64;
-            let bit_idx = idx % 64;
-            let word = bitmap.words.get(word_idx).unwrap();
-            bitmap.words.set(word_idx, word | (1u64 << bit_idx));
-
-            let now = env.ledger().timestamp();
-            let record = RevocationRecord {
-                credential_id: cred_id.clone(),
-                issuer: issuer.clone(),
-                credential_index: idx,
-                reason: String::from_str(&env, ""),
-                reason_code,
-                revoked_at: now,
-                reversed: false,
-                reversed_at: 0,
-            };
-            let record_key = Self::revocation_record_key(&cred_id);
-            env.storage().persistent().set(&record_key, &record);
-            env.storage()
-                .persistent()
-                .extend_ttl(&record_key, TTL_BUMP_THRESHOLD, TTL_MAX);
+        // Group writes by page so each page is read and written at most once,
+        // regardless of how many credentials in the batch share it.
+        let mut touched: Vec<u32> = Vec::new(&env);
+        for i in 0..credential_indices.len() {
+            let page_index = credential_indices.get(i).unwrap() / 64 / WORDS_PER_PAGE;
+            if !Self::contains_u32(&touched, page_index) {
+                touched.push_back(page_index);
+            }
         }
 
-        env.storage().persistent().set(&key, &bitmap);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
+        let now = env.ledger().timestamp();
+        for p in 0..touched.len() {
+            let page_index = touched.get(p).unwrap();
+            let mut page = Self::read_page(&env, &issuer, page_index);
+            for i in 0..credential_indices.len() {
+                let idx = credential_indices.get(i).unwrap();
+                if idx / 64 / WORDS_PER_PAGE != page_index {
+                    continue;
+                }
+                let local = (idx / 64) % WORDS_PER_PAGE;
+                let bit_idx = idx % 64;
+                let word = page.words.get(local).unwrap();
+                page.words.set(local, word | (1u64 << bit_idx));
 
-        let cnt: u32 = env
-            .storage()
-            .instance()
-            .get(&REV_COUNT)
-            .unwrap_or(0);
-        env
-            .storage()
-            .instance()
-            .set(&REV_COUNT, &(cnt + credential_ids.len()));
-        let total: u32 = env
-            .storage()
-            .instance()
-            .get(&TOTAL_REV)
-            .unwrap_or(0);
-        env
-            .storage()
-            .instance()
-            .set(&TOTAL_REV, &(total + credential_ids.len()));
+                let cred_id = credential_ids.get(i).unwrap();
+                let record = RevocationRecord {
+                    credential_id: cred_id.clone(),
+                    issuer: issuer.clone(),
+                    credential_index: idx,
+                    reason: String::from_str(&env, ""),
+                    reason_code,
+                    revoked_at: now,
+                    reversed: false,
+                    reversed_at: 0,
+                };
+                let record_key = Self::revocation_record_key(&cred_id);
+                env.storage().persistent().set(&record_key, &record);
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&record_key, TTL_BUMP_THRESHOLD, TTL_MAX);
+            }
+            Self::write_page(&env, &issuer, &page);
+        }
+
+        Self::bump_revocation_counters(&env, reason_code, credential_ids.len());
 
         env.events().publish(
             (REV_MAP, symbol_short!("batch_rev")),
@@ -390,6 +446,90 @@ impl RevocationRegistry {
                 credential_ids.len() as u32,
                 reason_code,
             ),
+        );
+        Ok(())
+    }
+
+    /// Batch reverse multiple revocations in a single transaction.
+    ///
+    /// Only the original issuer or the contract admin may reverse. All
+    /// reversals are atomic — if any fails, none are applied.
+    pub fn unrevoke_credentials_batch(
+        env: Env,
+        caller: Address,
+        credential_ids: Vec<BytesN<32>>,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        Self::require_not_paused(&env)?;
+
+        if credential_ids.len() > MAX_BATCH_SIZE {
+            return Err(ContractError::BatchTooLarge);
+        }
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(ContractError::NotInitialized)?;
+
+        // Validate all records up front.
+        for i in 0..credential_ids.len() {
+            let cred_id = credential_ids.get(i).unwrap();
+            let record_key = Self::revocation_record_key(&cred_id);
+            let record: RevocationRecord = env
+                .storage()
+                .persistent()
+                .get(&record_key)
+                .ok_or(ContractError::RevocationNotFound)?;
+            if record.reversed {
+                return Err(ContractError::CredentialNotRevoked);
+            }
+            if caller != record.issuer && caller != admin {
+                return Err(ContractError::RevocationReversalUnauthorized);
+            }
+        }
+
+        let now = env.ledger().timestamp();
+        let mut reversed: u32 = 0;
+        for i in 0..credential_ids.len() {
+            let cred_id = credential_ids.get(i).unwrap();
+            let record_key = Self::revocation_record_key(&cred_id);
+            let mut record: RevocationRecord = env
+                .storage()
+                .persistent()
+                .get(&record_key)
+                .unwrap();
+
+            let idx = record.credential_index;
+            let page_index = idx / 64 / WORDS_PER_PAGE;
+            let mut page = Self::read_page(&env, &record.issuer, page_index);
+            let local = (idx / 64) % WORDS_PER_PAGE;
+            let bit_idx = idx % 64;
+            let word = page.words.get(local).unwrap();
+            page.words.set(local, word & !(1u64 << bit_idx));
+            Self::write_page(&env, &record.issuer, &page);
+
+            record.reversed = true;
+            record.reversed_at = now;
+            env.storage().persistent().set(&record_key, &record);
+            env.storage()
+                .persistent()
+                .extend_ttl(&record_key, TTL_BUMP_THRESHOLD, TTL_MAX);
+            reversed += 1;
+        }
+
+        let cnt: u32 = env
+            .storage()
+            .instance()
+            .get(&REV_COUNT)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&REV_COUNT, &cnt.saturating_sub(reversed));
+
+        env.events().publish(
+            (REV_MAP, symbol_short!("batch_unr")),
+            (EVENT_VERSION, caller, reversed),
         );
         Ok(())
     }
@@ -413,7 +553,9 @@ impl RevocationRegistry {
                 }
                 let word_idx = credential_index / 64;
                 let bit_idx = credential_index % 64;
-                let word = bitmap.words.get(word_idx).unwrap();
+                let page_index = word_idx / WORDS_PER_PAGE;
+                let page = Self::read_page(&env, &issuer, page_index);
+                let word = page.words.get(word_idx % WORDS_PER_PAGE).unwrap();
                 (word >> bit_idx) & 1 == 1
             }
         }
@@ -443,7 +585,9 @@ impl RevocationRegistry {
             let revoked = if idx < bitmap.word_count * 64 {
                 let word_idx = idx / 64;
                 let bit_idx = idx % 64;
-                let word = bitmap.words.get(word_idx).unwrap_or(0);
+                let page_index = word_idx / WORDS_PER_PAGE;
+                let page = Self::read_page(&env, &issuer, page_index);
+                let word = page.words.get(word_idx % WORDS_PER_PAGE).unwrap_or(0);
                 (word >> bit_idx) & 1 == 1
             } else {
                 false
@@ -500,22 +644,20 @@ impl RevocationRegistry {
         }
 
         let bitmap_key = Self::bitmap_key(&record.issuer);
-        let mut bitmap: RevocationBitmap = env
-            .storage()
-            .persistent()
-            .get(&bitmap_key)
-            .ok_or(ContractError::CredentialNotFound)?;
+        if !env.storage().persistent().has(&bitmap_key) {
+            return Err(ContractError::CredentialNotFound);
+        }
 
         let idx = record.credential_index;
 
         let word_idx = idx / 64;
         let bit_idx = idx % 64;
-        let word = bitmap.words.get(word_idx).unwrap();
-        bitmap.words.set(word_idx, word & !(1u64 << bit_idx));
-        env.storage().persistent().set(&bitmap_key, &bitmap);
-        env.storage()
-            .persistent()
-            .extend_ttl(&bitmap_key, TTL_BUMP_THRESHOLD, TTL_MAX);
+        let page_index = word_idx / WORDS_PER_PAGE;
+        let mut page = Self::read_page(&env, &record.issuer, page_index);
+        let local = word_idx % WORDS_PER_PAGE;
+        let word = page.words.get(local).unwrap();
+        page.words.set(local, word & !(1u64 << bit_idx));
+        Self::write_page(&env, &record.issuer, &page);
 
         let now = env.ledger().timestamp();
         record.reversed = true;
@@ -588,11 +730,12 @@ impl RevocationRegistry {
             .unwrap_or(0)
     }
 
-    /// Compute a simple Merkle root of the revocation bitmap for a given issuer.
+    /// Compute the Merkle root over the issuer's bitmap pages.
     ///
-    /// This provides a compact proof that can be used for on/off-chain
-    /// revocation status verification. The root is computed as
-    /// SHA-256(word_0 || word_1 || ... || word_n).
+    /// Each leaf is the SHA-256 hash of a page's words; internal nodes hash the
+    /// concatenation of their children. An odd node is promoted unchanged. The
+    /// root commits to the whole bitmap, so a proof of a single word is enough
+    /// to verify a credential's revocation status.
     pub fn compute_bitmap_root(
         env: Env,
         issuer: Address,
@@ -604,12 +747,185 @@ impl RevocationRegistry {
             .get(&key)
             .ok_or(ContractError::CredentialNotFound)?;
 
-        let mut data = Bytes::new(&env);
-        for i in 0..bitmap.word_count {
-            let word = bitmap.words.get(i).unwrap();
-            data.extend_from_array(&word.to_be_bytes());
+        let page_count = Self::page_count(bitmap.word_count);
+        let mut level: Vec<BytesN<32>> = Vec::new(&env);
+        for page_index in 0..page_count {
+            let page = Self::read_page(&env, &issuer, page_index);
+            level.push_back(Self::hash_page(&env, &page));
         }
-        Ok(env.crypto().sha256(&data).into())
+        Ok(Self::merkle_root(&env, level))
+    }
+
+    /// Generate a Merkle inclusion proof for a credential's revocation bit.
+    ///
+    /// The proof carries the bitmap word containing the credential's bit and
+    /// the sibling hashes needed to recompute the issuer's root. It can be
+    /// verified off-chain without access to the full bitmap.
+    pub fn generate_revocation_proof(
+        env: Env,
+        issuer: Address,
+        credential_index: u32,
+    ) -> Result<RevocationProof, ContractError> {
+        let key = Self::bitmap_key(&issuer);
+        let bitmap: RevocationBitmap = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::CredentialNotFound)?;
+
+        if credential_index >= bitmap.word_count * 64 {
+            return Err(ContractError::InvalidBitmapIndex);
+        }
+
+        let word_idx = credential_index / 64;
+        let bit_idx = credential_index % 64;
+        let page_index = word_idx / WORDS_PER_PAGE;
+        let page = Self::read_page(&env, &issuer, page_index);
+        let word = page.words.get(word_idx % WORDS_PER_PAGE).unwrap();
+
+        let page_count = Self::page_count(bitmap.word_count);
+        let mut level: Vec<BytesN<32>> = Vec::new(&env);
+        for i in 0..page_count {
+            let p = Self::read_page(&env, &issuer, i);
+            level.push_back(Self::hash_page(&env, &p));
+        }
+
+        let mut siblings: Vec<BytesN<32>> = Vec::new(&env);
+        let mut index = page_index;
+        while level.len() > 1 {
+            let sibling = if index % 2 == 0 {
+                if index + 1 < level.len() {
+                    level.get(index + 1).unwrap()
+                } else {
+                    level.get(index).unwrap()
+                }
+            } else {
+                level.get(index - 1).unwrap()
+            };
+            siblings.push_back(sibling);
+
+            let mut next: Vec<BytesN<32>> = Vec::new(&env);
+            let mut i = 0;
+            while i < level.len() {
+                if i + 1 < level.len() {
+                    next.push_back(Self::hash_pair(
+                        &env,
+                        &level.get(i).unwrap(),
+                        &level.get(i + 1).unwrap(),
+                    ));
+                } else {
+                    next.push_back(level.get(i).unwrap());
+                }
+                i += 2;
+            }
+            level = next;
+            index /= 2;
+        }
+
+        Ok(RevocationProof {
+            issuer,
+            credential_index,
+            word,
+            bit_index: bit_idx,
+            revoked: (word >> bit_idx) & 1 == 1,
+            siblings,
+            root: level.get(0).unwrap(),
+        })
+    }
+
+    /// Verify a revocation proof against the issuer's current root.
+    pub fn verify_revocation_proof(
+        env: Env,
+        proof: RevocationProof,
+    ) -> Result<bool, ContractError> {
+        let key = Self::bitmap_key(&proof.issuer);
+        let bitmap: RevocationBitmap = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::CredentialNotFound)?;
+
+        if proof.credential_index >= bitmap.word_count * 64 {
+            return Err(ContractError::InvalidBitmapIndex);
+        }
+
+        let word_idx = proof.credential_index / 64;
+        let page_index = word_idx / WORDS_PER_PAGE;
+        let page = Self::read_page(&env, &proof.issuer, page_index);
+        let expected_word = page.words.get(word_idx % WORDS_PER_PAGE).unwrap();
+        if expected_word != proof.word {
+            return Ok(false);
+        }
+
+        let mut node = Self::hash_page(&env, &page);
+        let mut index = page_index;
+        for i in 0..proof.siblings.len() {
+            let sibling = proof.siblings.get(i).unwrap();
+            node = if index % 2 == 0 {
+                Self::hash_pair(&env, &node, &sibling)
+            } else {
+                Self::hash_pair(&env, &sibling, &node)
+            };
+            index /= 2;
+        }
+
+        Ok(node == proof.root)
+    }
+
+    /// Get aggregate revocation statistics for an issuer.
+    pub fn get_revocation_stats(
+        env: Env,
+        issuer: Address,
+    ) -> Result<RevocationStats, ContractError> {
+        let key = Self::bitmap_key(&issuer);
+        let bitmap: RevocationBitmap = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::CredentialNotFound)?;
+
+        let page_count = Self::page_count(bitmap.word_count);
+        let mut level: Vec<BytesN<32>> = Vec::new(&env);
+        for i in 0..page_count {
+            let p = Self::read_page(&env, &issuer, i);
+            level.push_back(Self::hash_page(&env, &p));
+        }
+        let root = Self::merkle_root(&env, level);
+
+        let mut revoked_count: u32 = 0;
+        for i in 0..bitmap.word_count {
+            let page = Self::read_page(&env, &issuer, i / WORDS_PER_PAGE);
+            revoked_count += page.words.get(i % WORDS_PER_PAGE).unwrap().count_ones();
+        }
+
+        let total_revocations: u32 = env
+            .storage()
+            .instance()
+            .get(&TOTAL_REV)
+            .unwrap_or(0);
+
+        Ok(RevocationStats {
+            issuer,
+            revoked_count,
+            total_revocations,
+            reversed_count: total_revocations.saturating_sub(revoked_count),
+            capacity: bitmap.word_count * 64,
+            page_count,
+            root,
+        })
+    }
+
+    /// Get the number of revocations recorded for a given reason code.
+    pub fn get_reason_count(env: Env, reason_code: u32) -> u32 {
+        let counts: Vec<u32> = env
+            .storage()
+            .instance()
+            .get(&REASON_CNT)
+            .unwrap_or(Vec::new(&env));
+        if reason_code as usize >= counts.len() as usize {
+            return 0;
+        }
+        counts.get(reason_code).unwrap_or(0)
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

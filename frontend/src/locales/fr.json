@@ -11,7 +11,9 @@
     "identity": "Identité (DID)",
     "credentials": "Justificatifs",
     "issuerAnalytics": "Analytique de l'émetteur",
-    "label": "Sections"
+    "label": "Sections",
+    "networkStatistics": "Statistiques du réseau",
+    "activityFeed": "Fil d’activité"
   },
   "wallet": {
     "connect": "Connecter le Portefeuille",
@@ -101,7 +103,7 @@
     "registeredOn": "Enregistré le",
     "lastUsed": "Dernière utilisation",
     "neverUsed": "Jamais utilisé",
-    "removeConfirm": "Voulez-vous vraiment supprimer « {{name}} » ? Vous ne pourrez plus vous connecter avec cet appareil.",
+    "removeConfirm": "Supprimer cet appareil ? Vous devrez l’enregistrer à nouveau pour utiliser la biométrie.",
     "prompt": "Confirmez votre identité avec votre empreinte digitale ou votre reconnaissance faciale.",
     "authenticating": "Authentification…",
     "authenticated": "Authentifié avec succès",
@@ -117,7 +119,19 @@
     "deviceRegistered": "Appareil enregistré avec succès.",
     "deviceRemoved": "Appareil supprimé avec succès.",
     "registerFailed": "Échec de l'enregistrement de l'appareil. Veuillez réessayer.",
-    "removeFailed": "Échec de la suppression de l'appareil. Veuillez réessayer."
+    "removeFailed": "Échec de la suppression de l'appareil. Veuillez réessayer.",
+    "registeredDevices": "Appareils enregistrés",
+    "authenticate": "S’authentifier avec la biométrie",
+    "authenticationFailed": "Échec de l’authentification. Réessayez.",
+    "registrationSuccess": "Appareil enregistré avec succès.",
+    "registrationFailed": "Impossible d’enregistrer cet appareil.",
+    "removeSuccess": "Appareil supprimé.",
+    "promptTitle": "Vérification biométrique",
+    "promptMessage": "Confirmez votre identité à l’aide du capteur biométrique de votre appareil.",
+    "promptCancelled": "La demande de vérification biométrique a été annulée.",
+    "fallbackToPassword": "Utiliser plutôt le mot de passe",
+    "unsupportedBrowserHint": "Utilisez un navigateur compatible ou continuez avec votre mot de passe.",
+    "notEnrolled": "Aucun justificatif biométrique n’est enregistré sur cet appareil."
   },
   "voice": {
     "title": "Commandes Vocales",
@@ -155,7 +169,30 @@
       "enabled": "Retour vocal activé",
       "disabled": "Retour vocal désactivé",
       "toggle": "Activer/désactiver le retour vocal"
-    }
+    },
+    "enable": "Activer les commandes vocales",
+    "disable": "Désactiver les commandes vocales",
+    "commandSearch": "Rechercher",
+    "commandNavigate": "Naviguer",
+    "commandVerify": "Vérifier",
+    "searchExample": "Dites « rechercher des justificatifs »",
+    "navigateExample": "Dites « aller aux justificatifs »",
+    "verifyExample": "Dites « vérifier un justificatif »",
+    "confirmSearch": "Recherche de {{query}}.",
+    "confirmNavigate": "Navigation vers {{destination}}.",
+    "confirmVerify": "Vérification du justificatif.",
+    "feedbackSuccess": "C’est fait.",
+    "feedbackError": "Une erreur s’est produite. Réessayez.",
+    "permissionTitle": "Accès au microphone",
+    "permissionMessage": "Les commandes vocales nécessitent l’accès à votre microphone.",
+    "permissionRequest": "Autoriser le microphone",
+    "permissionGranted": "Accès au microphone autorisé.",
+    "permissionDenied": "L’accès au microphone a été refusé. Autorisez-le dans les paramètres de votre navigateur pour utiliser les commandes vocales.",
+    "permissionPrompt": "Veuillez autoriser l’accès au microphone pour utiliser les commandes vocales.",
+    "unavailable": "Les commandes vocales ne sont pas disponibles dans ce navigateur.",
+    "unavailableHint": "Utilisez un navigateur compatible pour utiliser les commandes vocales.",
+    "noSpeechDetected": "Aucune parole détectée. Réessayez.",
+    "visualFeedback": "Saisie vocale active"
   },
   "shortcuts": {
     "title": "Raccourcis Clavier",
@@ -179,5 +216,121 @@
     "toggleTheme": "Basculer le thème",
     "showHelp": "Afficher les raccourcis clavier",
     "closeDialog": "Fermer la boîte de dialogue ou le modal"
+  },
+  "networkStatistics": {
+    "title": "Statistiques du réseau",
+    "totalDids": "Nombre total de DID",
+    "totalCredentials": "Nombre total de justificatifs",
+    "overTime": "DID et justificatifs au fil du temps",
+    "topIssuers": "Principaux émetteurs",
+    "topIssuersByVolume": "Principaux émetteurs par volume",
+    "geographicDistribution": "Répartition géographique",
+    "verificationSuccessRate": "Taux de réussite des vérifications",
+    "credentialTypeDistribution": "Répartition par type de justificatif",
+    "interactiveExploration": "Exploration interactive des données",
+    "exportChartAsImage": "Exporter le graphique en image",
+    "exportedChart": "{{filename}} exporté",
+    "exportFailed": "Échec de l’exportation — aucun fichier n’a été téléchargé",
+    "noData": "Aucune donnée disponible",
+    "loading": "Chargement des statistiques…",
+    "volume": "Volume",
+    "issuer": "Émetteur",
+    "region": "Région",
+    "count": "Nombre",
+    "percentage": "Pourcentage",
+    "successRate": "Taux de réussite",
+    "credentialType": "Type de justificatif"
+  },
+  "comparison": {
+    "compareCredentials": "Comparer des justificatifs",
+    "selectCredentials": "Sélectionnez 2 à 4 justificatifs à comparer",
+    "selectCredentialsHint": "Sélectionnez 2 à 4 justificatifs à comparer",
+    "copyComparisonLink": "Copier le lien de comparaison",
+    "comparisonLinkCopied": "Lien de comparaison copié",
+    "exportComparisonAsImage": "Exporter la comparaison en image",
+    "exportComparisonAsPdf": "Exporter la comparaison en PDF",
+    "attributes": "Attributs",
+    "differences": "Différences",
+    "highlightDifferences": "Mettre les différences en évidence",
+    "issuerReputation": "Réputation de l’émetteur",
+    "expiryDate": "Date d’expiration",
+    "verificationStatus": "Statut de vérification",
+    "noDifferences": "Aucune différence trouvée",
+    "tooManyCredentials": "Vous pouvez comparer au maximum 4 justificatifs",
+    "tooFewCredentials": "Sélectionnez au moins 2 justificatifs à comparer"
+  },
+  "tour": {
+    "helpLabel": "Aide et visite guidée",
+    "startTour": "Commencer la visite",
+    "restartTour": "Recommencer la visite",
+    "next": "Suivant",
+    "back": "Retour",
+    "skip": "Passer",
+    "finish": "Terminer",
+    "stepOf": "Étape {{current}} sur {{total}}",
+    "choosePath": "Choisissez votre visite",
+    "choosePathDescription": "Choisissez le parcours qui correspond à votre utilisation de Soroban Identity.",
+    "paths": {
+      "issuer": {
+        "title": "Parcours émetteur",
+        "description": "Découvrez comment créer un DID et émettre des justificatifs vérifiables."
+      },
+      "holder": {
+        "title": "Parcours détenteur",
+        "description": "Découvrez comment créer un DID et gérer vos justificatifs."
+      }
+    },
+    "issuer": {
+      "welcome": {
+        "title": "Bienvenue, émetteur",
+        "description": "Cette courte visite vous montre comment configurer votre identité et émettre des justificatifs."
+      },
+      "createDid": {
+        "title": "Créez votre DID",
+        "description": "Commencez par créer un identifiant décentralisé sur la blockchain pour votre organisation."
+      },
+      "connectWallet": {
+        "title": "Connectez votre portefeuille",
+        "description": "Connectez Freighter pour signer la transaction qui crée votre DID."
+      },
+      "issueCredential": {
+        "title": "Émettre un justificatif",
+        "description": "Émettez des justificatifs KYC ou d’autres justificatifs vérifiables aux adresses des personnes concernées."
+      },
+      "verifyCredential": {
+        "title": "Vérifier des justificatifs",
+        "description": "Vérifiez qu’un justificatif est valide, non révoqué et non expiré."
+      },
+      "analytics": {
+        "title": "Suivre les émissions",
+        "description": "Utilisez les statistiques de l’émetteur pour suivre les justificatifs que vous avez émis."
+      }
+    },
+    "holder": {
+      "welcome": {
+        "title": "Bienvenue, détenteur",
+        "description": "Cette courte visite vous montre comment configurer votre identité et gérer vos justificatifs."
+      },
+      "createDid": {
+        "title": "Créez votre DID",
+        "description": "Créez un identifiant décentralisé sur la blockchain qui vous représente."
+      },
+      "connectWallet": {
+        "title": "Connectez votre portefeuille",
+        "description": "Connectez Freighter pour signer la transaction qui crée votre DID."
+      },
+      "viewCredentials": {
+        "title": "Consulter vos justificatifs",
+        "description": "Parcourez les justificatifs émis à votre adresse dans l’onglet Justificatifs."
+      },
+      "verifyCredential": {
+        "title": "Vérifier un justificatif",
+        "description": "Vérifiez qu’un justificatif est valide avant de vous y fier."
+      },
+      "exportCredential": {
+        "title": "Exporter des justificatifs",
+        "description": "Téléchargez vos justificatifs aux formats JSON, XML ou PDF."
+      }
+    }
   }
 }

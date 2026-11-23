@@ -2,14 +2,7 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import type { WalletType } from "../hooks/useWallet";
 import { useWalletContext } from "../context/WalletContext";
-import { useBiometricAuth } from "../hooks/useBiometricAuth";
-
-interface BiometricDevice {
-  id: string;
-  name: string;
-  registeredAt: string;
-  transports?: string[];
-}
+import { useBiometricAuth, type BiometricDevice } from "../hooks/useBiometricAuth";
 
 function DeviceManagementPanel({
   devices,
@@ -55,7 +48,7 @@ function DeviceManagementPanel({
                 <span>{device.name}</span>
                 <span style={{ color: "var(--text-muted)" }}>
                   {t("biometric.devices.registeredAt", "Registered {{date}}", {
-                    date: device.registeredAt,
+                    date: new Date(device.registeredAt).toLocaleDateString(),
                   })}
                 </span>
                 {device.transports && device.transports.length > 0 && (
@@ -111,16 +104,18 @@ function DeviceManagementPanel({
   );
 }
 
-export default function WalletButton() {
+export default function WalletButton({ wallet: propWallet }: { wallet?: any } = {}) {
   const { t } = useTranslation();
   const {
     isSupported: biometricSupported,
     devices: biometricDevices,
     registerDevice,
-    removeDevice,
+    revokeDevice: removeDevice,
   } = useBiometricAuth();
   const [biometricStatus, setBiometricStatus] = useState("");
   const [showBiometricFallback, setShowBiometricFallback] = useState(false);
+  const contextWallet = useWalletContext();
+  const activeWallet = propWallet ?? contextWallet;
   const {
     connected,
     publicKey,
@@ -132,7 +127,7 @@ export default function WalletButton() {
     connect,
     disconnect,
     retry,
-  } = useWalletContext();
+  } = activeWallet;
   const [showPicker, setShowPicker] = useState(false);
   const [showDropdown, setShowDropdown] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState(false);

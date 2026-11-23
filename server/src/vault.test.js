@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { VaultLeaseManager } from './vault.js';
+import { VaultLeaseManager, loadVaultSecrets } from './vault.js';
 import { requestContextStore } from './request-context.js';
 
 test('reads KV v2 secrets, maps keys, and audits metadata without values', async () => {
@@ -92,4 +92,81 @@ test('fails when Vault is enabled without an address or path', async () => {
   const manager = new VaultLeaseManager({ env: { VAULT_ENABLED: 'true' }, fetchImpl: async () => new Response('{}') });
   await assert.rejects(manager.refresh(), /VAULT_ADDR and VAULT_SECRET_PATH/);
   manager.stop();
+});
+
+test('downloads Doppler secrets, maps DB and IPFS keys, and audits metadata without values', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'soroban-doppler-'));
+  const auditPath = path.join(tempDir, 'secrets.ndjson');
+  const env = {
+    SECRETS_PROVIDER: 'doppler',
+    DOPPLER_TOKEN: 'doppler-token',
+    DOPPLER_PROJECT: 'soroban-identity',
+    DOPPLER_CONFIG: 'production',
+    SECRET_MAPPINGS: JSON.stringify({
+      db_primary_url: 'DATABASE_URL',
+      ipfs_api_key: 'IPFS_API_KEY',
+    }),
+    VAULT_AUDIT_LOG_PATH: auditPath,
+  };
+  const calls = [];
+  const manager = new VaultLeaseManager({
+    env,
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return new Response(JSON.stringify({
+        secrets: {
+          db_primary_url: { raw: 'postgres://user:db-password@primary:5432/identity' },
+          ipfs_api_key: { raw: 'ipfs-secret-value' },
+          log_level: { raw: 'info' },
+        },
+      }), { status: 200 });
+    },
+  });
+
+  const secrets = await manager.refresh();
+  manager.stop();
+
+  assert.deepEqual(secrets, {
+    DATABASE_URL: 'postgres://user:db-password@primary:5432/identity',
+    IPFS_API_KEY: 'ipfs-secret-value',
+    log_level: 'info',
+  });
+  assert.match(calls[0].url, /project=soroban-identity/);
+  assert.match(calls[0].url, /config=production/);
+  assert.equal(calls[0].options.headers.authorization, 'Bearer doppler-token');
+
+  const audit = await readFile(auditPath, 'utf8');
+  assert.match(audit, /"provider":"doppler"/);
+  assert.match(audit, /db_primary_url/);
+  assert.doesNotMatch(audit, /db-password/);
+  assert.doesNotMatch(audit, /ipfs-secret-value/);
+  await rm(tempDir, { recursive: true, force: true });
+});
+
+test('fails closed when Doppler is selected without connection settings', async () => {
+  const manager = new VaultLeaseManager({
+    env: { SECRETS_PROVIDER: 'doppler' },
+    fetchImpl: async () => new Response('{}'),
+  });
+  await assert.rejects(manager.refresh(), /DOPPLER_TOKEN, DOPPLER_PROJECT and DOPPLER_CONFIG/);
+  manager.stop();
+});
+
+test('loadVaultSecrets exposes Doppler-mapped values without provider credentials', async () => {
+  const env = {
+    SECRETS_PROVIDER: 'doppler',
+    DOPPLER_TOKEN: 'doppler-token',
+    DOPPLER_PROJECT: 'soroban-identity',
+    DOPPLER_CONFIG: 'production',
+    SECRET_MAPPINGS: JSON.stringify({ db_primary_url: 'DATABASE_URL' }),
+  };
+  const { manager, secrets } = await loadVaultSecrets({
+    env,
+    fetchImpl: async () => new Response(JSON.stringify({
+      secrets: { db_primary_url: { raw: 'postgres://identity-db' } },
+    }), { status: 200 }),
+  });
+  manager?.stop();
+  assert.deepEqual(secrets, { DATABASE_URL: 'postgres://identity-db' });
+  assert.equal('DOPPLER_TOKEN' in secrets, false);
 });

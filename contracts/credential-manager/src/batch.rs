@@ -36,6 +36,13 @@ use soroban_sdk::{contracttype, symbol_short, BytesN, Env, Map, Vec};
 /// Maximum number of credential ids accepted in a single [`verify_batch`] call.
 pub const MAX_VERIFY_BATCH: u32 = 50;
 
+/// Maximum number of attestations that may be issued in a single transaction
+/// (#1322). Serialized XDR for a batch issuance operation exceeds the 64KB
+/// transaction size limit at roughly 21 attestations, so issuance is chunked
+/// into groups of at most this many items and each chunk is submitted as its
+/// own transaction.
+pub const MAX_ISSUE_BATCH: u32 = 20;
+
 /// Maximum number of leaves a single merkle batch may hold.
 pub const MAX_MERKLE_LEAVES: u32 = 1024;
 
@@ -251,6 +258,36 @@ pub fn verify_batch_membership(
         Some(root) => verify_merkle_proof(env, &root, leaf, proof),
         None => false,
     }
+}
+
+/// Split an attestation list into chunks of at most [`MAX_ISSUE_BATCH`] items
+/// (#1322).
+///
+/// Contract batch issuance fails above ~20 attestations because the serialized
+/// XDR of a single transaction exceeds the 64KB limit. Callers building an
+/// issuance transaction should pass their full attestation list through this
+/// helper and submit one transaction per returned chunk, aggregating the
+/// per-chunk results. An empty input yields an empty vector of chunks.
+pub fn chunk_issue_batch(env: &Env, attestations: &Vec<BytesN<32>>) -> Vec<Vec<BytesN<32>>> {
+    let mut chunks: Vec<Vec<BytesN<32>>> = Vec::new(env);
+    let total = attestations.len();
+    let mut start: u32 = 0;
+    while start < total {
+        let end = if start + MAX_ISSUE_BATCH < total {
+            start + MAX_ISSUE_BATCH
+        } else {
+            total
+        };
+        let mut chunk: Vec<BytesN<32>> = Vec::new(env);
+        let mut i = start;
+        while i < end {
+            chunk.push_back(attestations.get_unchecked(i));
+            i += 1;
+        }
+        chunks.push_back(chunk);
+        start = end;
+    }
+    chunks
 }
 
 /// Maximum prerequisite-chain depth walked while resolving one id, mirroring
@@ -620,6 +657,57 @@ mod merkle_tests {
             store_merkle_root(&env, &batch_id, &all),
             Err(ContractError::BatchTooLarge)
         );
+    }
+
+    #[test]
+    fn issue_batch_constant_is_twenty() {
+        assert_eq!(MAX_ISSUE_BATCH, 20);
+    }
+
+    #[test]
+    fn chunk_issue_batch_splits_into_max_twenty() {
+        let env = env();
+        let mut all: Vec<BytesN<32>> = Vec::new(&env);
+        for i in 0..45u32 {
+            all.push_back(leaf(&env, (i % 255) as u8));
+        }
+        let chunks = chunk_issue_batch(&env, &all);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks.get_unchecked(0).len(), 20);
+        assert_eq!(chunks.get_unchecked(1).len(), 20);
+        assert_eq!(chunks.get_unchecked(2).len(), 5);
+
+        // Every input item appears exactly once, in order.
+        let mut flat: Vec<BytesN<32>> = Vec::new(&env);
+        for chunk in chunks.iter() {
+            for item in chunk.iter() {
+                flat.push_back(item);
+            }
+        }
+        assert_eq!(flat.len(), all.len());
+        for i in 0..all.len() {
+            assert_eq!(flat.get_unchecked(i), all.get_unchecked(i));
+        }
+    }
+
+    #[test]
+    fn chunk_issue_batch_handles_small_and_empty_inputs() {
+        let env = env();
+        let empty: Vec<BytesN<32>> = Vec::new(&env);
+        assert_eq!(chunk_issue_batch(&env, &empty).len(), 0);
+
+        let exact = leaves(&env, &[1, 2, 3]);
+        let chunks = chunk_issue_batch(&env, &exact);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks.get_unchecked(0).len(), 3);
+
+        let mut twenty: Vec<BytesN<32>> = Vec::new(&env);
+        for i in 0..20u32 {
+            twenty.push_back(leaf(&env, (i % 255) as u8));
+        }
+        let chunks = chunk_issue_batch(&env, &twenty);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks.get_unchecked(0).len(), 20);
     }
 
     /// Gas benchmark: verification cost should scale with proof depth, not

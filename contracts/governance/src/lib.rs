@@ -15,6 +15,9 @@ const TIMELOCK: Symbol = symbol_short!("TIMELOCK");
 const VOTING_POWER: Symbol = symbol_short!("VPOWER");
 const DELEGATIONS: Symbol = symbol_short!("DELEG");
 
+const TTL_MAX: u32 = 6_312_000;
+const TTL_BUMP_THRESHOLD: u32 = TTL_MAX - 518_400;
+
 const DEFAULT_QUORUM: u32 = 30;
 const DEFAULT_THRESHOLD: u32 = 60;
 const DEFAULT_TIMELOCK_SECONDS: u64 = 48 * 60 * 60;
@@ -82,6 +85,72 @@ pub struct Proposal {
     pub voters: Vec<Address>,
 }
 
+fn get_proposal(env: &Env, proposal_id: u64) -> Option<Proposal> {
+    let key = (PROPOSAL, proposal_id);
+    if let Some(proposal) = env.storage().persistent().get::<_, Proposal>(&key) {
+        env.storage().persistent().extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
+        return Some(proposal);
+    }
+    let legacy = env.storage().instance().get::<_, Proposal>(&key);
+    if let Some(ref proposal) = legacy {
+        env.storage().persistent().set(&key, proposal);
+        env.storage().persistent().extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
+    }
+    legacy
+}
+
+fn put_proposal(env: &Env, proposal_id: u64, proposal: &Proposal) {
+    let key = (PROPOSAL, proposal_id);
+    env.storage().persistent().set(&key, proposal);
+    env.storage().persistent().extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
+}
+
+fn get_voting_weights(env: &Env) -> Map<Address, u64> {
+    if let Some(weights) = env.storage().persistent().get::<_, Map<Address, u64>>(&VOTING_POWER) {
+        env.storage().persistent().extend_ttl(&VOTING_POWER, TTL_BUMP_THRESHOLD, TTL_MAX);
+        return weights;
+    }
+    match env.storage().instance().get::<_, Map<Address, u64>>(&VOTING_POWER) {
+        Some(weights) => {
+            env.storage().persistent().set(&VOTING_POWER, &weights);
+            env.storage().persistent().extend_ttl(&VOTING_POWER, TTL_BUMP_THRESHOLD, TTL_MAX);
+            weights
+        }
+        None => Map::new(env),
+    }
+}
+
+fn put_voting_weights(env: &Env, weights: &Map<Address, u64>) {
+    env.storage().persistent().set(&VOTING_POWER, weights);
+    env.storage().persistent().extend_ttl(&VOTING_POWER, TTL_BUMP_THRESHOLD, TTL_MAX);
+}
+
+fn get_delegate(env: &Env, voter: &Address) -> Option<Address> {
+    let key = (DELEGATIONS, voter.clone());
+    if let Some(delegate) = env.storage().persistent().get::<_, Address>(&key) {
+        env.storage().persistent().extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
+        return Some(delegate);
+    }
+    let legacy = env.storage().instance().get::<_, Address>(&key);
+    if let Some(ref delegate) = legacy {
+        env.storage().persistent().set(&key, delegate);
+        env.storage().persistent().extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
+    }
+    legacy
+}
+
+fn put_delegate(env: &Env, voter: &Address, delegate: &Address) {
+    let key = (DELEGATIONS, voter.clone());
+    env.storage().persistent().set(&key, delegate);
+    env.storage().persistent().extend_ttl(&key, TTL_BUMP_THRESHOLD, TTL_MAX);
+}
+
+fn remove_delegate(env: &Env, voter: &Address) {
+    let key = (DELEGATIONS, voter.clone());
+    env.storage().persistent().remove(&key);
+    env.storage().instance().remove(&key);
+}
+
 #[contract]
 pub struct Governance;
 
@@ -125,7 +194,7 @@ impl Governance {
         if stored_admin != admin {
             return Err(GovernanceError::Unauthorized);
         }
-        env.storage().instance().set(&VOTING_POWER, &weights);
+        put_voting_weights(&env, &weights);
         env.events().publish(
             (ADMIN, symbol_short!("weights")),
             (EVENT_VERSION, admin, weights.len() as u32),
@@ -167,7 +236,7 @@ impl Governance {
             executed: false,
             voters: Vec::new(&env),
         };
-        env.storage().instance().set(&(PROPOSAL, proposal_id), &proposal);
+        put_proposal(&env, proposal_id, &proposal);
         env.events().publish(
             (PROPOSAL, symbol_short!("create")),
             (EVENT_VERSION, proposal_id, proposal_type, target, proposer, quorum, threshold, emergency),
@@ -182,11 +251,7 @@ impl Governance {
         support: VoteOption,
     ) -> Result<(), GovernanceError> {
         voter.require_auth();
-        let mut proposal: Proposal = env
-            .storage()
-            .instance()
-            .get(&(PROPOSAL, proposal_id))
-            .ok_or(GovernanceError::ProposalNotFound)?;
+        let mut proposal: Proposal = get_proposal(&env, proposal_id).ok_or(GovernanceError::ProposalNotFound)?;
         if proposal.executed {
             return Err(GovernanceError::ProposalExecuted);
         }
@@ -203,7 +268,7 @@ impl Governance {
             VoteOption::No => proposal.no_votes += power,
         }
         proposal.voters.push_back(voter.clone());
-        env.storage().instance().set(&(PROPOSAL, proposal_id), &proposal);
+        put_proposal(&env, proposal_id, &proposal);
         env.events().publish(
             (PROPOSAL, symbol_short!("vote")),
             (EVENT_VERSION, proposal_id, voter, support, power),
@@ -216,7 +281,7 @@ impl Governance {
         if voter == delegate {
             return Err(GovernanceError::VoteDelegationForbidden);
         }
-        env.storage().instance().set(&(DELEGATIONS, voter.clone()), &delegate);
+        put_delegate(&env, &voter, &delegate);
         env.events().publish(
             (PROPOSAL, symbol_short!("delegate")),
             (EVENT_VERSION, voter, delegate),
@@ -226,7 +291,7 @@ impl Governance {
 
     pub fn revoke_vote_delegation(env: Env, voter: Address) -> Result<(), GovernanceError> {
         voter.require_auth();
-        env.storage().instance().remove(&(DELEGATIONS, voter.clone()));
+        remove_delegate(&env, &voter);
         env.events().publish(
             (PROPOSAL, symbol_short!("undelg")),
             (EVENT_VERSION, voter),
@@ -240,11 +305,7 @@ impl Governance {
         proposal_id: u64,
     ) -> Result<(), GovernanceError> {
         caller.require_auth();
-        let mut proposal: Proposal = env
-            .storage()
-            .instance()
-            .get(&(PROPOSAL, proposal_id))
-            .ok_or(GovernanceError::ProposalNotFound)?;
+        let mut proposal: Proposal = get_proposal(&env, proposal_id).ok_or(GovernanceError::ProposalNotFound)?;
         if proposal.executed {
             return Err(GovernanceError::ProposalExecuted);
         }
@@ -276,7 +337,7 @@ impl Governance {
         }
 
         proposal.executed = true;
-        env.storage().instance().set(&(PROPOSAL, proposal_id), &proposal);
+        put_proposal(&env, proposal_id, &proposal);
         env.events().publish(
             (PROPOSAL, symbol_short!("exec")),
             (EVENT_VERSION, proposal_id, proposal.proposal_type, proposal.target, caller),
@@ -285,7 +346,7 @@ impl Governance {
     }
 
     pub fn get_proposal(env: Env, proposal_id: u64) -> Option<Proposal> {
-        env.storage().instance().get(&(PROPOSAL, proposal_id))
+        get_proposal(&env, proposal_id)
     }
 
     pub fn get_governance_config(env: Env) -> GovernanceConfig {
@@ -306,7 +367,7 @@ impl Governance {
     }
 
     fn total_voting_power(env: &Env) -> u64 {
-        let weights: Map<Address, u64> = env.storage().instance().get(&VOTING_POWER).unwrap_or_else(|| Map::new(env));
+        let weights = get_voting_weights(env);
         let mut total: u64 = 0;
         for (_, weight) in weights.iter() {
             total += weight;
@@ -315,15 +376,16 @@ impl Governance {
     }
 
     fn voting_power(env: &Env, voter: &Address) -> u64 {
-        let weights: Map<Address, u64> = env.storage().instance().get(&VOTING_POWER).unwrap_or_else(|| Map::new(env));
-        weights.get(voter.clone()).unwrap_or(1)
+        let weights = get_voting_weights(env);
+        let effective = get_delegate(env, voter).unwrap_or_else(|| voter.clone());
+        weights.get(effective).unwrap_or(1)
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env};
+    use soroban_sdk::{testutils::storage::Persistent as _, testutils::Address as _, Env};
 
     #[test]
     fn governance_profile_smoke() {
@@ -342,5 +404,39 @@ mod test {
             &false,
         );
         assert!(p > 0);
+    }
+
+    #[test]
+    fn per_item_state_is_stored_in_persistent_storage() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let delegate = Address::generate(&env);
+        let contract_id = env.register_contract(None, Governance);
+        let client = GovernanceClient::new(&env, &contract_id);
+
+        client.initialize(&admin, &DEFAULT_QUORUM, &DEFAULT_THRESHOLD);
+        let mut weights = Map::new(&env);
+        weights.set(admin.clone(), 10);
+        client.set_voting_weights(&admin, &weights);
+        client.delegate_vote(&admin, &delegate);
+        let proposal_id = client.propose(
+            &admin,
+            &ProposalType::UpgradeContract,
+            &admin,
+            &String::from_str(&env, "upgrade to v3"),
+            &BytesN::from_array(&env, &[8u8; 32]),
+            &false,
+        );
+
+        env.as_contract(&contract_id, || {
+            assert!(env.storage().persistent().has(&(PROPOSAL, proposal_id)));
+            assert!(env.storage().persistent().has(&VOTING_POWER));
+            assert!(env.storage().persistent().has(&(DELEGATIONS, admin.clone())));
+            assert!(!env.storage().instance().has(&(PROPOSAL, proposal_id)));
+            assert!(!env.storage().instance().has(&(DELEGATIONS, admin.clone())));
+            assert!(env.storage().persistent().get_ttl(&(PROPOSAL, proposal_id)) > TTL_BUMP_THRESHOLD);
+        });
+        assert_eq!(client.get_proposal(&proposal_id).unwrap().id, proposal_id);
     }
 }

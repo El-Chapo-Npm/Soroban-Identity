@@ -63,10 +63,11 @@ export default function KeyboardShortcutsModal({ isOpen, onClose }: KeyboardShor
 
   const groupedShortcuts = shortcuts.reduce(
     (acc, shortcut) => {
-      if (!acc[shortcut.category]) {
-        acc[shortcut.category] = [];
+      const cat = shortcut.category || 'actions';
+      if (!acc[cat]) {
+        acc[cat] = [];
       }
-      acc[shortcut.category].push(shortcut);
+      acc[cat].push(shortcut);
       return acc;
     },
     {} as Record<string, KeyboardShortcut[]>

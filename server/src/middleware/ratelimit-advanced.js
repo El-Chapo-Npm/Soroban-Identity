@@ -165,6 +165,9 @@ export class AdvancedRateLimiter {
    *            remaining: number, resetAt: number, retryAfterMs: number, headers: object}}
    */
   check(request = {}) {
+    if (String(request?.method ?? "").toUpperCase() === "OPTIONS") {
+      return { allowed: true, whitelisted: true, bypass: "cors_preflight", scope: "preflight" };
+    }
     const now = this.#now();
     const { ip, userId, endpoint, premium = false } = request;
     const authenticated = Boolean(userId);

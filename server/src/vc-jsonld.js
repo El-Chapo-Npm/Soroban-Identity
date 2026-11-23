@@ -46,6 +46,15 @@ export const DATA_INTEGRITY_CONTEXT = 'https://w3id.org/security/data-integrity/
 /** Status entries issued by this server. */
 export const CREDENTIAL_STATUS_TYPE = 'SorobanCredentialStatus2024';
 
+/** The type every Verifiable Presentation carries. */
+export const PRESENTATION_TYPE = 'VerifiablePresentation';
+
+/** JWT proof format, per the VC Data Model's JWT encoding. */
+export const PROOF_FORMAT_JWT = 'jwt_vp';
+
+/** Linked Data proof format, i.e. an embedded `proof` node. */
+export const PROOF_FORMAT_LDP = 'ldp_vp';
+
 /** Cryptosuite used for proofs. */
 export const CRYPTOSUITE = 'eddsa-jcs-2022';
 
@@ -294,6 +303,142 @@ export function toVerifiableCredential(credential, options = {}) {
 }
 
 /**
+ * Build the `id` URI for a presentation.
+ *
+ * @param {string} presentationId
+ * @param {string} [baseUrl]
+ * @returns {string}
+ */
+export function presentationUri(presentationId, baseUrl) {
+  if (!baseUrl) return `urn:presentation:${presentationId}`;
+  return `${String(baseUrl).replace(/\/$/, '')}/presentations/${encodeURIComponent(presentationId)}`;
+}
+
+/**
+ * Normalize a credential reference into a full credential object.
+ *
+ * A presentation may carry credentials inline or by reference. References are
+ * kept as `{ id }` subjects so the document stays valid JSON-LD; resolving
+ * them is the verifier's job, since only it knows where to fetch from.
+ *
+ * @param {object|string} credential
+ * @returns {object}
+ */
+function normalizePresentedCredential(credential) {
+  if (typeof credential === 'string') return { id: credential };
+  return credential;
+}
+
+/**
+ * Assemble a W3C Verifiable Presentation.
+ *
+ * @param {object} presentation
+ * @param {object[]|string[]} [presentation.verifiableCredential]
+ * @param {object} [options]
+ * @param {string} [options.id]
+ * @param {string} [options.holder]        - Holder account or DID
+ * @param {string} [options.challenge]     - Verifier-supplied nonce
+ * @param {string} [options.domain]        - Verifier-supplied domain
+ * @param {string} [options.baseUrl]
+ * @param {string} [options.baseContext]
+ * @param {string[]} [options.extraContexts]
+ * @param {number} [options.expiresAt]     - Seconds since epoch
+ * @param {number} [options.nowSeconds]
+ * @returns {object} The presentation in JSON-LD form, without a proof
+ */
+export function toVerifiablePresentation(presentation = {}, options = {}) {
+  const {
+    id,
+    holder,
+    challenge,
+    domain,
+    baseUrl,
+    baseContext = VC_CONTEXT_V1,
+    extraContexts = [],
+    expiresAt,
+    nowSeconds = Math.floor(Date.now() / 1000),
+  } = options;
+
+  const isV2 = baseContext === VC_CONTEXT_V2;
+
+  const credentials = Array.isArray(presentation?.verifiableCredential)
+    ? presentation.verifiableCredential.map(normalizePresentedCredential)
+    : [];
+
+  const vp = {
+    '@context': buildContext({ baseContext, extraContexts }),
+    type: [PRESENTATION_TYPE],
+  };
+
+  if (id) vp.id = presentationUri(id, baseUrl);
+
+  const holderDid = toDid(holder ?? presentation?.holder);
+  if (holderDid) vp.holder = holderDid;
+
+  // The challenge and domain bind the presentation to one exchange; a
+  // verifier rejects a presentation replayed against a different one.
+  if (challenge) vp.challenge = String(challenge);
+  if (domain) vp.domain = String(domain);
+
+  vp.verifiableCredential = credentials;
+
+  const expiry = Number(expiresAt ?? presentation?.expiresAt ?? 0) || null;
+  if (expiry) {
+    const expiresIso = new Date(expiry * 1000).toISOString();
+    if (isV2) vp.validUntil = expiresIso;
+    else vp.expirationDate = expiresIso;
+  }
+
+  // Presentations are not issued, but v2 requires a validity start; v1 has no
+  // equivalent property, so nothing is emitted there.
+  if (isV2) vp.validFrom = new Date(nowSeconds * 1000).toISOString();
+
+  return vp;
+}
+
+/**
+ * Selectively disclose claims from a credential inside a presentation.
+ *
+ * Returns a copy of the credential whose `credentialSubject` retains only the
+ * named claims. The original proof no longer covers the reduced document, so
+ * it is dropped: a selective disclosure is only verifiable if the holder
+ * re-signs it, or if the credential was issued with a scheme (such as BBS+)
+ * that supports derived proofs. Dropping a stale proof is the honest option —
+ * leaving it would make an unverifiable document look signed.
+ *
+ * @param {object} credential
+ * @param {string[]} claims - Claim names to keep
+ * @returns {object}
+ */
+export function selectivelyDisclose(credential, claims) {
+  if (!credential || typeof credential !== 'object') {
+    throw new Error('Credential must be an object');
+  }
+
+  const keep = new Set(Array.isArray(claims) ? claims : []);
+  const { proof: _proof, ...rest } = credential;
+
+  const subject = credential.credentialSubject;
+  const subjects = Array.isArray(subject) ? subject : [subject];
+
+  const disclosedSubjects = subjects.map((entry) => {
+    if (!entry || typeof entry !== 'object') return entry;
+    const disclosed = {};
+    for (const [key, value] of Object.entries(entry)) {
+      // `id` identifies the subject rather than describing it, so it is not a
+      // disclosable claim and is always retained.
+      if (key === 'id' || keep.has(key)) disclosed[key] = value;
+    }
+    return disclosed;
+  });
+
+  return {
+    ...rest,
+    credentialSubject: Array.isArray(subject) ? disclosedSubjects : disclosedSubjects[0],
+  };
+}
+
+/**
  * Attach a Data Integrity proof.
  *
  * Follows `eddsa-jcs-2022`: the proof options and the document are each
@@ -370,6 +515,133 @@ export function verifyProof(document, publicKey) {
   } catch {
     return false;
   }
+}
+
+/**
+ * Encode a presentation as a JWT (`jwt_vp`).
+ *
+ * The payload is the presentation with `iss`, `nbf`, `exp`, `jti`, `aud` and
+ * `nonce` standing in for the JSON-LD equivalents, per the JWT encoding rules.
+ * The signature is EdDSA over the base64url header and payload.
+ *
+ * @param {object} presentation - Presentation without a proof
+ * @param {object} options
+ * @param {crypto.KeyObject} options.privateKey
+ * @param {string} [options.issuer]     - Defaults to the presentation's holder
+ * @param {string} [options.audience]   - Defaults to the presentation's domain
+ * @param {string} [options.nonce]      - Defaults to the presentation's challenge
+ * @param {number} [options.nowSeconds]
+ * @returns {string} The compact JWT
+ */
+export function presentationToJwt(presentation, { privateKey, issuer, audience, nonce, nowSeconds = Math.floor(Date.now() / 1000) } = {}) {
+  if (!privateKey) throw new Error('A private key is required to sign a presentation JWT');
+
+  const { proof: _proof, ...unsigned } = presentation ?? {};
+
+  const header = { alg: 'EdDSA', typ: 'JWT' };
+
+  const payload = { ...unsigned };
+  const iss = issuer ?? unsigned.holder;
+  if (iss) payload.iss = iss;
+  if (unsigned.id) payload.jti = unsigned.id;
+  payload.nbf = nowSeconds;
+
+  const expiry = unsigned.expirationDate ?? unsigned.validUntil;
+  if (expiry) payload.exp = Math.floor(Date.parse(expiry) / 1000);
+
+  const aud = audience ?? unsigned.domain;
+  if (aud) payload.aud = aud;
+
+  const challenge = nonce ?? unsigned.challenge;
+  if (challenge) payload.nonce = challenge;
+
+  const encode = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  const signingInput = `${encode(header)}.${encode(payload)}`;
+  const signature = crypto.sign(null, Buffer.from(signingInput), privateKey);
+
+  return `${signingInput}.${signature.toString('base64url')}`;
+}
+
+/**
+ * Decode a presentation JWT without verifying it.
+ *
+ * @param {string} jwt
+ * @returns {{header: object, payload: object, signature: Buffer, signingInput: string}}
+ */
+export function decodePresentationJwt(jwt) {
+  const parts = String(jwt ?? '').split('.');
+  if (parts.length !== 3) throw new Error('Presentation JWT must have three parts');
+
+  const [headerPart, payloadPart, signaturePart] = parts;
+
+  return {
+    header: JSON.parse(Buffer.from(headerPart, 'base64url').toString('utf8')),
+    payload: JSON.parse(Buffer.from(payloadPart, 'base64url').toString('utf8')),
+    signature: Buffer.from(signaturePart, 'base64url'),
+    signingInput: `${headerPart}.${payloadPart}`,
+  };
+}
+
+/**
+ * Verify a presentation JWT and return the presentation it carries.
+ *
+ * @param {string} jwt
+ * @param {object} options
+ * @param {crypto.KeyObject} options.publicKey
+ * @param {string} [options.expectedChallenge]
+ * @param {string} [options.expectedDomain]
+ * @param {number} [options.nowSeconds]
+ * @returns {{valid: boolean, errors: string[], presentation: object|null}}
+ */
+export function verifyPresentationJwt(jwt, { publicKey, expectedChallenge, expectedDomain, nowSeconds = Math.floor(Date.now() / 1000) } = {}) {
+  const errors = [];
+  let decoded;
+
+  try {
+    decoded = decodePresentationJwt(jwt);
+  } catch (error) {
+    return { valid: false, errors: [error.message], presentation: null };
+  }
+
+  if (decoded.header.alg !== 'EdDSA') {
+    errors.push(`Unsupported JWT alg: ${decoded.header.alg}`);
+  }
+
+  if (publicKey) {
+    let signatureValid = false;
+    try {
+      signatureValid = crypto.verify(
+        null,
+        Buffer.from(decoded.signingInput),
+        publicKey,
+        decoded.signature,
+      );
+    } catch {
+      signatureValid = false;
+    }
+    if (!signatureValid) errors.push('Invalid JWT signature');
+  }
+
+  const { iss, jti, nbf, exp, aud, nonce, ...rest } = decoded.payload;
+
+  if (exp && Number(exp) < nowSeconds) errors.push('Presentation JWT has expired');
+  if (nbf && Number(nbf) > nowSeconds) errors.push('Presentation JWT is not yet valid');
+
+  if (expectedChallenge && nonce !== expectedChallenge) {
+    errors.push('Presentation challenge does not match');
+  }
+  if (expectedDomain && aud !== expectedDomain) {
+    errors.push('Presentation domain does not match');
+  }
+
+  const presentation = { ...rest };
+  if (iss) presentation.holder = iss;
+  if (jti) presentation.id = jti;
+  if (nonce) presentation.challenge = nonce;
+  if (aud) presentation.domain = aud;
+  if (exp) presentation.expirationDate = new Date(Number(exp) * 1000).toISOString();
+
+  return { valid: errors.length === 0, errors, presentation };
 }
 
 /**
@@ -584,7 +856,238 @@ export function createVcSerializer(config, { logger = null } = {}) {
 
     /** @see credentialStatus */
     status: credentialStatus,
+
+    /**
+     * Serialize a presentation, signing it with the configured proof key when
+     * one is available.
+     *
+     * @param {object} presentation
+     * @param {object} [options]
+     * @param {string} [options.proofFormat] - PROOF_FORMAT_LDP (default) or PROOF_FORMAT_JWT
+     * @returns {object|string}
+     */
+    serializePresentation(presentation, options = {}) {
+      const { proofFormat = PROOF_FORMAT_LDP, ...rest } = options;
+
+      const vp = toVerifiablePresentation(presentation, {
+        baseUrl: config.vcBaseUrl || undefined,
+        baseContext: config.vcBaseContext,
+        extraContexts: config.vcExtraContexts ?? [],
+        ...rest,
+      });
+
+      if (!proofKey) return vp;
+
+      const verificationMethod =
+        config.vcProofVerificationMethod || `${vp.holder ?? 'did:stellar:unknown'}#key-1`;
+
+      if (proofFormat === PROOF_FORMAT_JWT) {
+        return presentationToJwt(vp, {
+          privateKey: proofKey.privateKey,
+          issuer: vp.holder,
+          audience: vp.domain,
+          nonce: vp.challenge,
+        });
+      }
+
+      return attachProof(
+        {
+          ...vp,
+          '@context': buildContext({
+            baseContext: config.vcBaseContext,
+            extraContexts: [
+              ...(config.vcExtraContexts ?? []),
+              ...(options.extraContexts ?? []),
+            ],
+            signed: true,
+          }),
+        },
+        { privateKey: proofKey.privateKey, verificationMethod, proofPurpose: 'authentication' },
+      );
+    },
   };
+}
+
+/**
+ * Check a presentation against the structural requirements of the VC Data Model.
+ *
+ * @param {object} presentation
+ * @param {object} [options]
+ * @param {string} [options.expectedChallenge]
+ * @param {string} [options.expectedDomain]
+ * @param {number} [options.nowSeconds]
+ * @returns {{valid: boolean, errors: string[]}}
+ */
+export function validateVerifiablePresentation(presentation, { expectedChallenge, expectedDomain, nowSeconds = Math.floor(Date.now() / 1000) } = {}) {
+  const errors = [];
+
+  if (!presentation || typeof presentation !== 'object' || Array.isArray(presentation)) {
+    return { valid: false, errors: ['Presentation must be a JSON object'] };
+  }
+
+  const contexts = presentation['@context'];
+  if (!contexts) {
+    errors.push('Missing @context');
+  } else {
+    const list = Array.isArray(contexts) ? contexts : [contexts];
+    if (list[0] !== VC_CONTEXT_V1 && list[0] !== VC_CONTEXT_V2) {
+      errors.push(`First @context entry must be ${VC_CONTEXT_V1} or ${VC_CONTEXT_V2}`);
+    }
+  }
+
+  const types = presentation.type
+    ? Array.isArray(presentation.type)
+      ? presentation.type
+      : [presentation.type]
+    : [];
+  if (!types.includes(PRESENTATION_TYPE)) {
+    errors.push(`type must include '${PRESENTATION_TYPE}'`);
+  }
+
+  const credentials = presentation.verifiableCredential;
+  if (credentials !== undefined) {
+    if (!Array.isArray(credentials)) {
+      errors.push('verifiableCredential must be an array');
+    } else {
+      for (const entry of credentials) {
+        if (typeof entry === 'string') continue;
+        if (!entry || typeof entry !== 'object') {
+          errors.push('Each verifiableCredential must be an object or a URI string');
+          continue;
+        }
+        const result = validateVerifiableCredential(entry);
+        if (!result.valid) {
+          errors.push(...result.errors.map((e) => `verifiableCredential: ${e}`));
+        }
+      }
+    }
+  }
+
+  const expiry = presentation.expirationDate ?? presentation.validUntil;
+  if (expiry) {
+    if (Number.isNaN(Date.parse(expiry))) {
+      errors.push('expirationDate must be an XMLSchema dateTime');
+    } else if (Math.floor(Date.parse(expiry) / 1000) < nowSeconds) {
+      errors.push('Presentation has expired');
+    }
+  }
+
+  if (expectedChallenge && presentation.challenge !== expectedChallenge) {
+    errors.push('Presentation challenge does not match');
+  }
+  if (expectedDomain && presentation.domain !== expectedDomain) {
+    errors.push('Presentation domain does not match');
+  }
+
+  if (presentation.proof) {
+    const proofs = Array.isArray(presentation.proof) ? presentation.proof : [presentation.proof];
+    for (const proof of proofs) {
+      if (!proof?.type) errors.push('proof must have a type');
+      if (!proof?.proofPurpose) errors.push('proof must have a proofPurpose');
+      if (!proof?.verificationMethod) errors.push('proof must have a verificationMethod');
+    }
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Verify a presentation end to end.
+ *
+ * Structural validation, the embedded proof (if any), and the challenge and
+ * domain bindings are all checked; every failure is reported rather than the
+ * first.
+ *
+ * @param {object} presentation
+ * @param {object} options
+ * @param {crypto.KeyObject} [options.publicKey] - Holder's key, for the proof
+ * @param {string} [options.expectedChallenge]
+ * @param {string} [options.expectedDomain]
+ * @param {number} [options.nowSeconds]
+ * @returns {{valid: boolean, errors: string[]}}
+ */
+export function verifyPresentation(presentation, { publicKey, expectedChallenge, expectedDomain, nowSeconds = Math.floor(Date.now() / 1000) } = {}) {
+  const { valid, errors } = validateVerifiablePresentation(presentation, {
+    expectedChallenge,
+    expectedDomain,
+    nowSeconds,
+  });
+
+  const collected = [...errors];
+
+  if (presentation?.proof) {
+    if (!publicKey) {
+      collected.push('A public key is required to verify the presentation proof');
+    } else if (!verifyProof(presentation, publicKey)) {
+      collected.push('Invalid presentation proof');
+    }
+  }
+
+  return { valid: collected.length === 0, errors: collected };
+}
+
+/**
+ * Build a presentation from a template.
+ *
+ * Templates are plain objects with the presentation's fixed fields — context,
+ * holder, extra types — plus an optional `requiredClaims` map keyed by
+ * credential type, listing the claims each presented credential must expose.
+ * The template is applied to the supplied credentials, and any credential
+ * missing a required claim is rejected rather than silently included.
+ *
+ * @param {object} template
+ * @param {object[]} credentials - Credentials to include
+ * @param {object} [options]     - Passed through to toVerifiablePresentation
+ * @returns {object}
+ */
+export function presentationFromTemplate(template, credentials, options = {}) {
+  if (!template || typeof template !== 'object') {
+    throw new Error('Presentation template must be an object');
+  }
+
+  const requiredClaims = template.requiredClaims ?? {};
+  const included = [];
+
+  for (const credential of credentials ?? []) {
+    const types = Array.isArray(credential?.type) ? credential.type : [credential?.type];
+    const required = types.map((t) => requiredClaims[t]).find(Boolean);
+
+    if (required) {
+      const subject = Array.isArray(credential.credentialSubject)
+        ? credential.credentialSubject[0]
+        : credential.credentialSubject;
+      const missing = required.filter((claim) => !(claim in (subject ?? {})));
+      if (missing.length > 0) {
+        throw new Error(
+          `Credential ${credential?.id ?? '(anonymous)'} is missing required claims: ${missing.join(', ')}`,
+        );
+      }
+    }
+
+    included.push(credential);
+  }
+
+  const presentation = toVerifiablePresentation(
+    { verifiableCredential: included },
+    {
+      holder: template.holder,
+      challenge: template.challenge,
+      domain: template.domain,
+      baseContext: template.baseContext,
+      extraContexts: template.extraContexts,
+      expiresAt: template.expiresAt,
+      ...options,
+    },
+  );
+
+  const extraTypes = Array.isArray(template.type) ? template.type : [];
+  for (const type of extraTypes) {
+    if (type !== PRESENTATION_TYPE && !presentation.type.includes(type)) {
+      presentation.type.push(type);
+    }
+  }
+
+  return presentation;
 }
 
 /**

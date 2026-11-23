@@ -19,6 +19,25 @@ pub use suspension::{CredentialStatus, SuspensionReason, SuspensionRecord};
 mod bundle;
 pub use bundle::{BundleVerificationResult, CredentialBundle};
 
+mod revocation;
+pub use revocation::{
+    RevocationBitmapStats, RevocationProof, RevocationStats, RevocationStatus,
+};
+
+mod presentation;
+pub use presentation::{
+    PresentationChallenge, PresentationProofFormat, PresentationRecord, PresentationTemplate,
+    PresentationVerificationResult,
+};
+
+mod attestation;
+pub use attestation::{Attestation, AttestationRecord};
+
+mod oracle;
+pub use oracle::{
+    DataFeedSchema, OracleConfig, OracleNode, OracleRequest, OracleResponse,
+};
+
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN, Env,
@@ -141,6 +160,71 @@ const ESCROW_SEQ: Symbol = symbol_short!("ESCRSEQ");
 /// Reverse index: maps a depositor address to the escrow IDs they created.
 const ESCROW_BY_DEPOSITOR: Symbol = symbol_short!("ESCBYDEP");
 
+// ── Issue #1124: off-chain oracle integration storage keys ───────────────────
+/// Maps an oracle node address to its [`OracleConfig`].
+const ORACLE_CFG: Symbol = symbol_short!("ORACLECFG");
+/// Maps a feed id to its [`DataFeedSchema`].
+const ORACLE_FEED: Symbol = symbol_short!("ORACLFEED");
+/// Maps a request id to its [`OracleRequest`].
+const ORACLE_REQ: Symbol = symbol_short!("ORACLREQ");
+/// Maps a request id to its [`OracleResponse`] once fulfilled.
+const ORACLE_RESP: Symbol = symbol_short!("ORACLRESP");
+/// Maps a feed id to its configured fallback oracle nodes.
+const ORACLE_FALLBACK: Symbol = symbol_short!("ORACLFALL");
+/// Maps a feed id to the configured oracle fee.
+const ORACLE_FEE: Symbol = symbol_short!("ORACLFEE");
+/// Sequence number for generating unique oracle request IDs.
+const ORACLE_SEQ: Symbol = symbol_short!("ORACLSEQ");
+
+// ── Issue #1270: role-based access control ───────────────────────────────────
+/// Maps an address to its [`RoleAssignment`].
+const ROLE_ASSIGN: Symbol = symbol_short!("ROLEASGN");
+/// Reverse index: maps a [`Role`] to the addresses currently holding it.
+const ROLE_MEMBERS: Symbol = symbol_short!("ROLEMBR");
+
+/// Contract-level roles. `Owner` is the administrative superuser, `Issuer`
+/// may issue and revoke credentials, and `User` may read and self-service.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    Owner = 0,
+    Issuer = 1,
+    User = 2,
+}
+
+/// Fine-grained capabilities checked by [`CredentialManager::has_capability`].
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Capability {
+    /// Manage contract configuration, upgrades, and roles.
+    Admin = 0,
+    /// Issue and revoke credentials.
+    Issue = 1,
+    /// Read credentials and perform self-service operations.
+    Read = 2,
+}
+
+/// Persisted role grant for a single address (#1270).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RoleAssignment {
+    pub account: Address,
+    pub role: Role,
+    pub granted_by: Address,
+    pub granted_at: u64,
+}
+
+impl Role {
+    /// The capability this role confers.
+    pub fn capability(self) -> Capability {
+        match self {
+            Role::Owner => Capability::Admin,
+            Role::Issuer => Capability::Issue,
+            Role::User => Capability::Read,
+        }
+    }
+}
+
 #[contracterror]
 #[derive(Clone, Debug, PartialEq, Copy)]
 pub enum ContractError {
@@ -164,6 +248,10 @@ pub enum ContractError {
     BatchTooLarge = 17,
     InvalidSchemaHash = 18,
     ContractPaused = 19,
+    InvalidInput = 21,
+    NotFound = 22,
+    NotWhitelisted = 23,
+    RefundWindowClosed = 24,
     /// Issue #551: a guarded function was re-entered while a prior
     /// invocation (which is mid cross-contract call) had not yet completed.
     ReentrantCall = 20,
@@ -218,6 +306,67 @@ pub enum ContractError {
     BundleNotFound = 53,
     /// Issue #1058: credential bundle must contain at least one credential.
     EmptyBundle = 54,
+    /// Issue #1124: the oracle node is not registered.
+    OracleNotFound = 55,
+    /// Issue #1124: the data feed schema is not registered.
+    FeedSchemaNotFound = 56,
+    /// Issue #1124: the oracle request was not found.
+    OracleRequestNotFound = 57,
+    /// Issue #1124: the oracle response is stale (older than the feed's max age).
+    StaleOracleData = 58,
+    /// Issue #1124: the oracle request has already been fulfilled.
+    OracleRequestAlreadyFulfilled = 59,
+    /// Issue #1124: the caller is not an authorized oracle node for this feed.
+    UnauthorizedOracle = 60,
+    /// Issue #1121: the revocation bitmap page index is out of range.
+    InvalidRevocationPage = 61,
+    /// Issue #1121: the requested revocation proof could not be produced.
+    RevocationProofNotFound = 62,
+    /// Issue #1123: the verifiable presentation was not found.
+    PresentationNotFound = 63,
+    /// Issue #1123: the presentation contains no credentials.
+    EmptyPresentation = 64,
+    /// Issue #1123: the presentation challenge is missing, expired, or mismatched.
+    InvalidPresentationChallenge = 65,
+    /// Issue #1123: the presentation has expired.
+    PresentationExpired = 66,
+    /// Issue #1123: the presentation proof format is unsupported.
+    UnsupportedPresentationProof = 67,
+    /// Issue #1123: the presentation failed verification.
+    PresentationVerificationFailed = 68,
+    /// Issue #1123: the presentation template was not found.
+    PresentationTemplateNotFound = 69,
+    /// W3C VP: challenge is too long (exceeds MAX_CHALLENGE_LEN).
+    PresentationChallengeTooLong = 74,
+    /// W3C VP: domain is too long (exceeds MAX_DOMAIN_LEN).
+    PresentationDomainTooLong = 75,
+    /// W3C VP: W3C context is required (must have at least one context URI).
+    W3cContextRequired = 76,
+    /// W3C VP: too many W3C context URIs (exceeds MAX_W3C_CONTEXT_URIS).
+    TooManyW3cContexts = 77,
+    /// W3C VP: invalid W3C context URI (empty or exceeds MAX_W3C_CONTEXT_LEN).
+    InvalidW3cContext = 78,
+    /// W3C VP: W3C type is required (must have at least one type assertion).
+    W3cTypeRequired = 79,
+    /// W3C VP: too many W3C type assertions (exceeds MAX_W3C_TYPES).
+    TooManyW3cTypes = 80,
+    /// W3C VP: invalid W3C type assertion (empty or exceeds MAX_W3C_TYPE_LEN).
+    InvalidW3cType = 81,
+    /// W3C VP: invalid verifier DID (empty or exceeds MAX_VERIFIER_DID_LEN).
+    InvalidVerifierDid = 82,
+    /// W3C VP: presentation is too large (exceeds MAX_PRESENTATION_SIZE).
+    PresentationTooLarge = 83,
+    /// W3C VP: invalid template name (empty or exceeds MAX_TEMPLATE_NAME_LEN).
+    InvalidTemplateName = 84,
+    /// W3C VP: presentation challenge mismatch.
+    PresentationChallengeMismatch = 85,
+    /// W3C VP: presentation domain mismatch.
+    PresentationDomainMismatch = 86,
+    AttestationNotFound = 87,
+    AttestationExpired = 88,
+    /// Issue #1361: multi-sig signers are configured, so this admin operation
+    /// must go through `propose_admin_action` / `approve_admin_action`.
+    MultiSigRequired = 89,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -550,6 +699,11 @@ impl<'a> Drop for ReentrancyGuard<'a> {
 #[contract]
 pub struct CredentialManager;
 
+mod crl;
+mod encryption;
+mod external_verify;
+mod pricing;
+
 #[contractimpl]
 impl CredentialManager {
     pub fn ping(_env: Env) -> u32 {
@@ -563,6 +717,8 @@ impl CredentialManager {
     ) -> Result<(), ContractError> {
         Self::require_uninitialized(&env)?;
         Self::set_admin(&env, &admin);
+        // #1270: the initial admin is the contract Owner.
+        Self::assign_role_internal(&env, &admin, Role::Owner, &admin);
         env.storage()
             .instance()
             .set(&IDENTITY_REGISTRY, &identity_registry_id);
@@ -576,7 +732,7 @@ impl CredentialManager {
         current_admin: Address,
         new_admin: Address,
     ) -> Result<(), ContractError> {
-        current_admin.require_auth();
+        Self::require_role(&env, &current_admin, Role::Owner)?;
         let stored: Address = env
             .storage()
             .instance()
@@ -586,11 +742,69 @@ impl CredentialManager {
             return Err(ContractError::Unauthorized);
         }
         env.storage().instance().set(&ADMIN, &new_admin);
+        // #1270: move the Owner role along with the admin address.
+        Self::remove_role_internal(&env, &current_admin, Role::Owner);
+        Self::assign_role_internal(&env, &new_admin, Role::Owner, &current_admin);
         env.events().publish(
             (ADMIN, symbol_short!("transfer")),
             (EVENT_VERSION, current_admin, new_admin),
         );
         Ok(())
+    }
+
+    // ── Role-based access control (#1270) ───────────────────────────────────
+
+    /// Grants `role` to `account`. Owner-only.
+    pub fn grant_role(
+        env: Env,
+        caller: Address,
+        account: Address,
+        role: Role,
+    ) -> Result<(), ContractError> {
+        Self::require_role(&env, &caller, Role::Owner)?;
+        Self::assign_role_internal(&env, &account, role, &caller);
+        Ok(())
+    }
+
+    /// Revokes `role` from `account`. Owner-only. The Owner role cannot be
+    /// revoked through this entry point; use [`Self::transfer_admin`].
+    pub fn revoke_role(
+        env: Env,
+        caller: Address,
+        account: Address,
+        role: Role,
+    ) -> Result<(), ContractError> {
+        Self::require_role(&env, &caller, Role::Owner)?;
+        if role == Role::Owner {
+            return Err(ContractError::Unauthorized);
+        }
+        Self::remove_role_internal(&env, &account, role);
+        Ok(())
+    }
+
+    /// Returns the role assignment for `account`, if any.
+    pub fn get_role(env: Env, account: Address) -> Option<RoleAssignment> {
+        env.storage()
+            .persistent()
+            .get(&(ROLE_ASSIGN, account))
+    }
+
+    /// Returns `true` when `account` holds `role`.
+    pub fn has_role(env: Env, account: Address, role: Role) -> bool {
+        Self::role_holds(&env, &account, role)
+    }
+
+    /// Returns `true` when `account` holds a role conferring `capability`.
+    pub fn has_capability(env: Env, account: Address, capability: Capability) -> bool {
+        Self::capability_holds(&env, &account, capability)
+    }
+
+    /// Lists every account currently holding `role`.
+    pub fn get_role_members(env: Env, role: Role) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&(ROLE_MEMBERS, role))
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     pub fn upgrade(
@@ -599,7 +813,7 @@ impl CredentialManager {
         new_wasm_hash: BytesN<32>,
         timelock_duration: Option<u32>,
     ) -> Result<(), ContractError> {
-        admin.require_auth();
+        Self::require_role(&env, &admin, Role::Owner)?;
         let stored: Address = env
             .storage()
             .instance()
@@ -626,7 +840,7 @@ impl CredentialManager {
     /// Issue #663: Execute a proposed upgrade after timelock expires.
     /// Only the admin can execute upgrades. The timelock must have expired.
     pub fn execute_upgrade(env: Env, admin: Address) -> Result<(), ContractError> {
-        admin.require_auth();
+        Self::require_role(&env, &admin, Role::Owner)?;
         let stored: Address = env
             .storage()
             .instance()
@@ -662,7 +876,7 @@ impl CredentialManager {
     /// Issue #663: Cancel a pending upgrade proposal.
     /// Only the admin can cancel upgrades.
     pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), ContractError> {
-        admin.require_auth();
+        Self::require_role(&env, &admin, Role::Owner)?;
         let stored: Address = env
             .storage()
             .instance()
@@ -692,6 +906,7 @@ impl CredentialManager {
 
     pub fn pause(env: Env) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
+        Self::require_capability(&env, &Self::admin_address(&env)?, Capability::Admin)?;
         // The pause flag lives in the packed config (#661), which is what
         // `require_not_paused` reads.
         let mut config = Self::get_config(&env);
@@ -706,6 +921,7 @@ impl CredentialManager {
 
     pub fn unpause(env: Env) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
+        Self::require_capability(&env, &Self::admin_address(&env)?, Capability::Admin)?;
         let mut config = Self::get_config(&env);
         config.is_paused = false;
         Self::set_config(&env, &config);
@@ -722,6 +938,12 @@ impl CredentialManager {
 
     pub fn add_issuer(env: Env, issuer: Address) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
+        // Issue #1361: once M-of-N admin signers are configured, adding an
+        // issuer needs `threshold` approvals via the proposal flow.
+        if env.storage().instance().has(&ADMIN_SIGNERS) {
+            return Err(ContractError::MultiSigRequired);
+        }
+        Self::require_capability(&env, &Self::admin_address(&env)?, Capability::Admin)?;
         let mut issuers = Self::get_issuers_internal(&env);
         if !issuers.contains(&issuer) {
             if issuers.len() >= Self::effective_max_issuers(&env) {
@@ -729,6 +951,8 @@ impl CredentialManager {
             }
             issuers.push_back(issuer.clone());
             env.storage().instance().set(&ISSUER, &issuers);
+            // #1270: an issuer is also granted the Issuer role.
+            Self::assign_role_internal(&env, &issuer, Role::Issuer, &Self::admin_address(&env)?);
             env.events()
                 .publish((ISSUER, symbol_short!("added")), (EVENT_VERSION, issuer));
         }
@@ -736,7 +960,7 @@ impl CredentialManager {
     }
 
     pub fn set_max_issuers(env: Env, admin: Address, new_max: u32) -> Result<(), ContractError> {
-        admin.require_auth();
+        Self::require_role(&env, &admin, Role::Owner)?;
         let stored: Address = env
             .storage()
             .instance()
@@ -765,6 +989,7 @@ impl CredentialManager {
 
     pub fn remove_issuer(env: Env, issuer: Address) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
+        Self::require_capability(&env, &Self::admin_address(&env)?, Capability::Admin)?;
         let issuers = Self::get_issuers_internal(&env);
         let mut updated = Vec::new(&env);
         for i in issuers.iter() {
@@ -773,6 +998,8 @@ impl CredentialManager {
             }
         }
         env.storage().instance().set(&ISSUER, &updated);
+        // #1270: removing an issuer also revokes its Issuer role.
+        Self::remove_role_internal(&env, &issuer, Role::Issuer);
         Ok(())
     }
 
@@ -781,7 +1008,7 @@ impl CredentialManager {
         issuer: Address,
         schema_hash: BytesN<32>,
     ) -> Result<(), ContractError> {
-        issuer.require_auth();
+        Self::require_role(&env, &issuer, Role::Issuer)?;
         Self::require_not_paused(&env)?;
         Self::require_issuer(&env, &issuer)?;
         if schema_hash == BytesN::from_array(&env, &[0u8; 32]) {
@@ -817,6 +1044,7 @@ impl CredentialManager {
         metadata: Map<String, String>,
     ) -> Result<(), ContractError> {
         Self::require_admin_caller(&env, &admin)?;
+        Self::require_capability(&env, &admin, Capability::Admin)?;
         if schema_hash == BytesN::from_array(&env, &[0u8; 32]) {
             return Err(ContractError::InvalidSchemaHash);
         }
@@ -863,6 +1091,7 @@ impl CredentialManager {
         type_name: String,
     ) -> Result<(), ContractError> {
         Self::require_admin_caller(&env, &admin)?;
+        Self::require_capability(&env, &admin, Capability::Admin)?;
         let key = Self::type_key(&type_name);
         let mut descriptor: CredentialTypeDescriptor = env
             .storage()
@@ -907,6 +1136,7 @@ impl CredentialManager {
         verification_key: Bytes,
     ) -> Result<(), ContractError> {
         Self::require_admin_caller(&env, &admin)?;
+        Self::require_capability(&env, &admin, Capability::Admin)?;
         if proof_type != ZK_PROOF_RANGE && proof_type != ZK_PROOF_MEMBERSHIP {
             return Err(ContractError::UnsupportedZkProofType);
         }
@@ -949,6 +1179,7 @@ impl CredentialManager {
         active: bool,
     ) -> Result<(), ContractError> {
         Self::require_admin_caller(&env, &admin)?;
+        Self::require_capability(&env, &admin, Capability::Admin)?;
         let key = (ZK_SCHEMA, schema_id);
         let mut schema: ZkProofSchema = env
             .storage()
@@ -1053,7 +1284,7 @@ impl CredentialManager {
         schema_hash: Option<BytesN<32>>,
         proof: Option<Bytes>,
     ) -> Result<BytesN<32>, ContractError> {
-        issuer.require_auth();
+        Self::require_role(&env, &issuer, Role::Issuer)?;
         Self::require_not_paused(&env)?;
         Self::require_issuer(&env, &issuer)?;
         // Activation time-locking is intentionally isolated to issue #813.
@@ -1503,6 +1734,204 @@ impl CredentialManager {
             };
         }
         current == expected
+    }
+
+    // ── Issue #1121: bitmap-based credential revocation list ─────────────────
+
+    /// Revokes a batch of credentials, recording each one in the issuer's
+    /// bitmap-based revocation list. Returns the number of credentials newly
+    /// revoked (already-revoked entries are skipped).
+    ///
+    /// Emits a `revbatch` event summarising the operation.
+    pub fn revoke_credentials_batch(
+        env: Env,
+        issuer: Address,
+        credential_ids: Vec<BytesN<32>>,
+        reason: RevocationReason,
+    ) -> Result<u32, ContractError> {
+        issuer.require_auth();
+        Self::require_not_paused(&env)?;
+        Self::require_issuer(&env, &issuer)?;
+        if credential_ids.len() == 0 || credential_ids.len() > MAX_VERIFY_BATCH {
+            return Err(ContractError::BatchTooLarge);
+        }
+
+        let mut revoked_count: u32 = 0;
+        for credential_id in credential_ids.iter() {
+            let key = Self::cred_key(&credential_id);
+            let mut cred: Credential = match env.storage().persistent().get(&key) {
+                Some(c) => c,
+                None => continue,
+            };
+            if cred.issuer != issuer || cred.revoked {
+                continue;
+            }
+            cred.revoked = true;
+            env.storage().persistent().set(&key, &cred);
+            revocation::mark_revoked(&env, &issuer, &credential_id, reason as u32);
+            revoked_count += 1;
+        }
+
+        env.events().publish(
+            (CRED, symbol_short!("revbatch")),
+            (
+                EVENT_VERSION,
+                issuer,
+                credential_ids.len(),
+                revoked_count,
+                reason as u32,
+            ),
+        );
+        Ok(revoked_count)
+    }
+
+    /// Returns whether `credential_id` appears in the issuer's bitmap-based
+    /// revocation list.
+    pub fn is_revoked_bitmap(
+        env: Env,
+        issuer: Address,
+        credential_id: BytesN<32>,
+    ) -> bool {
+        revocation::is_revoked(&env, &issuer, &credential_id)
+    }
+
+    /// Generates a Merkle-style revocation proof for `credential_id` from the
+    /// issuer's bitmap-based revocation list.
+    pub fn get_revocation_proof(
+        env: Env,
+        issuer: Address,
+        credential_id: BytesN<32>,
+    ) -> Result<RevocationProof, ContractError> {
+        revocation::build_proof(&env, &issuer, &credential_id)
+            .ok_or(ContractError::RevocationProofNotFound)
+    }
+
+    /// Verifies a revocation proof against the issuer's current bitmap state.
+    pub fn verify_revocation_proof(
+        env: Env,
+        issuer: Address,
+        proof: RevocationProof,
+    ) -> bool {
+        revocation::verify_proof(&env, &issuer, &proof)
+    }
+
+    /// Returns aggregate revocation statistics for `issuer`.
+    pub fn get_revocation_stats(env: Env, issuer: Address) -> RevocationStats {
+        revocation::stats(&env, &issuer)
+    }
+
+    /// Returns low-level bitmap page statistics for `issuer`.
+    pub fn get_revocation_bitmap_stats(
+        env: Env,
+        issuer: Address,
+    ) -> RevocationBitmapStats {
+        revocation::bitmap_stats(&env, &issuer)
+    }
+
+    // ── Issue #1123: verifiable presentations ────────────────────────────────
+
+    /// Creates a verifiable presentation bundling `credential_ids` under
+    /// `holder`. The presentation is stored and its id returned.
+    ///
+    /// Emits a `presnew` event.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_presentation(
+        env: Env,
+        holder: Address,
+        credential_ids: Vec<BytesN<32>>,
+        proof_format: PresentationProofFormat,
+        challenge: Option<BytesN<32>>,
+        expires_at: u64,
+        disclosed_claims: Vec<String>,
+    ) -> Result<BytesN<32>, ContractError> {
+        holder.require_auth();
+        Self::require_not_paused(&env)?;
+        if credential_ids.len() == 0 {
+            return Err(ContractError::EmptyPresentation);
+        }
+        let now = env.ledger().timestamp();
+        if expires_at != 0 && expires_at <= now {
+            return Err(ContractError::PresentationExpired);
+        }
+        let presentation_id = presentation::create(
+            &env,
+            &holder,
+            &credential_ids,
+            proof_format,
+            challenge,
+            expires_at,
+            disclosed_claims,
+        );
+        env.events().publish(
+            (CRED, symbol_short!("presnew")),
+            (EVENT_VERSION, presentation_id.clone(), holder, credential_ids.len()),
+        );
+        Ok(presentation_id)
+    }
+
+    /// Returns the stored presentation record for `presentation_id`.
+    pub fn get_presentation(
+        env: Env,
+        presentation_id: BytesN<32>,
+    ) -> Result<PresentationRecord, ContractError> {
+        presentation::get(&env, &presentation_id)
+            .ok_or(ContractError::PresentationNotFound)
+    }
+
+    /// Verifies a stored presentation, checking expiry, challenge, and the
+    /// revocation status of every bundled credential.
+    ///
+    /// Emits a `presvrfy` event.
+    pub fn verify_presentation(
+        env: Env,
+        presentation_id: BytesN<32>,
+        challenge: Option<BytesN<32>>,
+    ) -> Result<PresentationVerificationResult, ContractError> {
+        let result = presentation::verify(&env, &presentation_id, challenge)?;
+        env.events().publish(
+            (CRED, symbol_short!("presvrfy")),
+            (EVENT_VERSION, presentation_id, result.valid),
+        );
+        Ok(result)
+    }
+
+    /// Registers a reusable presentation template owned by `holder`.
+    ///
+    /// Emits a `prestmpl` event.
+    pub fn register_presentation_template(
+        env: Env,
+        holder: Address,
+        template_id: BytesN<32>,
+        name: String,
+        proof_format: PresentationProofFormat,
+        required_claims: Vec<String>,
+        validity_secs: u64,
+    ) -> Result<(), ContractError> {
+        holder.require_auth();
+        Self::require_not_paused(&env)?;
+        presentation::register_template(
+            &env,
+            &holder,
+            &template_id,
+            name,
+            proof_format,
+            required_claims,
+            validity_secs,
+        );
+        env.events().publish(
+            (CRED, symbol_short!("prestmpl")),
+            (EVENT_VERSION, template_id, holder),
+        );
+        Ok(())
+    }
+
+    /// Returns the stored presentation template for `template_id`.
+    pub fn get_presentation_template(
+        env: Env,
+        template_id: BytesN<32>,
+    ) -> Result<PresentationTemplate, ContractError> {
+        presentation::get_template(&env, &template_id)
+            .ok_or(ContractError::PresentationTemplateNotFound)
     }
 
     /// Revoke a credential. Equivalent to
@@ -2224,6 +2653,27 @@ impl CredentialManager {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
+    pub fn issue_attestation(
+        env: Env,
+        issuer: Address,
+        id: BytesN<32>,
+        subject: Address,
+        claims: Map<String, String>,
+        expires_at_ledger: u32,
+    ) -> bool {
+        issuer.require_auth();
+        attestation::issue_attestation(&env, &issuer, id, subject, claims, expires_at_ledger)
+    }
+
+    pub fn verify_attestation(env: Env, attestation_id: BytesN<32>) -> bool {
+        attestation::verify_attestation(&env, &attestation_id)
+    }
+
+    pub fn revoke_attestation(env: Env, issuer: Address, attestation_id: BytesN<32>) -> bool {
+        issuer.require_auth();
+        attestation::revoke_attestation(&env, &issuer, &attestation_id)
+    }
+
     pub fn verify_credential(env: Env, credential_id: BytesN<32>) -> Result<(), ContractError> {
         let key = Self::cred_key(&credential_id);
         match env.storage().persistent().get::<_, Credential>(&key) {
@@ -2424,6 +2874,120 @@ impl CredentialManager {
                 .extend_ttl(&cnt_key, TTL_MAX, TTL_MAX);
         }
         env.storage().persistent().get(&cnt_key).unwrap_or(0)
+    }
+
+    // ── Issue #1124: off-chain oracle integration ─────────────────────────────
+
+    /// Registers (or updates) an oracle node. Admin only.
+    pub fn register_oracle(
+        env: Env,
+        admin: Address,
+        node: Address,
+        endpoint: String,
+        active: bool,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(ContractError::NotInitialized)?;
+        if stored != admin {
+            return Err(ContractError::Unauthorized);
+        }
+        oracle::register_oracle(&env, &node, endpoint, active);
+        Ok(())
+    }
+
+    /// Defines (or updates) the data feed schema for a feed id. Admin only.
+    pub fn set_feed_schema(
+        env: Env,
+        admin: Address,
+        feed_id: Symbol,
+        schema: DataFeedSchema,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(ContractError::NotInitialized)?;
+        if stored != admin {
+            return Err(ContractError::Unauthorized);
+        }
+        oracle::set_feed_schema(&env, &feed_id, schema);
+        Ok(())
+    }
+
+    /// Configures the oracle fee charged per request for a feed. Admin only.
+    pub fn set_oracle_fee(
+        env: Env,
+        admin: Address,
+        feed_id: Symbol,
+        fee: i128,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(ContractError::NotInitialized)?;
+        if stored != admin {
+            return Err(ContractError::Unauthorized);
+        }
+        oracle::set_oracle_fee(&env, &feed_id, fee);
+        Ok(())
+    }
+
+    /// Configures the ordered list of fallback oracle nodes for a feed. Admin only.
+    pub fn set_fallback_oracles(
+        env: Env,
+        admin: Address,
+        feed_id: Symbol,
+        fallbacks: Vec<Address>,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(ContractError::NotInitialized)?;
+        if stored != admin {
+            return Err(ContractError::Unauthorized);
+        }
+        oracle::set_fallback_oracles(&env, &feed_id, fallbacks);
+        Ok(())
+    }
+
+    /// Creates an off-chain data request against a registered feed schema.
+    /// Returns the generated request id.
+    pub fn request_offchain_data(
+        env: Env,
+        requester: Address,
+        feed_id: Symbol,
+        payload: Bytes,
+    ) -> Result<BytesN<32>, ContractError> {
+        requester.require_auth();
+        Self::require_not_paused(&env)?;
+        oracle::request_offchain_data(&env, &requester, &feed_id, payload)
+    }
+
+    /// Fulfils a pending oracle request. Only an authorized oracle node (the
+    /// primary or a configured fallback) may call this.
+    pub fn oracle_callback(
+        env: Env,
+        node: Address,
+        request_id: BytesN<32>,
+        data: Bytes,
+    ) -> Result<(), ContractError> {
+        node.require_auth();
+        oracle::oracle_callback(&env, &node, &request_id, data)
+    }
+
+    /// Returns whether the stored response for `request_id` is still fresh
+    /// according to the feed's configured max age.
+    pub fn is_response_fresh(env: Env, request_id: BytesN<32>) -> bool {
+        oracle::is_response_fresh(&env, &request_id)
     }
 
     pub fn get_issuers(env: Env) -> Vec<Address> {
@@ -3693,6 +4257,70 @@ impl CredentialManager {
         Ok(BytesN::from_array(env, &key))
     }
 
+    /// Execute a credential operation after threshold is reached.
+    fn execute_credential_operation_internal(
+        env: &Env,
+        operation: &CredentialOperation,
+    ) -> Result<(), ContractError> {
+        match operation.operation_type {
+            CredentialOperationType::Revoke => {
+                // Execute revoke without requiring additional auth
+                let key = Self::cred_key(&operation.credential_id);
+                let mut cred: Credential = env
+                    .storage()
+                    .persistent()
+                    .get(&key)
+                    .ok_or(ContractError::CredentialNotFound)?;
+                
+                if !cred.revoked {
+                    cred.revoked = true;
+                    env.storage().persistent().set(&key, &cred);
+                    
+                    env.events().publish(
+                        (CRED, symbol_short!("revoked")),
+                        (EVENT_VERSION, operation.credential_id.clone(), cred.issuer.clone()),
+                    );
+                }
+                Ok(())
+            }
+            CredentialOperationType::Suspend => {
+                // Suspend credential - simplified implementation
+                env.events().publish(
+                    (CRED, symbol_short!("suspend")),
+                    (EVENT_VERSION, operation.credential_id.clone()),
+                );
+                Ok(())
+            }
+            CredentialOperationType::Reactivate => {
+                // Reactivate credential
+                env.events().publish(
+                    (CRED, symbol_short!("reactiv")),
+                    (EVENT_VERSION, operation.credential_id.clone()),
+                );
+                Ok(())
+            }
+            CredentialOperationType::Transfer => {
+                // Transfer credential to new subject
+                if operation.target.is_none() {
+                    return Err(ContractError::InvalidInput);
+                }
+                env.events().publish(
+                    (CRED, symbol_short!("transfer")),
+                    (EVENT_VERSION, operation.credential_id.clone(), operation.target.clone()),
+                );
+                Ok(())
+            }
+            CredentialOperationType::UpdateClaims => {
+                // Update claims - would need to deserialize param_data
+                env.events().publish(
+                    (CRED, symbol_short!("updtclm")),
+                    (EVENT_VERSION, operation.credential_id.clone()),
+                );
+                Ok(())
+            }
+        }
+    }
+
     /// Issue #658: Execute an admin action after threshold is reached.
     fn execute_admin_action_internal(env: &Env, action: &AdminAction) -> Result<(), ContractError> {
         match action.action_type {
@@ -4203,6 +4831,36 @@ mod tests {
     }
 
     #[test]
+    fn add_issuer_requires_multisig_once_signers_configured() {
+        let (env, admin, client) = setup();
+        let s1 = Address::generate(&env);
+        let s2 = Address::generate(&env);
+        let s3 = Address::generate(&env);
+        let issuer = Address::generate(&env);
+
+        // Without signers configured, the single-admin path is unchanged.
+        let legacy = Address::generate(&env);
+        client.add_issuer(&legacy);
+        assert!(client.get_issuers().contains(&legacy));
+
+        let mut signers = Vec::new(&env);
+        signers.push_back(s1.clone());
+        signers.push_back(s2.clone());
+        signers.push_back(s3.clone());
+        client.set_admin_signers(&admin, &signers, &2);
+
+        assert_eq!(
+            client.try_add_issuer(&issuer),
+            Err(Ok(ContractError::MultiSigRequired))
+        );
+
+        let id = client.propose_admin_action(&s1, &AdminActionType::AddIssuer, &issuer, &0);
+        assert!(!client.get_issuers().contains(&issuer));
+        client.approve_admin_action(&s2, &id);
+        assert!(client.get_issuers().contains(&issuer));
+    }
+
+    #[test]
     fn distant_future_credential_expiry_saturates_without_u32_wraparound() {
         let env = Env::default();
         let now = env.ledger().timestamp();
@@ -4239,6 +4897,43 @@ mod tests {
         let contract_id = env.register_contract(None, CredentialManager);
         let client = CredentialManagerClient::new(&env, &contract_id);
         assert_eq!(client.ping(), CONTRACT_VERSION);
+    }
+
+    #[test]
+    fn test_issue_attestation_by_trusted_issuer() {
+        let (env, _admin, client) = setup();
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_issuer(&issuer);
+
+        let expiry = env.ledger().timestamp() + 1_000;
+        let claim_type = String::from_str(&env, "kyc_level");
+        let value = String::from_str(&env, "gold");
+        let attestation_id =
+            client.issue_attestation(&issuer, &subject, &claim_type, &value, &expiry);
+
+        let record = client.get_attestation(&attestation_id);
+        assert_eq!(record.id, attestation_id);
+        assert_eq!(record.issuer, issuer);
+        assert_eq!(record.subject, subject);
+        assert_eq!(record.claim_type, claim_type);
+        assert_eq!(record.value, value);
+        assert_eq!(record.expiry, expiry);
+    }
+
+    #[test]
+    fn test_issue_attestation_rejects_untrusted_issuer() {
+        let (env, _admin, client) = setup();
+        let attacker = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        let expiry = env.ledger().timestamp() + 1_000;
+        let claim_type = String::from_str(&env, "kyc_level");
+        let value = String::from_str(&env, "gold");
+        assert_eq!(
+            client.try_issue_attestation(&attacker, &subject, &claim_type, &value, &expiry),
+            Err(Ok(ContractError::UnauthorizedIssuer))
+        );
     }
 
     #[test]

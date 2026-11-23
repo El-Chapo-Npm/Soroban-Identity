@@ -6,8 +6,13 @@ import KeyboardShortcutsModal from "./components/KeyboardShortcutsModal";
 import { useKeyboardShortcuts, useSequentialShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useKeyboardShortcutsContext } from "./context/KeyboardShortcutsContext";
 import ViewTransition from "./components/ViewTransition";
+import ContractStatusIndicator from "./components/ContractStatusIndicator";
+import AdminIdentityTable from "./components/AdminIdentityTable";
 import VoiceCommandButton from "./components/VoiceCommandButton";
 import { useVoiceCommands, type VoiceCommand } from "./hooks/useVoiceCommands";
+import { CollaborationProvider } from "./collaboration/CollaborationProvider";
+import CollaborationPanel from "./collaboration/CollaborationPanel";
+import { COLLABORATION_CONFIG } from "./config/collaboration";
 
 // Tab panels are route-like application surfaces. Keep the initial identity
 // route small and fetch the credentials route only when it is needed.
@@ -17,6 +22,13 @@ const IssuerDashboard = lazy(() => import("./pages/IssuerDashboard"));
 const CredentialRecipientVerify = lazy(() => import("./components/CredentialRecipientVerify"));
 const NetworkStatistics = lazy(() => import("./pages/NetworkStatistics"));
 const IdentityVerifyPage = lazy(() => import("./components/IdentityVerifyPage"));
+const NetworkStatistics = lazy(() => import("./components/NetworkStatistics"));
+const ActivityFeed = lazy(() => import("./components/ActivityFeed"));
+const CustomizableDashboard = lazy(() => import("./components/CustomizableDashboard"));
+const PrivacySettings = lazy(() => import("./components/privacy/PrivacySettings"));
+const BiometricDeviceManager = lazy(() => import("./components/BiometricDeviceManager"));
+const NotificationPreferences = lazy(() => import("./components/NotificationPreferences"));
+const { isShareLinkExpired } = await import("./components/privacy/shareLinks");
 
 const preloadCredentialsPanel = () => {
   void import("./components/CredentialsPanel");
@@ -25,9 +37,24 @@ const preloadCredentialRecipientVerify = () => {
   void import("./components/CredentialRecipientVerify");
 };
 const preloadNetworkStatistics = () => {
-  void import("./pages/NetworkStatistics");
+  void import("./components/NetworkStatistics");
+};
+const preloadActivityFeed = () => {
+  void import("./components/ActivityFeed");
+};
+const preloadCustomizableDashboard = () => {
+  void import("./components/CustomizableDashboard");
+};
+const preloadPrivacySettings = () => {
+  void import("./components/privacy/PrivacySettings");
+};
+const preloadBiometricDeviceManager = () => {
+  void import("./components/BiometricDeviceManager");
 };
 import WalletButton from "./components/WalletButton";
+import QRScanner from "./components/QRScanner";
+import { TourProvider, useTour } from "./context/TourContext";
+import TourOverlay from "./components/TourOverlay";
 import ErrorBoundary from "./components/ErrorBoundary";
 import Toast from "./components/Toast";
 import { ToastProvider } from "./context/ToastContext";
@@ -35,12 +62,14 @@ import { useWallet } from "./hooks/useWallet";
 import { useCredentialExpiryCheck } from "./hooks/useCredentialExpiryCheck";
 import { useTheme, cycleTheme, getThemeIcon, getThemeLabel } from "./hooks/useTheme";
 import { useServiceWorker } from "./hooks/useServiceWorker";
+import { useInstallPrompt } from "./hooks/useInstallPrompt";
 import OfflineIndicator from "./components/OfflineIndicator";
 import {
-  DEFAULT_NETWORK,
   NETWORK_CONFIGS,
   NETWORK_OPTIONS,
+  getActiveNetwork,
   isMainnet,
+  persistActiveNetwork,
   type NetworkName,
 } from "./network";
 import { checkConnection, IdentityClient, CredentialClient, ReputationClient } from "../../sdk/src/index";
@@ -62,18 +91,109 @@ export enum Tab {
   Credentials = "credentials",
   IssuerAnalytics = "issuerAnalytics",
   NetworkStatistics = "networkStatistics",
+  ActivityFeed = "activityFeed",
+  CredentialAnalytics = "credentialAnalytics",
+  Dashboard = "dashboard",
+  Privacy = "privacy",
+  ConnectedAccounts = "connectedAccounts",
 }
 
-const TAB_ORDER: Tab[] = [Tab.Identity, Tab.Credentials, Tab.IssuerAnalytics, Tab.NetworkStatistics];
+const TAB_ORDER: Tab[] = [
+  Tab.Identity,
+  Tab.Credentials,
+  Tab.IssuerAnalytics,
+  Tab.NetworkStatistics,
+  Tab.ActivityFeed,
+  Tab.CredentialAnalytics,
+  Tab.Dashboard,
+  Tab.Privacy,
+  Tab.ConnectedAccounts,
+];
+
+// #1264: dismissible mobile install banner. Hidden when the app is already
+// installed, when the browser has not offered an install prompt, or when the
+// user has dismissed it (persisted in localStorage by the hook).
+function InstallPromptBanner() {
+  const { t } = useTranslation();
+  const { canInstall, isInstalled, promptInstall, dismiss } = useInstallPrompt();
+
+  if (!canInstall || isInstalled) return null;
+
+  return (
+    <div
+      role="region"
+      aria-label={t("pwa.installTitle", "Install app")}
+      className="install-prompt-banner"
+      data-testid="install-prompt-banner"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: "0.75rem",
+        background: "var(--info-bg, #e7f1ff)",
+        color: "var(--info-text, #0b4a8f)",
+        border: "1px solid var(--info-border, #9ec5fe)",
+        borderRadius: "0.5rem",
+        padding: "0.6rem 1rem",
+        marginBottom: "1rem",
+        fontSize: "0.9rem",
+      }}
+    >
+      <span>
+        <span aria-hidden="true">📲</span>{" "}
+        {t("pwa.installMessage", "Install this app for offline access and a faster experience.")}
+      </span>
+      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+        <button
+          type="button"
+          onClick={() => void promptInstall()}
+          style={{
+            background: "none",
+            border: "1px solid currentColor",
+            borderRadius: "0.25rem",
+            padding: "0.2rem 0.6rem",
+            cursor: "pointer",
+            fontSize: "0.8rem",
+            fontWeight: 600,
+            color: "inherit",
+          }}
+        >
+          {t("pwa.install", "Install")}
+        </button>
+        <button
+          type="button"
+          onClick={dismiss}
+          aria-label={t("pwa.dismiss", "Dismiss install prompt")}
+          style={{
+            background: "none",
+            border: "none",
+            cursor: "pointer",
+            fontSize: "1rem",
+            color: "inherit",
+          }}
+        >
+          ✕
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function AppContent() {
   const [tab, setTab] = useState<Tab>(Tab.Identity);
   const tabRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({});
-  const [activeNetwork, setActiveNetwork] = useState<NetworkName>(DEFAULT_NETWORK);
+  const [activeNetwork, setActiveNetwork] = useState<NetworkName>(getActiveNetwork);
   const [verifyId, setVerifyId] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
   const [deepLinkEncrypted, setDeepLinkEncrypted] = useState<{ c: string; k: string } | null>(null);
+  // Set when a shared credential link is past its expiry (#1101).
+  const [deepLinkExpired, setDeepLinkExpired] = useState(false);
+  // Credential currently open for collaborative editing (#1105).
+  const [activeCredentialId, setActiveCredentialId] = useState<string | null>(null);
   const networkConfig = NETWORK_CONFIGS[activeNetwork];
+  useEffect(() => {
+    persistActiveNetwork(activeNetwork);
+  }, [activeNetwork]);
   const wallet = useWallet(networkConfig);
   const [theme, setTheme, isDarkMode] = useTheme();
   const { t, i18n } = useTranslation();
@@ -82,7 +202,10 @@ function AppContent() {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuButtonRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
-  
+
+  // #1264: register the service worker for offline caching of static assets.
+  useServiceWorker();
+
   // Keyboard shortcuts
   const { enabled: shortcutsEnabled, toggleHelp: toggleShortcutsHelp, showHelp: showShortcutsHelp } = useKeyboardShortcutsContext();
   const searchInputRef = useRef<HTMLInputElement | null>(null);
@@ -100,12 +223,16 @@ function AppContent() {
       {
         phrases: ["navigate", "go to", "open", "navegar", "aller", "导航"],
         description: t("voice.commands.navigate"),
-        handler: (transcript) => {
+        handler: (transcript: string) => {
           const target = transcript.toLowerCase();
           if (target.includes("credential")) {
             setTab(Tab.Credentials);
-          } else if (target.includes("issuer") || target.includes("analytics")) {
+          } else if (target.includes("issuer")) {
             setTab(Tab.IssuerAnalytics);
+          } else if (target.includes("analytics")) {
+            setTab(Tab.CredentialAnalytics);
+          } else if (target.includes("dashboard")) {
+            setTab(Tab.Dashboard);
           } else {
             setTab(Tab.Identity);
           }
@@ -179,9 +306,31 @@ function AppContent() {
     const verifyParam = urlParams.get("verify");
     const cParam = urlParams.get("c");
     const kParam = urlParams.get("k");
+    const expParam = urlParams.get("exp");
+
+    const compareParam = urlParams.get("compare");
+    const shareParam = urlParams.get("share");
+
+    if (compareParam) {
+      const ids = compareParam
+        .split(",")
+        .map((id) => id.trim())
+        .filter(Boolean);
+      if (ids.length > 0) setCompareIds(ids);
+    }
+
+    if (shareParam) {
+      setShareId(shareParam.trim());
+    }
 
     if (cParam && kParam) {
-      setDeepLinkEncrypted({ c: cParam, k: kParam });
+      // Time-limited sharing (#1101): refuse to decrypt claims from a link
+      // whose expiry has passed.
+      if (isShareLinkExpired(expParam)) {
+        setDeepLinkExpired(true);
+      } else {
+        setDeepLinkEncrypted({ c: cParam, k: kParam });
+      }
       setTab(Tab.Credentials);
     } else if (verifyParam) {
       setVerifyId(verifyParam);
@@ -197,6 +346,21 @@ function AppContent() {
   useOpenGraphMeta(verifyMeta);
 
   const onMainnet = isMainnet(activeNetwork);
+
+  // The credential being edited is either the one opened via a verification
+  // deep link or the one selected inside the credentials panel.
+  const collaborationCredentialId = activeCredentialId ?? verifyId ?? null;
+  const collaborationUser = useMemo(
+    () =>
+      wallet.publicKey
+        ? {
+            id: wallet.publicKey,
+            name: wallet.publicKey.slice(0, 6),
+            role: COLLABORATION_CONFIG.defaultRole,
+          }
+        : null,
+    [wallet.publicKey],
+  );
 
   // Check RPC connection health on load
   useEffect(() => {
@@ -397,6 +561,7 @@ function AppContent() {
               {isConnected ? t("app.networkOnline") : t("app.networkOffline")}
             </div>
           )}
+          <ContractStatusIndicator />
           <select
             value={i18n.language}
             onChange={handleLocaleChange}
@@ -448,7 +613,21 @@ function AppContent() {
               </span>
             </span>
           )}
-          <WalletButton wallet={wallet} />
+          <TourRestartButton />
+          <VoiceCommandButton voice={voice} />
+          <button
+            type="button"
+            className="settings-toggle"
+            aria-label={t("a11y.settings", "Settings")}
+            aria-expanded={settingsOpen}
+            aria-controls="settings-panel"
+            onClick={() => setSettingsOpen((v) => !v)}
+            onMouseEnter={preloadBiometricDeviceManager}
+            onFocus={preloadBiometricDeviceManager}
+          >
+            <span aria-hidden="true">⚙</span>
+          </button>
+          <WalletButton />
         </div>
         <div
           className={`mobile-drawer-backdrop${menuOpen ? " open" : ""}`}
@@ -458,6 +637,41 @@ function AppContent() {
       </header>
 
       <OfflineIndicator />
+
+      <InstallPromptBanner />
+
+      {settingsOpen && (
+        <section
+          id="settings-panel"
+          aria-label={t("a11y.settings", "Settings")}
+          className="settings-panel"
+        >
+          <Suspense fallback={<LoadingFallback />}>
+            <BiometricDeviceManager />
+            <NotificationPreferences />
+          </Suspense>
+        </section>
+      )}
+
+      {shareId && (
+        <Suspense fallback={<LoadingFallback />}>
+          <SharedCredentialVerify
+            shortId={shareId}
+            network={activeNetwork}
+            onClose={() => setShareId(null)}
+          />
+        </Suspense>
+      )}
+
+      {compareIds && (
+        <Suspense fallback={<LoadingFallback />}>
+          <CredentialComparison
+            credentialIds={compareIds}
+            network={activeNetwork}
+            onClose={() => setCompareIds(null)}
+          />
+        </Suspense>
+      )}
 
       {uninitializedContracts.length > 0 && (
         <div
@@ -591,14 +805,26 @@ function AppContent() {
                 ? preloadCredentialsPanel
                 : name === Tab.NetworkStatistics
                   ? preloadNetworkStatistics
-                  : undefined
+                  : name === Tab.ActivityFeed
+                    ? preloadActivityFeed
+                    : name === Tab.Dashboard
+                      ? preloadCustomizableDashboard
+                      : name === Tab.Privacy
+                        ? preloadPrivacySettings
+                        : undefined
             }
             onFocus={
               name === Tab.Credentials
                 ? preloadCredentialsPanel
                 : name === Tab.NetworkStatistics
                   ? preloadNetworkStatistics
-                  : undefined
+                  : name === Tab.ActivityFeed
+                    ? preloadActivityFeed
+                    : name === Tab.Dashboard
+                      ? preloadCustomizableDashboard
+                      : name === Tab.Privacy
+                        ? preloadPrivacySettings
+                        : undefined
             }
           >
             {t(`tabs.${name}`)}
@@ -610,6 +836,14 @@ function AppContent() {
         <ErrorBoundary>
           <Suspense fallback={<LoadingFallback />}>
           <ViewTransition viewKey={tab}>
+          <div
+            id={`panel-${Tab.ConnectedAccounts}`}
+            role="tabpanel"
+            aria-labelledby={`tab-${Tab.ConnectedAccounts}`}
+            hidden={tab !== Tab.ConnectedAccounts}
+          >
+            {tab === Tab.ConnectedAccounts && <ConnectedAccountsPanel wallet={wallet} />}
+          </div>
           <div
             id={`panel-${Tab.Identity}`}
             role="tabpanel"
@@ -628,6 +862,24 @@ function AppContent() {
           >
             {tab === Tab.Credentials && (
               <>
+                {deepLinkExpired && (
+                  <div
+                    role="alert"
+                    aria-label="Shared credential link expired"
+                    style={{
+                      background: "var(--warning-bg, #fff3cd)",
+                      color: "var(--warning-text, #856404)",
+                      border: "1px solid var(--warning-border, #ffc107)",
+                      borderRadius: "0.5rem",
+                      padding: "0.6rem 1rem",
+                      marginBottom: "1rem",
+                      fontSize: "0.9rem",
+                    }}
+                  >
+                    <span aria-hidden="true">⚠</span> This shared credential link has expired and can no
+                    longer be opened. Ask the sender for a new link.
+                  </div>
+                )}
                 {deepLinkEncrypted && (
                   <CredentialRecipientVerify
                     ciphertext={deepLinkEncrypted.c}
@@ -640,14 +892,20 @@ function AppContent() {
                 </button>
                 {scanning && (
                   <QRScanner
-                    onVerify={(id) => {
+                    onVerify={(id: string) => {
                       setVerifyId(id);
                       setScanning(false);
                     }}
                     onClose={() => setScanning(false)}
                   />
                 )}
-                <CredentialsPanel verifyId={verifyId} />
+                <CredentialsPanel
+                  verifyId={verifyId}
+                  onSelectCredential={(id: string) => setActiveCredentialId(id)}
+                />
+                {collaborationCredentialId && (
+                  <CollaborationPanel credentialId={collaborationCredentialId} />
+                )}
               </>
             )}
           </div>
@@ -658,7 +916,95 @@ function AppContent() {
             data-tour="panel-issuer"
             hidden={tab !== Tab.IssuerAnalytics}
           >
-            {tab === Tab.IssuerAnalytics && <IssuerDashboard />}
+            {tab === Tab.IssuerAnalytics && (
+              <IssuerDashboard onOpenCustomizableDashboard={() => setTab(Tab.Dashboard)} />
+            )}
+          </div>
+          <div
+            id={`panel-${Tab.CredentialAnalytics}`}
+            role="tabpanel"
+            aria-labelledby={`tab-${Tab.CredentialAnalytics}`}
+            data-tour="panel-credential-analytics"
+            hidden={tab !== Tab.CredentialAnalytics}
+          >
+            {tab === Tab.CredentialAnalytics && (
+              <CredentialAnalytics
+                wallet={wallet}
+                network={activeNetwork}
+                networkConfig={networkConfig}
+              />
+            )}
+          </div>
+          <div
+            id={`panel-${Tab.Dashboard}`}
+            role="tabpanel"
+            aria-labelledby={`tab-${Tab.Dashboard}`}
+            data-tour="panel-dashboard"
+            hidden={tab !== Tab.Dashboard}
+          >
+            {tab === Tab.Dashboard && (
+              <CustomizableDashboard
+                wallet={wallet}
+                network={activeNetwork}
+                networkConfig={networkConfig}
+                onNavigate={(target) => {
+                  const next = (Object.values(Tab) as string[]).includes(target)
+                    ? (target as Tab)
+                    : null;
+                  if (next) {
+                    setTab(next);
+                    tabRefs.current[next]?.focus();
+                  }
+                }}
+              />
+            )}
+          </div>
+          <div
+            id={`panel-${Tab.NetworkStatistics}`}
+            role="tabpanel"
+            aria-labelledby={`tab-${Tab.NetworkStatistics}`}
+            data-tour="panel-network"
+            hidden={tab !== Tab.NetworkStatistics}
+          >
+            {tab === Tab.NetworkStatistics && <NetworkStatistics />}
+          </div>
+          <div
+            id={`panel-${Tab.Activity}`}
+            role="tabpanel"
+            aria-labelledby={`tab-${Tab.Activity}`}
+            data-tour="panel-activity"
+            hidden={tab !== Tab.Activity}
+          >
+            {tab === Tab.Activity && (
+              <ActivityFeed network={activeNetwork} publicKey={wallet.publicKey} />
+            )}
+          </div>
+          <div
+            id={`panel-${Tab.NetworkStatistics}`}
+            role="tabpanel"
+            aria-labelledby={`tab-${Tab.NetworkStatistics}`}
+            data-tour="panel-network"
+            hidden={tab !== Tab.NetworkStatistics}
+          >
+            {tab === Tab.NetworkStatistics && <NetworkStatistics />}
+          </div>
+          <div
+            id={`panel-${Tab.ActivityFeed}`}
+            role="tabpanel"
+            aria-labelledby={`tab-${Tab.ActivityFeed}`}
+            data-tour="panel-activity"
+            hidden={tab !== Tab.ActivityFeed}
+          >
+            {tab === Tab.ActivityFeed && <ActivityFeed />}
+          </div>
+          <div
+            id={`panel-${Tab.Admin}`}
+            role="tabpanel"
+            aria-labelledby={`tab-${Tab.Admin}`}
+            data-tour="panel-admin"
+            hidden={tab !== Tab.Admin}
+          >
+            {tab === Tab.Admin && <AdminIdentityTable />}
           </div>
           </ViewTransition>
           </Suspense>
@@ -679,10 +1025,40 @@ export default function App() {
       </Suspense>
     );
   }
+function TourOverlayWrapper() {
+  const { status, path, skip, complete } = useTour();
   return (
-    <TourProvider>
-      <AppContent />
-      <TourOverlay />
-    </TourProvider>
+    <TourOverlay
+      open={status === 'active'}
+      path={path}
+      onClose={(reason) => (reason === 'skipped' ? skip() : complete())}
+    />
   );
 }
+
+// Header entry point for the guided tour (#1034). Lets users restart the
+// walkthrough at any time; the overlay itself lives at the app root so it can
+// highlight elements across tabs.
+function TourRestartButton() {
+  const { t } = useTranslation();
+  const { status, path, restart } = useTour();
+  return (
+    <button
+      type="button"
+      className="tour-restart-btn"
+      data-tour="tour-restart"
+      onClick={() => restart(path)}
+      disabled={status === 'active'}
+      aria-label={t('tour.restart', 'Restart tour')}
+      title={t('tour.restart', 'Restart tour')}
+    >
+      <span aria-hidden="true">🧭</span> {t('tour.restart', 'Restart tour')}
+    </button>
+  );
+}
+
+export default function App() {
+  return (
+    <TourProvider>
+      <CollaborationProvider
+        webs

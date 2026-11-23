@@ -5,7 +5,7 @@
 > **Assignees:** jattauti, timothy-droid  
 > **Labels:** Stellar Wave, feature, mobile
 
-Native iOS and Android app for Soroban Identity. The app lets users manage their DIDs, hold and present verifiable credentials, and connect via their Stellar wallet — all from a mobile device with biometric authentication and offline support.
+Native iOS and Android app for Soroban Identity. The app lets users manage their DIDs, hold and present verifiable credentials, and connect via their Stellar wallet — all from a mobile device with biometric authentication, push notifications, deep linking, and offline-first support.
 
 ---
 
@@ -16,23 +16,36 @@ mobile/
 ├── android/                  # Android-specific native code and Gradle config
 ├── ios/                      # iOS-specific native code and Xcode project
 ├── src/
-│   ├── components/           # Shared UI components
-│   ├── navigation/           # React Navigation stack and tab definitions
+│   ├── components/           # Shared, mobile-optimised UI components
+│   ├── navigation/           # React Navigation stack, tab, and linking config
+│   │   ├── RootNavigator.tsx # Native stack root
+│   │   ├── TabNavigator.tsx  # Bottom tabs (Wallet, DIDs, Credentials, Settings)
+│   │   └── linking.ts        # Deep link configuration (universal/app links)
 │   ├── screens/
 │   │   ├── wallet/           # Wallet connection and account screens
 │   │   ├── did/              # DID management screens
-│   │   └── credentials/      # Credential viewer and QR scanner screens
+│   │   ├── credentials/      # Credential viewer and QR scanner screens
+│   │   └── settings/         # Security, devices, and notification settings
 │   ├── services/
 │   │   ├── wallet.ts         # WalletConnect integration
 │   │   ├── did.ts            # DID operations via the SDK
 │   │   ├── credentials.ts    # Credential storage and presentation
-│   │   └── biometrics.ts     # Biometric auth helpers
-│   ├── store/                # State management (Redux Toolkit or Zustand)
-│   ├── offline/              # Offline queue and sync logic
+│   │   ├── biometrics.ts     # Biometric auth helpers
+│   │   ├── keychain.ts       # react-native-keychain secure storage wrapper
+│   │   ├── notifications.ts  # Push notification registration and handlers
+│   │   └── deepLinks.ts      # Deep link parsing and routing helpers
+│   ├── store/                # Redux Toolkit store
+│   │   ├── index.ts          # configureStore + persistence
+│   │   ├── slices/           # wallet, dids, credentials, settings, sync
+│   │   └── middleware/       # Offline queue and notification middleware
+│   ├── offline/              # Offline queue, sync engine, and connectivity watcher
 │   └── types/                # Shared TypeScript types
 ├── __tests__/                # Jest + React Native Testing Library tests
+├── e2e/                      # Detox end-to-end tests
+├── fastlane/                 # App Store / Play Store deployment lanes
 ├── app.json
 ├── babel.config.js
+├── metro.config.js
 ├── tsconfig.json
 └── package.json
 ```
@@ -43,15 +56,18 @@ mobile/
 
 | Concern | Choice | Notes |
 |---------|--------|-------|
-| Framework | React Native with TypeScript | Strict mode enabled |
+| Framework | React Native 0.73+ with TypeScript | Strict mode enabled; New Architecture ready |
 | Wallet connection | WalletConnect v2 | `@walletconnect/sign-client` |
-| Navigation | React Navigation v6 | Native stack + bottom tabs |
-| Biometrics | `react-native-biometrics` | Face ID, Touch ID, Android fingerprint |
+| Navigation | React Navigation v6 | Native stack + bottom tabs + deep linking |
+| Biometrics | `react-native-biometrics` | Face ID, Touch ID, Android Biometric Prompt |
 | Credential storage | Keychain / Keystore | Encrypted at rest via `react-native-keychain` |
 | QR scanning | `react-native-vision-camera` | Credential presentation scanning |
-| Offline sync | Custom queue in AsyncStorage | Syncs to server when connectivity is restored |
-| State | Redux Toolkit | Persisted slices for wallet and credentials |
-| Testing | Jest + RNTL | Unit and component tests |
+| Push notifications | `@notifee/react-native` + FCM/APNs | `@react-native-firebase/messaging` for delivery |
+| Offline sync | Redux middleware + AsyncStorage queue | Syncs to server when connectivity is restored |
+| State | Redux Toolkit | Persisted slices for wallet, credentials, and settings |
+| Deep linking | React Navigation `linking` config | Universal links (iOS) and App Links (Android) |
+| Testing | Jest + RNTL, Detox | Unit, component, and E2E tests |
+| Deployment | Fastlane + GitHub Actions | TestFlight, Play Internal Testing, and production tracks |
 
 ---
 
@@ -75,8 +91,32 @@ npm install
 For iOS:
 
 ```bash
-cd ios && bundle exec pod install && cd ..
+cd ios && bundle install && bundle exec pod install && cd ..
 ```
+
+### iOS build
+
+```bash
+# Debug build on a simulator
+npm run ios
+
+# Release build for a device (requires signing credentials)
+npm run ios -- --mode Release
+```
+
+Open `ios/SorobanIdentity.xcworkspace` in Xcode to configure signing teams and provisioning profiles. The `NSFaceIDUsageDescription` key must be present in `Info.plist` for Face ID.
+
+### Android build
+
+```bash
+# Debug build on an emulator or device
+npm run android
+
+# Release build (signed)
+cd android && ./gradlew assembleRelease
+```
+
+Release signing is configured via `android/gradle.properties` and a keystore referenced from `android/app/build.gradle`. Keystore files and passwords are never committed; CI injects them from repository secrets.
 
 ### Environment
 
@@ -103,6 +143,18 @@ npm run ios
 # Android
 npm run android
 ```
+
+### CI workflows
+
+The `mobile/` app is built and tested by GitHub Actions workflows in `.github/workflows/`:
+
+| Workflow | Trigger | Steps |
+|----------|---------|-------|
+| `mobile-ci.yml` | Pull requests touching `mobile/` | Lint, TypeScript check, Jest unit tests, Detox E2E on Android emulator |
+| `mobile-ios.yml` | Push to `main`, tags | `pod install`, build, TestFlight upload via Fastlane |
+| `mobile-android.yml` | Push to `main`, tags | Gradle build, Play Internal Testing upload via Fastlane |
+
+Required repository secrets: `WALLETCONNECT_PROJECT_ID`, `SOROBAN_IDENTITY_API_URL`, `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`, `APP_STORE_CONNECT_API_KEY`, and `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON`.
 
 ---
 
@@ -204,6 +256,38 @@ Biometric auth gates:
 - Approving a credential presentation
 - Signing a DID transaction
 
+### Push notifications
+
+Push notifications are delivered through APNs on iOS and FCM on Android, using `@react-native-firebase/messaging` with `@notifee/react-native` for local display and channel management.
+
+Notification types:
+
+| Type | Trigger | Deep link target |
+|------|---------|------------------|
+| Credential issued | New credential available for the wallet | `sorobanid://credentials/:id` |
+| Credential expiring | 7 days before expiry | `sorobanid://credentials/:id` |
+| Presentation request | Verifier requests a presentation | `sorobanid://present/:requestId` |
+| DID transaction confirmed | Queued DID write synced | `sorobanid://did/:did` |
+| Sync failure | Offline queue item exhausted retries | `sorobanid://settings/sync` |
+
+Users can opt out per category from **Settings → Notifications**. Notification permission is requested contextually (after the first credential is added) rather than on first launch. Tapping a notification routes through the deep link handler.
+
+### Deep linking
+
+The app registers the custom scheme `sorobanid://` plus universal links (iOS) and App Links (Android) for `https://soroban-identity.dev/app/*`.
+
+Supported routes:
+
+| Route | Purpose |
+|-------|---------|
+| `sorobanid://wallet/connect?uri=...` | Complete a WalletConnect pairing |
+| `sorobanid://credentials/:id` | Open a specific credential |
+| `sorobanid://present/:requestId` | Handle a verifier presentation request |
+| `sorobanid://did/:did` | Open a DID detail screen |
+| `sorobanid://settings/sync` | Open the offline sync status screen |
+
+Deep links are configured in `src/navigation/linking.ts` and validated before routing; unknown or malformed links fall back to the home screen. Universal link association files (`apple-app-site-association` and `assetlinks.json`) are served from the docs site.
+
 ### Offline mode
 
 The app is fully usable without an internet connection for credential viewing and presentation. Writes (DID registration, credential issuance) are queued and synced automatically when connectivity is restored.
@@ -219,6 +303,32 @@ Offline behaviour:
 | Issue a credential | Queued; user is notified of pending status |
 
 The sync queue is stored in AsyncStorage under a namespace prefix and processed in order on reconnect. Failed queue items are retried with exponential back-off (max 5 attempts) before surfacing an error to the user.
+
+The offline-first architecture is implemented as Redux middleware in `src/store/middleware/offlineQueue.ts`: actions marked as network-bound are intercepted, persisted to the queue, and optimistically applied to the store. A connectivity watcher (`@react-native-community/netinfo`) drains the queue on reconnect, and the UI reflects pending state via the `sync` slice.
+
+---
+
+## App store deployment
+
+Deployment is automated with Fastlane lanes in `mobile/fastlane/`:
+
+| Lane | Platform | Destination |
+|------|----------|-------------|
+| `beta` | iOS | TestFlight |
+| `release` | iOS | App Store |
+| `internal` | Android | Play Internal Testing |
+| `beta` | Android | Play Closed Testing |
+| `release` | Android | Play Production (staged rollout) |
+
+```bash
+# iOS beta upload
+cd mobile && bundle exec fastlane ios beta
+
+# Android internal testing upload
+cd mobile && bundle exec fastlane android internal
+```
+
+Version numbers are derived from `package.json` and bumped by the release workflow. Production releases use a staged rollout (10% → 50% → 100%) with crash-rate monitoring between stages.
 
 ---
 
@@ -261,6 +371,9 @@ Before a beta release:
 - [ ] WalletConnect session tested with Freighter and at least one additional wallet
 - [ ] Accessibility audit passed (VoiceOver on iOS, TalkBack on Android)
 - [ ] Privacy manifest updated (iOS 17+ requirement)
+- [ ] Push notifications tested on both platforms (foreground and background)
+- [ ] Deep links tested via `sorobanid://` scheme and universal/App Links
+- [ ] CI workflows green and store builds uploaded successfully
 
 ---
 

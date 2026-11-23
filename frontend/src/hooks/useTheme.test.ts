@@ -1,18 +1,19 @@
 import { renderHook, act } from '@testing-library/react';
 import { useTheme, cycleTheme, getThemeIcon, getThemeLabel } from './useTheme';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Mock localStorage
 const mockLocalStorage = (() => {
   let store: Record<string, string> = {};
   return {
-    getItem: jest.fn((key: string) => store[key] || null),
-    setItem: jest.fn((key: string, value: string) => {
+    getItem: vi.fn((key: string) => store[key] || null),
+    setItem: vi.fn((key: string, value: string) => {
       store[key] = value;
     }),
-    clear: jest.fn(() => {
+    clear: vi.fn(() => {
       store = {};
     }),
-    removeItem: jest.fn((key: string) => {
+    removeItem: vi.fn((key: string) => {
       delete store[key];
     }),
   };
@@ -20,15 +21,15 @@ const mockLocalStorage = (() => {
 
 // Mock matchMedia
 const mockMatchMedia = (matches: boolean) => {
-  return jest.fn().mockImplementation((query) => ({
+  return vi.fn().mockImplementation((query) => ({
     matches,
     media: query,
     onchange: null,
-    addListener: jest.fn(),
-    removeListener: jest.fn(),
-    addEventListener: jest.fn(),
-    removeEventListener: jest.fn(),
-    dispatchEvent: jest.fn(),
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    dispatchEvent: vi.fn(),
   }));
 };
 
@@ -46,7 +47,7 @@ describe('useTheme', () => {
   });
 
   afterEach(() => {
-    jest.restoreAllMocks();
+    vi.restoreAllMocks();
   });
 
   it('should default to system theme when no preference is stored', () => {
@@ -104,7 +105,7 @@ describe('useTheme', () => {
     expect(document.documentElement.classList.contains('dark')).toBe(false);
   });
 
-  it('should remove theme classes when theme is system', () => {
+  it('should resolve the system theme from matchMedia when returning to system', () => {
     // First set to dark
     const { result } = renderHook(() => useTheme());
     const [, setTheme] = result.current;
@@ -121,7 +122,27 @@ describe('useTheme', () => {
     });
     
     expect(document.documentElement.classList.contains('dark')).toBe(false);
-    expect(document.documentElement.classList.contains('light')).toBe(false);
+    expect(document.documentElement.classList.contains('light')).toBe(true);
+  });
+
+  it('updates the effective theme when the operating system preference changes', () => {
+    let listener: (() => void) | undefined;
+    const query = {
+      matches: false,
+      addEventListener: vi.fn((_event: string, callback: () => void) => { listener = callback; }),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+    };
+    window.matchMedia = vi.fn(() => query) as unknown as typeof window.matchMedia;
+    const { result } = renderHook(() => useTheme());
+    expect(result.current[2]).toBe(false);
+    act(() => {
+      query.matches = true;
+      listener?.();
+    });
+    expect(result.current[2]).toBe(true);
+    expect(document.documentElement.classList.contains('dark')).toBe(true);
   });
 
   it('should set data-theme attribute', () => {

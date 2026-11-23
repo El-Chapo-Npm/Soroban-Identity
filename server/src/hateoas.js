@@ -40,7 +40,7 @@ export function buildApiRootLinks(prefix = "") {
     events: { href: `${prefix}/events`, method: "GET", title: "Server-Sent Events stream" },
     graphql: { href: "/graphql", method: "POST", title: "GraphQL endpoint" },
     openapi: { href: "/openapi.json", method: "GET", title: "OpenAPI 3.0 specification" },
-    docs: { href: "/api/docs", method: "GET", title: "Interactive API documentation" },
+    docs: { href: "/api-docs", method: "GET", title: "Interactive API documentation" },
   };
 }
 

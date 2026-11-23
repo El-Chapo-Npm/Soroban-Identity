@@ -36,7 +36,7 @@ describe("useWalletConnection", () => {
   const mockNetworkConfig = {
     networkPassphrase: "Test SDF Network ; September 2015",
     walletConnectChain: "stellar:testnet",
-  };
+  } as any;
 
   beforeEach(() => {
     localStorage.clear();

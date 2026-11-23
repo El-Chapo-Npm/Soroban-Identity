@@ -102,6 +102,17 @@ export function resolveClientIp(req, { trustProxy = false } = {}) {
 }
 
 /**
+ * Truncate a UTF-8 string to at most `maxBytes` bytes without splitting a
+ * multi-byte sequence (e.g. an astral-plane emoji's surrogate pair). Slicing
+ * by `String.prototype.slice` counts UTF-16 code units, not bytes, and can
+ * leave a lone surrogate at the cut point; `Buffer#toString('utf8')` instead
+ * replaces any truncated trailing sequence with U+FFFD.
+ */
+function truncateUtf8(value, maxBytes) {
+  return Buffer.from(value, 'utf8').subarray(0, maxBytes).toString('utf8');
+}
+
+/**
  * Truncate a payload for logging so one large body cannot flood the log.
  */
 export function preparePayload(body, maxBytes = MAX_PAYLOAD_BYTES) {
@@ -115,7 +126,7 @@ export function preparePayload(body, maxBytes = MAX_PAYLOAD_BYTES) {
     return {
       truncated: true,
       bytes: Buffer.byteLength(serialized),
-      preview: serialized.slice(0, maxBytes),
+      preview: truncateUtf8(serialized, maxBytes),
     };
   }
 
@@ -222,16 +233,24 @@ export class RotatingFileSink {
  * Build the structured record for one completed request.
  */
 export function buildAccessRecord(req, res, { requestId, startedAt, config, requestBody, responseBody }) {
-  const durationMs = Number((Date.now() - startedAt).toFixed(3));
+  const latencyMs = Number((Date.now() - startedAt).toFixed(3));
   const status = res.statusCode;
+  const requestPath = String(req.url ?? "");
+  const pathOnly = requestPath.split("?", 1)[0];
+  const sensitiveAccountLinkRoute = /^\/(?:v1\/)?account-links(?:\/|$)/.test(pathOnly);
+
+  const did = req.params?.did ?? req.did ?? req.context?.did ?? null;
 
   const record = {
     type: 'http_access',
     requestId,
+    did,
     method: req.method,
-    path: req.url,
+    // Account-link URLs can carry OAuth codes/state, wallet addresses, or
+    // email verification data. Keep only the bounded path for these routes.
+    path: sensitiveAccountLinkRoute ? pathOnly : requestPath,
     status,
-    durationMs,
+    latencyMs,
     ip: resolveClientIp(req, { trustProxy: config.trustProxy }),
     userAgent: req.headers?.['user-agent'] ?? null,
     contentLength: res.getHeader?.('content-length') ?? null,
@@ -243,7 +262,7 @@ export function buildAccessRecord(req, res, { requestId, startedAt, config, requ
     record.headers = redactHeaders(req.headers);
   }
 
-  if (config.logPayloads) {
+  if (config.logPayloads && !sensitiveAccountLinkRoute) {
     const requestPayload = preparePayload(requestBody, config.logPayloadMaxBytes);
     if (requestPayload !== undefined) record.requestBody = requestPayload;
 

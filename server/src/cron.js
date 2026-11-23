@@ -1,4 +1,5 @@
 import { logger } from './logger.js';
+import { billingService } from './services/billingService.js';
 
 const FIELD_RANGES = [
   { name: 'minute', min: 0, max: 59 },
@@ -192,5 +193,56 @@ export class CronJob {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     this.nextRun = null;
+  }
+}
+
+/**
+ * Monthly billing job: generates invoices for the previous billing period and
+ * evaluates usage against quotas to emit overage alerts.
+ *
+ * Runs at 02:00 on the first day of every month.
+ */
+export const monthlyBillingJob = new CronJob(
+  '0 2 1 * *',
+  async () => {
+    const periodEnd = new Date();
+    const periodStart = new Date(periodEnd.getFullYear(), periodEnd.getMonth() - 1, 1);
+
+    logger.info(
+      { periodStart: periodStart.toISOString(), periodEnd: periodEnd.toISOString() },
+      'Starting monthly billing run',
+    );
+
+    const invoices = await billingService.generateMonthlyInvoices({ periodStart, periodEnd });
+    logger.info({ invoiceCount: invoices?.length ?? 0 }, 'Monthly invoices generated');
+
+    const alerts = await billingService.checkOverageAlerts();
+    logger.info({ alertCount: alerts?.length ?? 0 }, 'Overage alerts evaluated');
+  },
+  { name: 'monthly-billing' },
+);
+
+/**
+ * Registry of all cron jobs that should run with the application.
+ */
+export const cronJobs = [monthlyBillingJob];
+
+/**
+ * Start every registered cron job. Safe to call multiple times; already
+ * scheduled jobs are left untouched.
+ */
+export function startCronJobs() {
+  for (const job of cronJobs) {
+    job.start();
+  }
+  return cronJobs;
+}
+
+/**
+ * Stop every registered cron job.
+ */
+export function stopCronJobs() {
+  for (const job of cronJobs) {
+    job.stop();
   }
 }

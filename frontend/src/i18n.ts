@@ -31,16 +31,30 @@ const RTL_LOCALES = new Set(["ar", "he", "fa", "ur"]);
 
 const STORAGE_KEY = "lang";
 
+/** Read a previously selected locale only when it is supported by this build. */
+export function getInitialLocale(): string {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    return stored && Object.prototype.hasOwnProperty.call(SUPPORTED_LOCALES, stored)
+      ? stored
+      : "en";
+  } catch {
+    return "en";
+  }
+}
+
 // Development warning for missing translation keys
 const missingKeyHandler = (lngs: readonly string[], ns: string, key: string) => {
   if (process.env.NODE_ENV === "development") {
-    console.warn(`[i18n] Missing key '${key}' in locale '${lngs.join(", ")}', falling back to 'en'`);
+    console.warn(
+      `[i18n] Missing key '${key}' in locale '${lngs.join(", ")}', falling back to 'en'`
+    );
   }
 };
 
 i18n.use(initReactI18next).init({
-  resources: SUPPORTED_LOCALES,
-  lng: localStorage.getItem(STORAGE_KEY) ?? "en",
+  resources: SUPPORTED_LOCALES as any,
+  lng: getInitialLocale(),
   fallbackLng: "en",
   interpolation: { escapeValue: false },
   saveMissing: process.env.NODE_ENV === "development",

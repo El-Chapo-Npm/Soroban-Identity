@@ -197,12 +197,16 @@ export function buildRevokeCredentialArgs(params: {
 export function buildRevokeCredentialWithReasonArgs(params: {
   issuer: string;
   credentialId: Buffer;
-  reason: number;
+  reason: number | RevocationReason | string;
 }): xdr.ScVal[] {
+  const reasonVal =
+    typeof params.reason === 'number'
+      ? nativeToScVal(params.reason, { type: 'u32' })
+      : encodeRevocationReason(params.reason as RevocationReason);
   return [
     nativeToScVal(params.issuer, { type: 'address' }),
     nativeToScVal(params.credentialId, { type: 'bytes' }),
-    nativeToScVal(params.reason, { type: 'u32' }),
+    reasonVal,
   ];
 }
 
@@ -212,8 +216,12 @@ export function buildGetRevocationRecordArgs(params: { credentialId: Buffer }): 
 }
 
 /** Build args for `get_revoked_by_reason(reason)`. #951 */
-export function buildGetRevokedByReasonArgs(params: { reason: number }): xdr.ScVal[] {
-  return [nativeToScVal(params.reason, { type: 'u32' })];
+export function buildGetRevokedByReasonArgs(params: { reason: number | RevocationReason | string }): xdr.ScVal[] {
+  const reasonVal =
+    typeof params.reason === 'number'
+      ? nativeToScVal(params.reason, { type: 'u32' })
+      : encodeRevocationReason(params.reason as RevocationReason);
+  return [reasonVal];
 }
 
 /**
@@ -443,6 +451,413 @@ export function buildGetPendingActivationsArgs(params: {
   return [nativeToScVal(params.subject, { type: 'address' })];
 }
 
+// ── oracle ───────────────────────────────────────────────────────────────────
+
+/**
+ * Build args for `register_oracle(oracle, feed_id, decimals, description)`. #1124
+ *
+ * @param params.oracle      Stellar address of the oracle node.
+ * @param params.feedId      Symbol identifying the data feed (e.g. `"kyc_status"`).
+ * @param params.decimals    Decimal places used by the feed's integer values.
+ * @param params.description Human-readable feed description.
+ * @returns ScVal array ready for `contract.call('register_oracle', ...)`.
+ */
+export function buildRegisterOracleArgs(params: {
+  oracle: string;
+  feedId: string;
+  decimals: number;
+  description: string;
+}): xdr.ScVal[] {
+  return [
+    nativeToScVal(params.oracle, { type: 'address' }),
+    nativeToScVal(params.feedId, { type: 'symbol' }),
+    nativeToScVal(params.decimals, { type: 'u32' }),
+    nativeToScVal(params.description, { type: 'string' }),
+  ];
+}
+
+/**
+ * Build args for `set_feed_schema(feed_id, schema_hash, fields)`. #1124
+ *
+ * @param params.feedId     Symbol identifying the data feed.
+ * @param params.schemaHash 32-byte SHA-256 of the off-chain schema document.
+ * @param params.fields     Ordered field names defined by the schema.
+ * @returns ScVal array ready for `contract.call('set_feed_schema', ...)`.
+ */
+export function buildSetFeedSchemaArgs(params: {
+  feedId: string;
+  schemaHash: Buffer;
+  fields: string[];
+}): xdr.ScVal[] {
+  return [
+    nativeToScVal(params.feedId, { type: 'symbol' }),
+    nativeToScVal(params.schemaHash, { type: 'bytes' }),
+    xdr.ScVal.scvVec(params.fields.map((f) => nativeToScVal(f, { type: 'string' }))),
+  ];
+}
+
+/**
+ * Build args for `set_oracle_fee(feed_id, fee, asset)`. #1124
+ *
+ * @param params.feedId Symbol identifying the data feed.
+ * @param params.fee    Fee amount in the asset's smallest unit.
+ * @param params.asset  Stellar address of the fee asset (or the native asset SAC).
+ * @returns ScVal array ready for `contract.call('set_oracle_fee', ...)`.
+ */
+export function buildSetOracleFeeArgs(params: {
+  feedId: string;
+  fee: bigint;
+  asset: string;
+}): xdr.ScVal[] {
+  return [
+    nativeToScVal(params.feedId, { type: 'symbol' }),
+    encodeI64(params.fee),
+    nativeToScVal(params.asset, { type: 'address' }),
+  ];
+}
+
+/**
+ * Build args for `set_fallback_oracles(feed_id, oracles)`. #1124
+ *
+ * @param params.feedId  Symbol identifying the data feed.
+ * @param params.oracles Ordered fallback oracle addresses, tried in order.
+ * @returns ScVal array ready for `contract.call('set_fallback_oracles', ...)`.
+ */
+export function buildSetFallbackOraclesArgs(params: {
+  feedId: string;
+  oracles: string[];
+}): xdr.ScVal[] {
+  return [
+    nativeToScVal(params.feedId, { type: 'symbol' }),
+    xdr.ScVal.scvVec(params.oracles.map((o) => nativeToScVal(o, { type: 'address' }))),
+  ];
+}
+
+/**
+ * Build args for `request_offchain_data(requester, feed_id, params, max_staleness)`. #1124
+ *
+ * @param params.requester    Address paying the oracle fee (must sign the tx).
+ * @param params.feedId       Symbol identifying the data feed.
+ * @param params.requestParams Arbitrary `string → string` request parameters.
+ * @param params.maxStaleness Maximum acceptable data age in seconds.
+ * @returns ScVal array ready for `contract.call('request_offchain_data', ...)`.
+ */
+export function buildRequestOffchainDataArgs(params: {
+  requester: string;
+  feedId: string;
+  requestParams: Record<string, string>;
+  maxStaleness: bigint;
+}): xdr.ScVal[] {
+  return [
+    nativeToScVal(params.requester, { type: 'address' }),
+    nativeToScVal(params.feedId, { type: 'symbol' }),
+    nativeToScVal(params.requestParams, { type: 'map' }),
+    encodeU64(params.maxStaleness),
+  ];
+}
+
+/**
+ * Build args for `oracle_callback(request_id, oracle, value, timestamp, signature)`. #1124
+ *
+ * @param params.requestId 32-byte request ID buffer.
+ * @param params.oracle    Oracle address fulfilling the request.
+ * @param params.value     Opaque encoded feed value.
+ * @param params.timestamp Unix timestamp (seconds) the value was observed.
+ * @param params.signature 64-byte oracle signature over the payload.
+ * @returns ScVal array ready for `contract.call('oracle_callback', ...)`.
+ */
+export function buildOracleCallbackArgs(params: {
+  requestId: Buffer;
+  oracle: string;
+  value: Buffer;
+  timestamp: bigint;
+  signature: Buffer;
+}): xdr.ScVal[] {
+  return [
+    nativeToScVal(params.requestId, { type: 'bytes' }),
+    nativeToScVal(params.oracle, { type: 'address' }),
+    nativeToScVal(params.value, { type: 'bytes' }),
+    encodeU64(params.timestamp),
+    nativeToScVal(params.signature, { type: 'bytes' }),
+  ];
+}
+
+// ── credential templates ─────────────────────────────────────────────────────
+
+/**
+ * Build args for `register_template(issuer, template_id, schema_hash, rules)`. #1125
+ *
+ * @param params.issuer     Registered issuer address (must sign the tx).
+ * @param params.templateId Symbol identifying the template.
+ * @param params.schemaHash 32-byte SHA-256 of the template schema.
+ * @param params.rules      Arbitrary `string → string` validation rules.
+ * @returns ScVal array ready for `contract.call('register_template', ...)`.
+ */
+export function buildRegisterTemplateArgs(params: {
+  issuer: string;
+  templateId: string;
+  schemaHash: Buffer;
+  rules: Record<string, string>;
+}): xdr.ScVal[] {
+  return [
+    nativeToScVal(params.issuer, { type: 'address' }),
+    nativeToScVal(params.templateId, { type: 'symbol' }),
+    nativeToScVal(params.schemaHash, { type: 'bytes' }),
+    nativeToScVal(params.rules, { type: 'map' }),
+  ];
+}
+
+/**
+ * Build args for `publish_template_version(issuer, template_id, version, schema_hash)`. #1125
+ *
+ * @param params.issuer     Registered issuer address (must sign the tx).
+ * @param params.templateId Symbol identifying the template.
+ * @param params.version    Monotonically increasing version number.
+ * @param params.schemaHash 32-byte SHA-256 of the version's schema.
+ * @returns ScVal array ready for `contract.call('publish_template_version', ...)`.
+ */
+export function buildPublishTemplateVersionArgs(params: {
+  issuer: string;
+  templateId: string;
+  version: number;
+  schemaHash: Buffer;
+}): xdr.ScVal[] {
+  return [
+    nativeToScVal(params.issuer, { type: 'address' }),
+    nativeToScVal(params.templateId, { type: 'symbol' }),
+    nativeToScVal(params.version, { type: 'u32' }),
+    nativeToScVal(params.schemaHash, { type: 'bytes' }),
+  ];
+}
+
+/**
+ * Build args for `validate_against_template(template_id, version, claims)`. #1125
+ *
+ * @param params.templateId Symbol identifying the template.
+ * @param params.version    Template version to validate against.
+ * @param params.claims     `string → string` claims to validate.
+ * @returns ScVal array ready for `contract.call('validate_against_template', ...)`.
+ */
+export function buildValidateAgainstTemplateArgs(params: {
+  templateId: string;
+  version: number;
+  claims: Record<string, string>;
+}): xdr.ScVal[] {
+  return [
+    nativeToScVal(params.templateId, { type: 'symbol' }),
+    nativeToScVal(params.version, { type: 'u32' }),
+    nativeToScVal(params.claims, { type: 'map' }),
+  ];
+}
+
+/**
+ * Build args for `list_template_for_sale(issuer, template_id, price, asset)`. #1125
+ *
+ * @param params.issuer     Registered issuer address (must sign the tx).
+ * @param params.templateId Symbol identifying the template.
+ * @param params.price      Listing price in the asset's smallest unit.
+ * @param params.asset      Stellar address of the payment asset.
+ * @returns ScVal array ready for `contract.call('list_template_for_sale', ...)`.
+ */
+export function buildListTemplateForSaleArgs(params: {
+  issuer: string;
+  templateId: string;
+  price: bigint;
+  asset: string;
+}): xdr.ScVal[] {
+  return [
+    nativeToScVal(params.issuer, { type: 'address' }),
+    nativeToScVal(params.templateId, { type: 'symbol' }),
+    encodeI64(params.price),
+    nativeToScVal(params.asset, { type: 'address' }),
+  ];
+}
+
+/**
+ * Build args for `buy_template(buyer, template_id)`. #1125
+ *
+ * @param params.buyer      Address purchasing the template (must sign the tx).
+ * @param params.templateId Symbol identifying the template.
+ * @returns ScVal array ready for `contract.call('buy_template', ...)`.
+ */
+export function buildBuyTemplateArgs(params: {
+  buyer: string;
+  templateId: string;
+}): xdr.ScVal[] {
+  return [
+    nativeToScVal(params.buyer, { type: 'address' }),
+    nativeToScVal(params.templateId, { type: 'symbol' }),
+  ];
+}
+
+// ── threshold signatures ─────────────────────────────────────────────────────
+
+/**
+ * Build args for `set_signers(account, signers, threshold)`. #1126
+ *
+ * @param params.account   Address whose signer set is configured (must sign).
+ * @param params.signers   Ordered signer addresses.
+ * @param params.threshold Minimum total weight required to authorize.
+ * @returns ScVal array ready for `contract.call('set_signers', ...)`.
+ */
+export function buildSetSignersArgs(params: {
+  account: string;
+  signers: string[];
+  threshold: number;
+}): xdr.ScVal[] {
+  return [
+    nativeToScVal(params.account, { type: 'address' }),
+    xdr.ScVal.scvVec(params.signers.map((s) => nativeToScVal(s, { type: 'address' }))),
+    nativeToScVal(params.threshold, { type: 'u32' }),
+  ];
+}
+
+/**
+ * Build args for `update_signers(account, signers, weights, threshold)`. #1126
+ *
+ * @param params.account   Address whose signer set is updated (must sign).
+ * @param params.signers   Ordered signer addresses.
+ * @param params.weights   Per-signer weights, parallel to `signers`.
+ * @param params.threshold Minimum total weight required to authorize.
+ * @returns ScVal array ready for `contract.call('update_signers', ...)`.
+ */
+export function buildUpdateSignersArgs(params: {
+  account: string;
+  signers: string[];
+  weights: number[];
+  threshold: number;
+}): xdr.ScVal[] {
+  return [
+    nativeToScVal(params.account, { type: 'address' }),
+    xdr.ScVal.scvVec(params.signers.map((s) => nativeToScVal(s, { type: 'address' }))),
+    xdr.ScVal.scvVec(params.weights.map((w) => nativeToScVal(w, { type: 'u32' }))),
+    nativeToScVal(params.threshold, { type: 'u32' }),
+  ];
+}
+
+/**
+ * Build args for `validate_threshold(account, operation_hash, signatures)`. #1126
+ *
+ * @param params.account       Address whose signer set is checked.
+ * @param params.operationHash 32-byte hash of the operation being authorized.
+ * @param params.signatures    Encoded signature blobs from the signers.
+ * @returns ScVal array ready for `contract.call('validate_threshold', ...)`.
+ */
+export function buildValidateThresholdArgs(params: {
+  account: string;
+  operationHash: Buffer;
+  signatures: Buffer[];
+}): xdr.ScVal[] {
+  return [
+    nativeToScVal(params.account, { type: 'address' }),
+    nativeToScVal(params.operationHash, { type: 'bytes' }),
+    xdr.ScVal.scvVec(params.signatures.map((sig) => nativeToScVal(sig, { type: 'bytes' }))),
+  ];
+}
+
+/**
+ * Build args for `aggregate_signatures(account, operation_hash, signatures)`. #1126
+ *
+ * @param params.account       Address whose signer set is used.
+ * @param params.operationHash 32-byte hash of the operation being authorized.
+ * @param params.signatures    Encoded signature blobs to aggregate.
+ * @returns ScVal array ready for `contract.call('aggregate_signatures', ...)`.
+ */
+export function buildAggregateSignaturesArgs(params: {
+  account: string;
+  operationHash: Buffer;
+  signatures: Buffer[];
+}): xdr.ScVal[] {
+  return [
+    nativeToScVal(params.account, { type: 'address' }),
+    nativeToScVal(params.operationHash, { type: 'bytes' }),
+    xdr.ScVal.scvVec(params.signatures.map((sig) => nativeToScVal(sig, { type: 'bytes' }))),
+  ];
+}
+
+/**
+ * Build args for `initiate_signer_rotation(account, new_signers, new_threshold)`. #1126
+ *
+ * @param params.account      Address whose signer set is rotated (must sign).
+ * @param params.newSigners   Ordered replacement signer addresses.
+ * @param params.newThreshold Minimum total weight required after rotation.
+ * @returns ScVal array ready for `contract.call('initiate_signer_rotation', ...)`.
+ */
+export function buildInitiateSignerRotationArgs(params: {
+  account: string;
+  newSigners: string[];
+  newThreshold: number;
+}): xdr.ScVal[] {
+  return [
+    nativeToScVal(params.account, { type: 'address' }),
+    xdr.ScVal.scvVec(params.newSigners.map((s) => nativeToScVal(s, { type: 'address' }))),
+    nativeToScVal(params.newThreshold, { type: 'u32' }),
+  ];
+}
+
+/**
+ * Build args for `approve_signer_rotation(account, signer)`. #1126
+ *
+ * @param params.account Address whose signer set is being rotated.
+ * @param params.signer  Current signer approving the rotation (must sign the tx).
+ * @returns ScVal array ready for `contract.call('approve_signer_rotation', ...)`.
+ */
+export function buildApproveSignerRotationArgs(params: {
+  account: string;
+  signer: string;
+}): xdr.ScVal[] {
+  return [
+    nativeToScVal(params.account, { type: 'address' }),
+    nativeToScVal(params.signer, { type: 'address' }),
+  ];
+}
+
+/**
+ * Build args for `complete_signer_rotation(account)`. #1126
+ *
+ * @param params.account Address whose signer set is being rotated.
+ * @returns ScVal array ready for `contract.call('complete_signer_rotation', ...)`.
+ */
+export function buildCompleteSignerRotationArgs(params: {
+  account: string;
+}): xdr.ScVal[] {
+  return [nativeToScVal(params.account, { type: 'address' })];
+}
+
+// ── DID resolver ─────────────────────────────────────────────────────────────
+
+/**
+ * Build args for `register_did_method(method, resolver, description)`. #1127
+ *
+ * @param params.method      DID method name (e.g. `"stellar"`).
+ * @param params.resolver    Stellar address of the method resolver contract.
+ * @param params.description Human-readable method description.
+ * @returns ScVal array ready for `contract.call('register_did_method', ...)`.
+ */
+export function buildRegisterDidMethodArgs(params: {
+  method: string;
+  resolver: string;
+  description: string;
+}): xdr.ScVal[] {
+  return [
+    nativeToScVal(params.method, { type: 'symbol' }),
+    nativeToScVal(params.resolver, { type: 'address' }),
+    nativeToScVal(params.description, { type: 'string' }),
+  ];
+}
+
+/**
+ * Build args for `resolve_did_string(did)`. #1127
+ *
+ * @param params.did Full DID string (e.g. `"did:stellar:G..."`).
+ * @returns ScVal array ready for `contract.call('resolve_did_string', ...)`.
+ */
+export function buildResolveDidStringArgs(params: {
+  did: string;
+}): xdr.ScVal[] {
+  return [nativeToScVal(params.did, { type: 'string' })];
+}
+
 // ── reputation ───────────────────────────────────────────────────────────────
 
 /**
@@ -584,3 +999,38 @@ export function buildListHistoryArgs(params: {
     nativeToScVal(params.limit, { type: 'u32' }),
   ];
 }
+
+export function buildGetMerkleRootArgs(params: { batchId: string }): xdr.ScVal[] {
+  const hex = params.batchId.startsWith("0x") ? params.batchId.slice(2) : params.batchId;
+  return [nativeToScVal(Buffer.from(hex, "hex"), { type: "bytes" })];
+}
+
+export function buildUpdateMerkleRootArgs(params: {
+  issuer: string;
+  batchId: string;
+  newRoot: Buffer;
+  proof?: unknown;
+}): xdr.ScVal[] {
+  const hex = params.batchId.startsWith("0x") ? params.batchId.slice(2) : params.batchId;
+  const args = [
+    nativeToScVal(params.issuer, { type: "address" }),
+    nativeToScVal(Buffer.from(hex, "hex"), { type: "bytes" }),
+    nativeToScVal(params.newRoot, { type: "bytes" }),
+  ];
+  if (params.proof) {
+    args.push(nativeToScVal(params.proof));
+  }
+  return args;
+}
+
+export function buildVerifyMerkleProofArgs(params: {
+  batchId: string;
+  proof: unknown;
+}): xdr.ScVal[] {
+  const hex = params.batchId.startsWith("0x") ? params.batchId.slice(2) : params.batchId;
+  return [
+    nativeToScVal(Buffer.from(hex, "hex"), { type: "bytes" }),
+    nativeToScVal(params.proof),
+  ];
+}
+

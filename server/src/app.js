@@ -11,6 +11,8 @@ import {
   updateAndPersistCredential,
   DuplicateCredentialError,
   ConcurrencyConflictError,
+  appendDidVersion,
+  readDidVersions,
 } from "./storage.js";
 import { findExpiringCredentials, paginate } from "./expiry.js";
 import {
@@ -47,13 +49,81 @@ import {
   validateContentType,
 } from "./http-utils.js";
 import { KEY_ID_HEADER, NonceStore, verifySignedRequest } from "./request-signing.js";
-import { createNonceStore, nonceMiddleware } from "./middleware/nonce.js";
+import {
+  ENCRYPTION_ENABLED_HEADER,
+  ENCRYPTION_KEY_ID_HEADER,
+  SessionKeyRegistry,
+  decryptSensitiveRequestFields,
+  encryptSensitiveResponseFields,
+  isEncryptionEnabled,
+  negotiateSessionKey,
+  wrapResponseEncryption,
+} from "./response-encryption.js";
 import { normalizeCspReports, setSecurityHeaders } from "./security-headers.js";
 import {
   CREDENTIAL_STATUS_TYPE,
   createVcSerializer,
   credentialStatus,
 } from "./vc-jsonld.js";
+
+/**
+ * Validate the `exp` claim of a JWT bearer token (#1307).
+ *
+ * The signature is verified elsewhere (API key / OAuth validation); this
+ * only guards against a token whose lifetime has elapsed. The payload is
+ * decoded without re-verifying the signature because a token that fails
+ * signature verification never reaches an authenticated route.
+ *
+ * Returns `{ ok: true }` when the token is still valid, otherwise
+ * `{ ok: false, code, message }` describing why it was rejected.
+ */
+export function checkJwtExpiry(token, { clockSkewSeconds = 30, now = Date.now() } = {}) {
+  const parts = String(token).split(".");
+  if (parts.length !== 3) {
+    return { ok: false, code: "INVALID_TOKEN", message: "Malformed JWT bearer token." };
+  }
+
+  let payload;
+  try {
+    const json = Buffer.from(parts[1], "base64url").toString("utf8");
+    payload = JSON.parse(json);
+  } catch {
+    return { ok: false, code: "INVALID_TOKEN", message: "JWT payload could not be decoded." };
+  }
+
+  if (!payload || typeof payload !== "object") {
+    return { ok: false, code: "INVALID_TOKEN", message: "JWT payload could not be decoded." };
+  }
+
+  const exp = payload.exp;
+  if (exp === undefined || exp === null) {
+    return {
+      ok: false,
+      code: "TOKEN_EXPIRY_MISSING",
+      message: "JWT bearer token is missing the required exp claim.",
+    };
+  }
+
+  const expSeconds = Number(exp);
+  if (!Number.isFinite(expSeconds)) {
+    return {
+      ok: false,
+      code: "TOKEN_EXPIRY_INVALID",
+      message: "JWT bearer token has an invalid exp claim.",
+    };
+  }
+
+  const nowSeconds = Math.floor(now / 1000);
+  if (expSeconds + clockSkewSeconds < nowSeconds) {
+    return {
+      ok: false,
+      code: "TOKEN_EXPIRED",
+      message: "JWT bearer token has expired.",
+    };
+  }
+
+  return { ok: true, expiresAt: expSeconds };
+}
 
 /**
  * Whether the caller wants the W3C JSON-LD representation.
@@ -67,6 +137,8 @@ function wantsJsonLd(req, url) {
   return accept.includes("application/ld+json");
 }
 import { sanitizeDidMetadata, schemas, validateRequest } from "./validation.js";
+import { DidValidationError, validateDidInput } from "./did-validation.js";
+import { resolveDidDocument } from "./did-resolver.js";
 import {
   buildApiRootLinks,
   buildCredentialCollectionLinks,
@@ -86,7 +158,12 @@ import { logger } from "./logger.js";
 import { AnalyticsService, detectCountry } from "./analytics.js";
 import { createRateLimiter } from "./middleware/ratelimit.js";
 import { ApiKeyService } from "./api-keys.js";
-import { OAuthService } from "./oauth.js";
+import { OAuthService, OAuthError } from "./oauth.js";
+import { computeEtag, matchesIfNoneMatch, matchesIfMatch } from "./etag.js";
+import { applyFieldFiltering } from "./field-filter.js";
+import { createCompressionMiddleware } from "./compression.js";
+import { executeBatch } from "./batch.js";
+import { readNotificationLog, summarizeNotificationLog } from "./notification-log.js";
 import { UsageTracker } from "./analytics/usage.js";
 import { EmailTransport } from "./email.js";
 import { pickQuotaBinding, QuotaTracker, notifyQuotaThresholdOwner } from "./quota.js";
@@ -97,6 +174,18 @@ import { openTelemetryHttpMiddleware } from "./tracing/index.js";
 import { EventStore, EventReplayer, createEvent, EventTypes, handleEventSourcingRoutes } from "./events/index.js";
 import { handleMockApiRequest } from "./mock-api.js";
 import { collectHealth, collectReadiness } from "./health.js";
+import {
+  ENCRYPTION_SESSION_HEADER,
+  EncryptionSessionStore,
+  PayloadEncryptionError,
+} from "./payload-encryption.js";
+import { CacheManager, CACHE_TTL, cacheKey } from "./cache/index.js";
+import { MeteringService, meteringMiddleware, handleBillingRoutes } from "./billing/index.js";
+import { createRequestDeduplication } from "./middleware/dedupe.js";
+import { createIdentityRouter } from "./routes/identity.js";
+import { verifyJwt } from "./jwt-auth.js";
+import { createIpfsStorage } from "./ipfs-storage.js";
+import { AccountLinksError, AccountLinksService } from "./account-links.js";
 const SERVER_VERSION = "0.1.0";
 const MIN_SDK_VERSION = "0.1.0";
 const SERVER_FEATURES = [
@@ -111,9 +200,57 @@ const SERVER_FEATURES = [
   "job_queue",
   "graceful_shutdown",
   "hateoas",
+  "multi_layer_cache",
+  "usage_metering",
+  "billing",
+  "connected_accounts",
+];
+
+/** Top-level fields selectable via `?fields=` on a credential resource. */
+const CREDENTIAL_FIELDS = [
+  "id",
+  "subject",
+  "issuer",
+  "type",
+  "claims",
+  "expiresAt",
+  "expires_at",
+  "issuedAt",
+  "issued_at",
+  "revoked",
+  "revokedAt",
+  "metadata",
 ];
 
 const usageTracker = new UsageTracker();
+
+function sendAccountLinksError(res, error) {
+  if (!(error instanceof AccountLinksError)) throw error;
+  return sendJson(res, error.status, { error: error.code, message: error.message });
+}
+
+function contractMetadata(metadata) {
+  return Object.fromEntries(Object.entries(metadata ?? {}).map(([key, value]) => [
+    key,
+    typeof value === "string" ? value : JSON.stringify(value),
+  ]));
+}
+
+async function pinAndPersistDid({ didDoc, address, config, soroban, ipfsStorage, isUpdate }) {
+  if (!ipfsStorage?.pinJson) return didDoc;
+  const existingCid = didDoc.metadata?.cid ?? didDoc.metadata?.ipfs_cid;
+  const cid = isUpdate && existingCid ? existingCid : await ipfsStorage.pinJson(didDoc);
+  const metadata = { ...(didDoc.metadata ?? {}), cid, ipfs_cid: cid };
+  const persisted = { ...didDoc, metadata };
+  if (config.ipfsOnChainEnabled !== false && soroban?.invoke && config.contracts?.identity && config.sourceAccount) {
+    const method = isUpdate ? "update_did" : "create_did";
+    await soroban.invoke(config.contracts.identity, method, [
+      "--controller", address,
+      "--metadata", JSON.stringify(contractMetadata(metadata)),
+    ]);
+  }
+  return persisted;
+}
 
 export function createApp({
   config,
@@ -126,6 +263,7 @@ export function createApp({
   // the DID cache already owns a connected client, so reuse it unless a
   // caller (or a test) supplies one explicitly.
   redisClient = didCache?.client ?? null,
+  dbClient = null,
   webhookService = new WebhookDeliveryService(config),
   apiKeyService = new ApiKeyService(config),
   oauthService = new OAuthService(config),
@@ -141,7 +279,15 @@ export function createApp({
   quotaTracker = null,
   deprecationRegistry = null,
   ddosProtection = null,
+  encryptionSessionStore = new EncryptionSessionStore({
+    ttlSeconds: config.payloadEncryptionSessionTtlSeconds,
+    rotationGraceSeconds: config.payloadEncryptionRotationGraceSeconds,
+  }),
   sessionKeyRegistry = null,
+  cacheManager = null,
+  meteringService = null,
+  ipfsStorage = createIpfsStorage(config),
+  accountLinksService = new AccountLinksService(config, { emailTransport }),
 }) {
   // Expose the key service on config so http-utils.requireAuth can validate
   // issued API keys instead of falling back to the single admin key.
@@ -199,11 +345,13 @@ export function createApp({
   // sessions that were using them.
   const encryptionKeys =
     sessionKeyRegistry ??
-    new SessionKeyRegistry({
-      ttlSeconds: config.encryptionSessionKeyTtlSeconds,
-      rotationSeconds: config.encryptionKeyRotationSeconds,
-      maxKeys: config.encryptionMaxSessionKeys,
-    });
+    (isEncryptionEnabled(config)
+      ? new SessionKeyRegistry({
+          ttlSeconds: config.encryptionSessionKeyTtlSeconds,
+          rotationSeconds: config.encryptionKeyRotationSeconds,
+          maxKeys: config.encryptionMaxSessionKeys,
+        })
+      : null);
 
   const tenantRegistry = new TenantRegistry(config);
   void tenantRegistry.init();
@@ -213,20 +361,90 @@ export function createApp({
   // instances; falls back to an in-process store otherwise.
   const replayStore =
     replayNonceStore ??
-    createNonceStore({
-      redisClient,
-      ttlSeconds: config.nonceTtlSeconds ?? 300,
-      metrics,
-    });
-  const checkNonce = nonceMiddleware({
-    store: replayStore,
-    ttlSeconds: config.nonceTtlSeconds ?? 300,
-    metrics,
-  });
+    new NonceStore({ ttlSeconds: config.nonceTtlSeconds ?? 300 });
+  const checkNonce = async (req, res) => {
+    const nonce = req.headers["x-nonce"] ?? req.headers["x-request-nonce"] ?? null;
+    if (!nonce) {
+      return {
+        ok: false,
+        status: 400,
+        code: "MISSING_NONCE",
+        reason: "missing",
+        message: "A request nonce is required for state-changing requests.",
+      };
+    }
+    const accepted = await replayStore.consume(nonce, { scope: req.apiKeyId ?? "" });
+    if (!accepted) {
+      return {
+        ok: false,
+        status: 409,
+        code: "SIGNATURE_REPLAYED",
+        reason: "replayed",
+        message: "Request nonce has already been used.",
+      };
+    }
+    return { ok: true, serverNonce: crypto.randomUUID() };
+  };
 
   const eventStore = new EventStore({ dataDir: `${config.dataDir}/events` });
   void eventStore.init();
   const eventReplayer = new EventReplayer(eventStore);
+
+  // #1118: multi-layer caching strategy. L1 is in-memory (LRU), L2 is Redis
+  // when available, L3 is CDN via response headers. The manager owns the
+  // warming scheduler and the invalidation pipeline.
+  const cache =
+    cacheManager ??
+    new CacheManager({
+      config,
+      redisClient,
+      metrics,
+      logger,
+    });
+  // Start the warming scheduler (no-op when disabled in config).
+  if (typeof cache.startWarming === "function") {
+    try {
+      cache.startWarming();
+    } catch (error) {
+      logger.warn({ error: error.message }, "Failed to start cache warming scheduler");
+    }
+  }
+
+  // #1119: API usage metering and billing. The service tracks per-endpoint
+  // calls, enforces quotas, and generates invoices. When no service is
+  // supplied it is created from config so the routes always exist.
+  const metering =
+    meteringService ??
+    new MeteringService({
+      config,
+      apiKeyService,
+      emailTransport,
+      logger,
+      metrics,
+    });
+  const meter = meteringMiddleware({ service: metering, config });
+  const dedupe = createRequestDeduplication({
+    ttlMs: config.requestDeduplicationTtlMs ?? 5000,
+  });
+
+  // #1273–#1276: REST surface for identity resolution, identity registration,
+  // attestation issuance and attestation revocation. The router owns its own
+  // validation, auth, rate limiting and metrics so the handlers below stay
+  // focused on the legacy credential API.
+  const identityRouter = createIdentityRouter({
+    config,
+    soroban,
+    metrics,
+    didCache,
+    apiKeyService,
+    oauthService,
+    limiter,
+    logger,
+    nonceStore,
+    checkNonce,
+    dedupe,
+    linkPrefix: resolveLinkPrefix({ version: DEFAULT_VERSION, isExplicitUrlVersion: false }),
+  });
 
   return async function app(req, res) {
     const startTime = Date.now();
@@ -273,6 +491,10 @@ export function createApp({
     const correlationId = correlationMiddleware(req, res, { path: pathname });
     const requestId = correlationId;
 
+    // #1118: attach the cache manager to the request so handlers can read
+    // through it without threading it through every call site.
+    req.cache = cache;
+
     const handler = async () => {
     // Distributed Tracing with OpenTelemetry (#801)
     openTelemetryHttpMiddleware()(req, res);
@@ -303,7 +525,24 @@ export function createApp({
         config,
         sink: accessLogSink,
       });
-      res.on("finish", () => finishAccessLog({ requestBody: req.loggedBody ?? null }));
+      res.on("finish", () => {
+        // #1289: structured access log entries carry the DID route param
+        // (when present) and the measured latency alongside the request id.
+        const didParam = (() => {
+          const match = pathname.match(/^\/(?:identity|dids)\/([^/]+)/);
+          if (!match) return null;
+          try {
+            return decodeURIComponent(match[1]);
+          } catch {
+            return match[1];
+          }
+        })();
+        finishAccessLog({
+          requestBody: req.loggedBody ?? null,
+          did: didParam,
+          latencyMs: Math.max(0, Date.now() - startTime),
+        });
+      });
     }
 
     // Origin-side DDoS controls run before authentication, body parsing, or RPC work.
@@ -355,6 +594,10 @@ export function createApp({
     });
 
         if (await handleMockApiRequest(req, res, config)) return;
+
+    // Identity and attestation REST endpoints (#1273–#1276). Dispatched
+    // before the legacy DID routes so /identity/* is owned by the router.
+    if (await identityRouter(req, res, { url, pathname, tenantId })) return;
 
     // Session key exchange (#1049). Unauthenticated by design: the key it
     // returns is only useful to the client that generated the ephemeral
@@ -471,7 +714,49 @@ export function createApp({
         // fallback
       }
     }
-    if (req.headers["x-user-tier"]) {
+
+    // #1307: JWT expiry validation. A bearer token that is a JWT must carry
+    // an `exp` claim that is still in the future (with a small clock-skew
+    // allowance). This runs before routing so every route guarded by
+    // requireAuth — including POST /attestation — rejects expired tokens.
+    // Non-JWT credentials (opaque API keys) are unaffected.
+    const bearerToken = (() => {
+      const header = req.headers["authorization"];
+      if (typeof header !== "string") return null;
+      const match = header.match(/^Bearer\s+(.+)$/i);
+      return match ? match[1].trim() : null;
+    })();
+    if (bearerToken && bearerToken.split(".").length === 3) {
+      const jwtVerdict = checkJwtExpiry(bearerToken, {
+        clockSkewSeconds: config.jwtClockSkewSeconds ?? 30,
+      });
+      if (!jwtVerdict.ok) {
+        logger.warn(
+          { code: jwtVerdict.code, route: routeLabel(pathname) },
+          "Rejected JWT bearer token",
+        );
+        return sendJson(res, 401, {
+          error: "unauthorized",
+          code: jwtVerdict.code,
+          message: jwtVerdict.message,
+        });
+      }
+      const authVerdict = verifyJwt(bearerToken, {
+        secret: config.jwtSecret,
+        publicKey: config.jwtPublicKey,
+        algorithms: config.jwtAlgorithms,
+        issuer: config.jwtIssuer,
+        audience: config.jwtAudience,
+        clockSkewSeconds: config.jwtClockSkewSeconds ?? 30,
+      });
+      if (authVerdict.ok) {
+        req.userId = authVerdict.auth.subject;
+        req.issuer = authVerdict.auth.subject;
+        req.userTier = "issuer";
+        req.auth = { jwt: authVerdict.auth, claims: authVerdict.claims };
+      }
+    }
+    if (req.headers["x-user-tier"] && !req.auth?.jwt) {
       req.userTier = req.headers["x-user-tier"].toLowerCase();
     }
 
@@ -488,7 +773,7 @@ export function createApp({
     // #1052: replay prevention. Only state-changing methods are checked, and
     // operational endpoints (plus the browser-posted CSP report) are exempt
     // because they cannot carry client credentials.
-    const isNonceExempt = isExempt || pathname === "/csp-report";
+    const isNonceExempt = isExempt || pathname === "/csp-report" || pathname === "/account-links" || pathname.startsWith("/account-links/");
     const isStateChanging = !["GET", "HEAD", "OPTIONS"].includes(req.method);
     if (!isNonceExempt && isStateChanging) {
       const nonceResult = await checkNonce(req, res);
@@ -517,7 +802,7 @@ export function createApp({
     // probe has to work without client credentials.
     // A CSP violation report is posted by the browser itself, which has no
     // API key and no signing secret, so it can never carry a signature.
-    const isSigningExempt = isExempt || pathname === "/csp-report";
+    const isSigningExempt = isExempt || pathname === "/csp-report" || pathname === "/account-links" || pathname.startsWith("/account-links/");
 
     if (config.requestSigningEnabled && !isSigningExempt) {
       const mustBeSigned =
@@ -542,7 +827,7 @@ export function createApp({
           ? await apiKeyService.getSigningSecret(signingKeyId)
           : null;
 
-        const verdict = verifySignedRequest({
+        const verdict = await verifySignedRequest({
           headers: req.headers,
           method: req.method,
           path: req.url,
@@ -647,7 +932,7 @@ export function createApp({
 
     // #1053: resolve the tenant before quota/limit checks so per-tenant
     // budgets apply. The tenant registry is the source of truth for limits.
-    const tenant = tenantRegistry.get(tenantId) ?? null;
+    const tenant = tenantRegistry.getTenant(tenantId) ?? null;
     req.tenant = tenant;
     if (tenant) {
       const tenantLimits = tenant.limits ?? {};
@@ -712,22 +997,126 @@ export function createApp({
       }
     }
 
-        if (req.method === "GET" && pathname === "/info") {
-          return sendJson(res, 200, {
-            version: SERVER_VERSION,
-            apiVersion: version,
-            supportedVersions: SUPPORTED_VERSIONS,
-            features: SERVER_FEATURES,
-            minSdkVersion: MIN_SDK_VERSION,
-            encryption: {
-              enabled: isEncryptionEnabled(config),
-              algorithm: "aes-256-gcm",
-              keyExchange: "/encryption/session",
-              rotation: "/encryption/rotate",
-              keyIdHeader: ENCRYPTION_KEY_ID_HEADER,
-              encryptedFields: ["claims", "subject", "credentialSubject"],
-            },
+    const payloadEncryptionEnabled = config.payloadEncryptionEnabled === true;
+    const encryptionSessionId = req.headers[ENCRYPTION_SESSION_HEADER];
+    const isEncryptionControlRoute =
+      pathname === "/encryption/sessions" ||
+      /^\/encryption\/sessions\/[^/]+(?:\/rotate)?$/.test(pathname);
+    const encryptionOwnerId = req.apiKeyId ?? "admin";
+    if (payloadEncryptionEnabled && encryptionSessionId && !isEncryptionControlRoute) {
+      if (!await requireAuth(req, res, config, [])) return;
+      const ownerId = req.apiKeyId ?? "admin";
+      const currentKey = encryptionSessionStore.getCurrentKey(encryptionSessionId, ownerId);
+      if (!currentKey) {
+        return sendJson(res, 401, {
+          error: "invalid_encryption_session",
+          code: "ENCRYPTION_SESSION_INVALID",
+          message: "The encryption session is missing or has expired.",
+        });
+      }
+      req.payloadEncryption = {
+        sessionStore: encryptionSessionStore,
+        sessionId: encryptionSessionId,
+        ownerId,
+      };
+      res.payloadEncryption = {
+        ...currentKey,
+        sessionId: encryptionSessionId,
+        method: req.method,
+        path: req.url,
+        sensitiveFields: config.payloadEncryptionSensitiveFields ?? ["credentialSubject", "claims", "subject"],
+      };
+    }
+
+    const isCredentialPayloadRoute = /^\/credentials(?:\/issue|\/[^/]+(?:\/revoke|\/verify)?)?$/.test(pathname);
+    if (payloadEncryptionEnabled && isCredentialPayloadRoute && !encryptionSessionId) {
+      return sendJson(res, 428, {
+        error: "encryption_required",
+        code: "ENCRYPTION_REQUIRED",
+        message: "Create an encryption session and provide the X-Encryption-Session header.",
+      });
+    }
+
+    if (payloadEncryptionEnabled && req.method === "POST" && pathname === "/encryption/sessions") {
+      if (!await requireAuth(req, res, config, [])) return;
+      if (validateContentType(req, res)) return;
+      const body = await readJson(req, config);
+      if (body.__payloadTooLarge) {
+        return sendJson(res, 413, {
+          code: "PAYLOAD_TOO_LARGE",
+          message: "Request body exceeds the size limit.",
+        });
+      }
+      return sendJson(
+        res,
+        201,
+        encryptionSessionStore.create(body.clientPublicKey, req.apiKeyId ?? encryptionOwnerId),
+      );
+    }
+
+    const rotateEncryptionSessionMatch = pathname.match(/^\/encryption\/sessions\/([^/]+)\/rotate$/);
+    if (payloadEncryptionEnabled && req.method === "POST" && rotateEncryptionSessionMatch) {
+      if (!await requireAuth(req, res, config, [])) return;
+      if (validateContentType(req, res)) return;
+      const body = await readJson(req, config);
+      if (body.__payloadTooLarge) {
+        return sendJson(res, 413, {
+          code: "PAYLOAD_TOO_LARGE",
+          message: "Request body exceeds the size limit.",
+        });
+      }
+      return sendJson(
+        res,
+        200,
+        encryptionSessionStore.rotate(
+          decodeURIComponent(rotateEncryptionSessionMatch[1]),
+          body.clientPublicKey,
+          req.apiKeyId ?? encryptionOwnerId,
+        ),
+      );
+    }
+
+    const closeEncryptionSessionMatch = pathname.match(/^\/encryption\/sessions\/([^/]+)$/);
+    if (payloadEncryptionEnabled && req.method === "DELETE" && closeEncryptionSessionMatch) {
+      if (!await requireAuth(req, res, config, [])) return;
+      const sessionId = decodeURIComponent(closeEncryptionSessionMatch[1]);
+      const closed = encryptionSessionStore.getSession(sessionId, req.apiKeyId ?? encryptionOwnerId)
+        ? encryptionSessionStore.close(sessionId)
+        : false;
+      return closed
+        ? res.writeHead(204).end()
+        : sendJson(res, 404, {
+            error: "invalid_encryption_session",
+            code: "ENCRYPTION_SESSION_INVALID",
+            message: "The encryption session was not found.",
           });
+    }
+
+        const linkPrefix = resolveLinkPrefix({ version, isExplicitUrlVersion });
+
+        if (req.method === "GET" && (pathname === "/" || pathname === "/info")) {
+          const rootLinks = buildApiRootLinks(linkPrefix);
+          return sendJson(
+            res,
+            200,
+            {
+              version: SERVER_VERSION,
+              apiVersion: version,
+              supportedVersions: SUPPORTED_VERSIONS,
+              features: SERVER_FEATURES,
+              minSdkVersion: MIN_SDK_VERSION,
+              encryption: {
+                enabled: isEncryptionEnabled(config),
+                algorithm: "aes-256-gcm",
+                keyExchange: "/encryption/session",
+                rotation: "/encryption/rotate",
+                keyIdHeader: ENCRYPTION_KEY_ID_HEADER,
+                encryptedFields: ["claims", "subject", "credentialSubject"],
+              },
+              _links: rootLinks,
+            },
+            { Link: formatLinkHeader(rootLinks) },
+          );
         }
 
         // CSP violation reports (#754). Unauthenticated by necessity — the
@@ -778,6 +1167,7 @@ export function createApp({
             config,
             soroban,
             redisClient,
+            dbClient,
             version: SERVER_VERSION,
           });
 
@@ -799,14 +1189,17 @@ export function createApp({
           });
         }
 
-        if (req.method === 'GET' && url.pathname === '/metrics') {
-          if (metricsAggregator) await metricsAggregator.refresh().catch((error) => logger.error('metrics refresh failed', error));
-          return sendText(res, 200, metrics.renderPrometheus());
+        if (req.method === "GET" && pathname === "/metrics") {
+          if (metricsAggregator) await metricsAggregator.refresh().catch((error) => logger.error("metrics refresh failed", error));
+          metrics.updateDbPoolStats?.(dbClient);
+          return sendText(res, 200, await metrics.renderPrometheus());
+        }
         if (req.method === "GET" && pathname === "/ready") {
           const readiness = await collectReadiness({
             config,
             soroban,
             redisClient,
+            dbClient,
             version: SERVER_VERSION,
           });
           return sendJson(res, readiness.ready ? 200 : 503, readiness);
@@ -854,6 +1247,7 @@ export function createApp({
             }
           }
 
+          metrics.updateDbPoolStats?.(dbClient);
           const body = await metrics.renderPrometheus();
           return sendText(res, 200, body, metrics.contentType ? { "content-type": metrics.contentType } : {});
         }
@@ -1169,34 +1563,24 @@ export function createApp({
           const recordVerification = (result) =>
             metrics?.observeCredentialVerification?.(result);
           if (!credential) {
+            recordVerification("not_found");
             return sendFormatted(req, res, 200, { verified: false, reason: "not_found" });
           }
           if (credential.revoked) {
+            recordVerification("revoked");
             return sendFormatted(req, res, 200, { verified: false, reason: "revoked" });
           }
           const now = Math.floor(Date.now() / 1000);
           if (credential.expiresAt > 0 && credential.expiresAt < now) {
+            recordVerification("expired");
             return sendFormatted(req, res, 200, { verified: false, reason: "expired" });
           }
-          return sendFormatted(req, res, 200, { verified: true, credential });
-            recordVerification("not_found");
-            return sendJson(res, 200, { verified: false, reason: "not_found" });
-          }
-          if (credential.revoked) {
-            recordVerification("revoked");
-            return sendJson(res, 200, { verified: false, reason: "revoked" });
-          }
-          const now = Math.floor(Date.now() / 1000);
-          if (credential.expiresAt > 0 && credential.expiresAt < now) {
-            recordVerification("expired");
-            return sendJson(res, 200, { verified: false, reason: "expired" });
-          }
           recordVerification("verified");
-          return sendJson(res, 200, { verified: true, credential });
+          return sendFormatted(req, res, 200, { verified: true, credential });
         }
 
-        // Interactive Swagger UI (#830)
-        if (req.method === "GET" && (pathname === "/api/docs" || pathname === "/api/docs/")) {
+        // Interactive Swagger UI (#830, #1295)
+        if (req.method === "GET" && ["/api/docs", "/api/docs/", "/api-docs", "/api-docs/"].includes(pathname)) {
           try {
             const html = await fs.readFile(new URL("../../docs/api/swagger.html", import.meta.url), "utf8");
             res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
@@ -1207,18 +1591,128 @@ export function createApp({
         }
 
         if (req.method === "GET" && pathname === "/openapi.json") {
-          try {
-            const openApiPath = path.resolve(process.cwd(), "openapi.json");
-            const content = await fs.readFile(openApiPath, "utf8");
-            return sendJson(res, 200, JSON.parse(content));
-          } catch {
+          const candidates = [
+            path.resolve(process.cwd(), "openapi.generated.json"),
+            path.resolve(process.cwd(), "server/openapi.generated.json"),
+            path.resolve(process.cwd(), "openapi.json"),
+            path.resolve(process.cwd(), "server/openapi.json"),
+          ];
+          for (const candidate of candidates) {
             try {
-              const fallbackPath = path.resolve(process.cwd(), "server/openapi.json");
-              const content = await fs.readFile(fallbackPath, "utf8");
+              const content = await fs.readFile(candidate, "utf8");
               return sendJson(res, 200, JSON.parse(content));
-            } catch (err) {
-              return sendJson(res, 500, { error: "openapi_spec_unavailable", message: err.message });
+            } catch {
+              continue;
             }
+          }
+          return sendJson(res, 500, {
+            error: "openapi_spec_unavailable",
+            message: "No OpenAPI specification could be loaded.",
+          });
+        }
+
+        // ── Wallet-bound connected accounts (#1249) ─────────────────────
+        if (pathname === "/account-links" || pathname.startsWith("/account-links/")) {
+          res.setHeader("Cache-Control", "no-store");
+        }
+        const getLinkedWallet = () => {
+          const authorization = req.headers.authorization;
+          const token = typeof authorization === "string"
+            ? authorization.replace(/^Bearer\s+/i, "").trim()
+            : "";
+          return accountLinksService.authenticate(token);
+        };
+
+        if (req.method === "GET" && pathname === "/account-links/challenge") {
+          try {
+            return sendJson(res, 200, await accountLinksService.issueChallenge(url.searchParams.get("address")));
+          } catch (error) {
+            return sendAccountLinksError(res, error);
+          }
+        }
+
+        if (req.method === "POST" && pathname === "/account-links/session") {
+          if (validateContentType(req, res)) return;
+          const body = await readJson(req, config);
+          if (body.__payloadTooLarge) {
+            return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+          }
+          try {
+            return sendJson(res, 200, await accountLinksService.createSession(body));
+          } catch (error) {
+            return sendAccountLinksError(res, error);
+          }
+        }
+
+        if (req.method === "GET" && pathname === "/account-links") {
+          try {
+            return sendJson(res, 200, await accountLinksService.getLinks(getLinkedWallet()));
+          } catch (error) {
+            return sendAccountLinksError(res, error);
+          }
+        }
+
+        if (req.method === "POST" && pathname === "/account-links/github/start") {
+          if (validateContentType(req, res)) return;
+          const body = await readJson(req, config);
+          if (body.__payloadTooLarge) {
+            return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+          }
+          try {
+            return sendJson(res, 200, await accountLinksService.beginGithubLink(getLinkedWallet()));
+          } catch (error) {
+            return sendAccountLinksError(res, error);
+          }
+        }
+
+        if (req.method === "GET" && pathname === "/account-links/github/callback") {
+          try {
+            if (url.searchParams.has("error")) {
+              return sendText(res, 400, "GitHub linking was cancelled. Return to Soroban Identity and try again.");
+            }
+            const result = await accountLinksService.completeGithubCallback({
+              code: url.searchParams.get("code"),
+              state: url.searchParams.get("state"),
+            });
+            return sendText(res, 200, `GitHub account @${result.login} is linked. Return to Soroban Identity; this panel will refresh automatically.`);
+          } catch (error) {
+            return sendAccountLinksError(res, error);
+          }
+        }
+
+        if (req.method === "POST" && pathname === "/account-links/email") {
+          if (validateContentType(req, res)) return;
+          const body = await readJson(req, config);
+          if (body.__payloadTooLarge) {
+            return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+          }
+          try {
+            return sendJson(res, 202, await accountLinksService.sendEmailVerification(getLinkedWallet(), body.email));
+          } catch (error) {
+            return sendAccountLinksError(res, error);
+          }
+        }
+
+        if (req.method === "POST" && pathname === "/account-links/email/confirm") {
+          if (validateContentType(req, res)) return;
+          const body = await readJson(req, config);
+          if (body.__payloadTooLarge) {
+            return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+          }
+          try {
+            const result = await accountLinksService.confirmEmail(body.token);
+            return sendJson(res, 200, { success: result.success });
+          } catch (error) {
+            return sendAccountLinksError(res, error);
+          }
+        }
+
+        if (req.method === "DELETE" && ["/account-links/github", "/account-links/email"].includes(pathname)) {
+          try {
+            const provider = pathname.endsWith("/github") ? "github" : "email";
+            return sendJson(res, 200, await accountLinksService.unlink(getLinkedWallet(), provider));
+          } catch (error) {
+            return sendAccountLinksError(res, error);
           }
         }
 
@@ -1586,6 +2080,7 @@ export function createApp({
           if (!await requireAuth(req, res, config, ['admin:read'])) return;
           const validated = validateRequest(res, schemas.webhookLogsQuery, { query: url.searchParams });
           if (!validated.ok) return;
+          const limit = validated.data.query.limit ?? 50;
           const webhookId = validated.data.query.webhookId ?? null;
           const allLogs = await readWebhookLogs(config, { webhookId, limit: null });
           const { items: logs, pagination } = offsetPage(allLogs, {
@@ -1628,51 +2123,127 @@ export function createApp({
         const cacheDidMatch = pathname.match(/^\/cache\/dids\/([^/]+)$/);
         if (req.method === "DELETE" && cacheDidMatch) {
           if (!await requireAuth(req, res, config, ['admin:write'])) return;
-          const did = decodeURIComponent(cacheDidMatch[1]);
+          let rawDid;
+          try {
+            rawDid = decodeURIComponent(cacheDidMatch[1]);
+          } catch {
+            return sendJson(res, 400, { code: "INVALID_DID", message: "Malformed URL-encoded DID parameter." });
+          }
+          const identifierCheck = validateDidInput(rawDid, { field: "did" });
+          if (!identifierCheck.ok) {
+            return sendJson(res, 400, {
+              error: "invalid_did",
+              code: "INVALID_DID",
+              message: identifierCheck.message,
+              details: [{ field: "did", value: rawDid, code: "invalid_did" }],
+            });
+          }
+          const did = identifierCheck.address;
           const invalidated = didCache ? await didCache.invalidate(did) : false;
           return sendJson(res, 200, { did, invalidated });
         }
 
         // ── DID Resolution & Metadata Endpoints (#1067) ────────────────
+        // #1304: malformed DID input must surface as a 400 with a
+        // descriptive message, never as an unhandled exception (500).
         if (req.method === "POST" && (pathname === "/dids" || pathname === "/identity/did")) {
+          // These writes land in the DID cache, which resolveDid() reads
+          // before the chain, so an unauthenticated write could poison any
+          // DID's resolved document.
+          if (!await requireAuth(req, res, config, ["admin:write"])) return;
           if (validateContentType(req, res)) return;
-          const body = await readJson(req, config);
-          if (body.__payloadTooLarge) {
-            return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
-          }
-          const validated = validateRequest(res, schemas.upsertDid, { body });
-          if (!validated.ok) return;
-          const rawIdentifier = validated.data.body.did ?? validated.data.body.address ?? "";
-          if (!rawIdentifier) {
-            return sendJson(res, 400, {
-              error: "validation_failed",
-              code: "VALIDATION_FAILED",
-              message: "Either did or address is required.",
+          try {
+            const body = await readJson(req, config);
+            if (body.__payloadTooLarge) {
+              return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+            }
+            const validated = validateRequest(res, schemas.upsertDid, { body });
+            if (!validated.ok) return;
+            const rawIdentifier = validated.data.body.did ?? validated.data.body.address ?? "";
+            if (!rawIdentifier) {
+              return sendJson(res, 400, {
+                error: "validation_failed",
+                code: "VALIDATION_FAILED",
+                message: "Either did or address is required.",
+              });
+            }
+            const identifierCheck = validateDidInput(rawIdentifier, { field: "did" });
+            if (!identifierCheck.ok) {
+              return sendJson(res, 400, {
+                error: "invalid_did",
+                code: "INVALID_DID",
+                message: identifierCheck.message,
+                details: [{ field: "did", value: rawIdentifier, code: "invalid_did" }],
+              });
+            }
+            const address = identifierCheck.address;
+            const safeMetadata = sanitizeDidMetadata(body.metadata ?? validated.data.body.metadata ?? {});
+            const nowSec = Math.floor(Date.now() / 1000);
+            const didDoc = {
+              id: `did:stellar:${address}`,
+              controller: validated.data.body.controller ?? `did:stellar:${address}`,
+              createdAt: nowSec,
+              updatedAt: nowSec,
+              metadata: safeMetadata,
+              active: validated.data.body.active !== false,
+            };
+            const persistedDidDoc = await pinAndPersistDid({
+              didDoc,
+              address,
+              config,
+              soroban,
+              ipfsStorage,
+              isUpdate: false,
             });
+            if (didCache) {
+              await didCache.set(address, persistedDidDoc);
+            }
+            // #1288: persist a historical version of the DID document so the
+            // history endpoint can return the full change timeline.
+            await appendDidVersion(config, address, didDoc, {
+              action: "create",
+              actor: req.headers["x-actor"] ?? config.adminActor ?? null,
+            });
+            const didLinks = buildDidLinks(persistedDidDoc, linkPrefix);
+            return sendJson(
+              res,
+              pathname === "/identity/did" ? 200 : 201,
+              { ...persistedDidDoc, _links: didLinks },
+              { Link: formatLinkHeader(didLinks) },
+            );
+          } catch (err) {
+            if (err instanceof DidValidationError) {
+              return sendJson(res, 400, {
+                error: "invalid_did",
+                code: "INVALID_DID",
+                message: err.message,
+                details: err.details ?? [],
+              });
+            }
+            throw err;
           }
-          const address = rawIdentifier.startsWith("did:stellar:")
-            ? rawIdentifier.slice("did:stellar:".length)
-            : rawIdentifier;
-          const safeMetadata = sanitizeDidMetadata(body.metadata ?? validated.data.body.metadata ?? {});
-          const nowSec = Math.floor(Date.now() / 1000);
-          const didDoc = {
-            id: `did:stellar:${address}`,
-            controller: validated.data.body.controller ?? `did:stellar:${address}`,
-            createdAt: nowSec,
-            updatedAt: nowSec,
-            metadata: safeMetadata,
-            active: validated.data.body.active !== false,
-          };
-          if (didCache) {
-            await didCache.set(address, didDoc);
+        }
+
+        // ── W3C DID resolver (#1359) ───────────────────────────────────
+        // GET /did/:did returns a DID Core document (application/did+ld+json)
+        // with verificationMethod and service endpoints.
+        const w3cDidMatch = pathname.match(/^\/did\/([^/]+)$/);
+        if (req.method === "GET" && w3cDidMatch) {
+          let rawDid;
+          try {
+            rawDid = decodeURIComponent(w3cDidMatch[1]);
+          } catch {
+            return sendJson(res, 400, { error: "invalidDid", message: "Malformed URL-encoded DID parameter." });
           }
-          const didLinks = buildDidLinks(didDoc, linkPrefix);
-          return sendJson(
-            res,
-            pathname === "/identity/did" ? 200 : 201,
-            { ...didDoc, _links: didLinks },
-            { Link: formatLinkHeader(didLinks) },
+          const result = await resolveDidDocument(
+            rawDid,
+            (address) => (soroban?.resolveDid ? soroban.resolveDid(address) : null),
+            { accept: req.headers.accept },
           );
+          return sendJson(res, result.status, result.body, {
+            "content-type": `${result.contentType}; charset=utf-8`,
+            ...(result.status === 200 ? { "cache-control": "public, max-age=60" } : {}),
+          });
         }
 
         const didRouteMatch = pathname.match(/^\/dids\/([^/]+)(\/metadata)?$/);
@@ -1683,62 +2254,155 @@ export function createApp({
           } catch {
             return sendJson(res, 400, { code: "INVALID_DID", message: "Malformed URL-encoded DID parameter." });
           }
-          const address = rawDid.startsWith("did:stellar:") ? rawDid.slice("did:stellar:".length) : rawDid;
-
-          if (req.method === "GET") {
-            const doc = soroban?.resolveDid ? await soroban.resolveDid(address) : null;
-            if (!doc) return notFound(res, req);
-            const didLinks = buildDidLinks(doc, linkPrefix);
-            return sendJson(
-              res,
-              200,
-              {
-                ...doc,
-                metadata: sanitizeDidMetadata(doc.metadata ?? {}),
-                _links: didLinks,
-              },
-              { Link: formatLinkHeader(didLinks) },
-            );
+          const identifierCheck = validateDidInput(rawDid, { field: "did" });
+          if (!identifierCheck.ok) {
+            return sendJson(res, 400, {
+              error: "invalid_did",
+              code: "INVALID_DID",
+              message: identifierCheck.message,
+              details: [{ field: "did", value: rawDid, code: "invalid_did" }],
+            });
           }
+          const address = identifierCheck.address;
 
-          if (req.method === "PUT" || req.method === "PATCH") {
-            if (validateContentType(req, res)) return;
-            const body = await readJson(req, config);
-            if (body.__payloadTooLarge) {
-              return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+          try {
+            if (req.method === "GET") {
+              const doc = soroban?.resolveDid ? await soroban.resolveDid(address) : null;
+              if (!doc) return notFound(res, req);
+              const didLinks = buildDidLinks(doc, linkPrefix);
+              return sendJson(
+                res,
+                200,
+                {
+                  ...doc,
+                  metadata: sanitizeDidMetadata(doc.metadata ?? {}),
+                  _links: didLinks,
+                },
+                { Link: formatLinkHeader(didLinks) },
+              );
             }
-            const rawMetadata = body.metadata !== undefined ? body.metadata : body;
-            if (!rawMetadata || typeof rawMetadata !== "object" || Array.isArray(rawMetadata)) {
+
+            if (req.method === "PUT" || req.method === "PATCH") {
+              // Same cache-poisoning risk as POST /dids above.
+              if (!await requireAuth(req, res, config, ["admin:write"])) return;
+              if (validateContentType(req, res)) return;
+              const body = await readJson(req, config);
+              if (body.__payloadTooLarge) {
+                return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+              }
+              const rawMetadata = body.metadata !== undefined ? body.metadata : body;
+              if (!rawMetadata || typeof rawMetadata !== "object" || Array.isArray(rawMetadata)) {
+                return sendJson(res, 400, {
+                  error: "validation_failed",
+                  code: "VALIDATION_FAILED",
+                  message: "DID metadata must be a JSON object.",
+                });
+              }
+              const safeMetadata = sanitizeDidMetadata(rawMetadata);
+              const existing = (soroban?.resolveDid ? await soroban.resolveDid(address) : null) ?? {
+                id: `did:stellar:${address}`,
+                controller: `did:stellar:${address}`,
+                createdAt: Math.floor(Date.now() / 1000),
+                active: true,
+                metadata: {},
+              };
+              const updatedDoc = {
+                ...existing,
+                updatedAt: Math.floor(Date.now() / 1000),
+                metadata: req.method === "PATCH" ? { ...(existing.metadata ?? {}), ...safeMetadata } : safeMetadata,
+              };
+              const persistedDidDoc = await pinAndPersistDid({
+                didDoc: updatedDoc,
+                address,
+                config,
+                soroban,
+                ipfsStorage,
+                isUpdate: true,
+              });
+              if (didCache) {
+                await didCache.set(address, persistedDidDoc);
+              }
+              // #1288: record the new version of the DID document.
+              await appendDidVersion(config, address, updatedDoc, {
+                action: req.method === "PATCH" ? "patch" : "update",
+                actor: req.headers["x-actor"] ?? config.adminActor ?? null,
+              });
+              const didLinks = buildDidLinks(persistedDidDoc, linkPrefix);
+              return sendJson(
+                res,
+                200,
+                { ...persistedDidDoc, _links: didLinks },
+                { Link: formatLinkHeader(didLinks) },
+              );
+            }
+          } catch (err) {
+            if (err instanceof DidValidationError) {
               return sendJson(res, 400, {
-                error: "validation_failed",
-                code: "VALIDATION_FAILED",
-                message: "DID metadata must be a JSON object.",
+                error: "invalid_did",
+                code: "INVALID_DID",
+                message: err.message,
+                details: err.details ?? [],
               });
             }
-            const safeMetadata = sanitizeDidMetadata(rawMetadata);
-            const existing = (soroban?.resolveDid ? await soroban.resolveDid(address) : null) ?? {
-              id: `did:stellar:${address}`,
-              controller: `did:stellar:${address}`,
-              createdAt: Math.floor(Date.now() / 1000),
-              active: true,
-              metadata: {},
-            };
-            const updatedDoc = {
-              ...existing,
-              updatedAt: Math.floor(Date.now() / 1000),
-              metadata: req.method === "PATCH" ? { ...(existing.metadata ?? {}), ...safeMetadata } : safeMetadata,
-            };
-            if (didCache) {
-              await didCache.set(address, updatedDoc);
-            }
-            const didLinks = buildDidLinks(updatedDoc, linkPrefix);
-            return sendJson(
-              res,
-              200,
-              { ...updatedDoc, _links: didLinks },
-              { Link: formatLinkHeader(didLinks) },
-            );
+            throw err;
           }
+        }
+
+        // ── DID document history (#1288) ───────────────────────────────
+        // GET /identity/:did/history returns the stored versions of a DID
+        // document, newest first, paginated with opaque cursors.
+        const didHistoryMatch = pathname.match(/^\/identity\/([^/]+)\/history$/);
+        if (req.method === "GET" && didHistoryMatch) {
+          let rawDid;
+          try {
+            rawDid = decodeURIComponent(didHistoryMatch[1]);
+          } catch {
+            return sendJson(res, 400, { code: "INVALID_DID", message: "Malformed URL-encoded DID parameter." });
+          }
+          const identifierCheck = validateDidInput(rawDid, { field: "did" });
+          if (!identifierCheck.ok) {
+            return sendJson(res, 400, {
+              error: "invalid_did",
+              code: "INVALID_DID",
+              message: identifierCheck.message,
+              details: [{ field: "did", value: rawDid, code: "invalid_did" }],
+            });
+          }
+          const address = identifierCheck.address;
+
+          const validated = validateRequest(res, schemas.didHistoryQuery, { query: url.searchParams });
+          if (!validated.ok) return;
+          const limitNum = validated.data.query.limit ?? 50;
+          const direction = validated.data.query.direction ?? "next";
+
+          const versions = await readDidVersions(config, address);
+          if (!versions || versions.length === 0) {
+            // Distinguish "DID exists but has no recorded history" from
+            // "DID is unknown": fall back to the resolver before 404ing.
+            const doc = soroban?.resolveDid ? await soroban.resolveDid(address) : null;
+            if (!doc) return notFound(res, req);
+            return sendJson(res, 200, {
+              did: `did:stellar:${address}`,
+              versions: [],
+              nextCursor: null,
+              previousCursor: null,
+              pagination: { limit: limitNum, count: 0 },
+            });
+          }
+
+          const { items, nextCursor, previousCursor, pagination } = cursorPage(versions, {
+            limit: limitNum,
+            cursor: validated.data.query.cursor ?? null,
+            direction,
+          });
+          setPaginationHeaders(res, url, pagination);
+          return sendJson(res, 200, {
+            did: `did:stellar:${address}`,
+            versions: items,
+            nextCursor,
+            previousCursor,
+            pagination,
+          });
         }
 
         if (req.method === "GET" && pathname === "/notifications/summary") {
@@ -1819,7 +2483,10 @@ export function createApp({
           return sendFormatted(req, res, 200, { issuers, pagination });
         }
 
+        // ── Issuer whitelist management (#1290) ────────────────────────
+        // Admin-only endpoints that add/remove trusted issuers on-chain.
         if (req.method === "POST" && pathname === "/admin/issuers") {
+          if (!await requireAuth(req, res, config, ['admin:write'])) return;
           if (validateContentType(req, res)) return;
           const body = await readJson(req, config);
           if (body.__payloadTooLarge)
@@ -1834,7 +2501,7 @@ export function createApp({
             actor: req.headers["x-actor"] ?? config.adminActor,
             issuer,
           });
-          return sendFormatted(req, res, 201, { issuer: body.issuer });
+          return sendFormatted(req, res, 201, { issuer });
         }
 
         if (req.method === "DELETE" && pathname === "/admin/issuers") {
@@ -1898,7 +2565,6 @@ export function createApp({
           return sendFormatted(req, res, 200, { ...report, pagination });
         }
 
-        return notFound(res, req);
         if (req.method === "GET" && (url.pathname === "/admin/expiry-thresholds" || url.pathname === "/expiry/thresholds")) {
           if (!await requireAuth(req, res, config, ['admin:read'])) return;
           return sendJson(res, 200, {
@@ -2211,9 +2877,17 @@ export function createApp({
           return;
         }
 
+        console.log("DEBUG_NOT_FOUND", req.method, pathname);
         return notFound(res);
     };
-    return requestContextStore.run({ requestId, correlationId, tenantId }, handler).catch((error) => {
+    return dedupe(req, res, () => requestContextStore.run({ requestId, correlationId, tenantId }, handler), config).catch((error) => {
+        if (error instanceof PayloadEncryptionError) {
+          return sendJson(res, error.status, {
+            error: "payload_encryption_error",
+            code: error.code,
+            message: error.message,
+          });
+        }
         if (error.name === "SorobanError" || error.name === "SorobanUnavailableError") {
           const isUnavailable = error.name === "SorobanUnavailableError" || error.category === "rpc_unavailable";
           const statusCode = isUnavailable ? 503 : 500;

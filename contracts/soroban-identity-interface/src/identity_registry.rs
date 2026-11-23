@@ -1,7 +1,8 @@
 //! Stable trait ABI for the `identity-registry` contract.
 
 use identity_registry::{
-    ContractError, DidDocument, IdentityRegistry, IdentityStorageStats, ServiceEndpoint,
+    ContractError, DidDocument, DidMethod, IdentityRegistry, IdentityStorageStats, ResolverPlugin,
+    ServiceEndpoint,
 };
 use soroban_sdk::{Address, BytesN, Env, Map, String, Vec};
 
@@ -34,6 +35,30 @@ pub trait IdentityRegistryInterface {
         metadata: Map<String, String>,
     ) -> Result<String, ContractError>;
 
+    /// Register a new DID owned by `owner` and store the initial metadata hash.
+    ///
+    /// Returns the canonical DID string for the newly created identity.
+    fn create_identity(
+        env: Env,
+        owner: Address,
+        did: String,
+        metadata_hash: BytesN<32>,
+    ) -> Result<String, ContractError>;
+
+    /// Update the metadata hash of an existing DID owned by `owner`.
+    fn update_identity(
+        env: Env,
+        owner: Address,
+        did: String,
+        metadata_hash: BytesN<32>,
+    ) -> Result<(), ContractError>;
+
+    /// Resolve a DID string to its full DID document.
+    ///
+    /// Returns `Err(ContractError::DidNotFound)` (rather than panicking) when
+    /// the DID is unknown.
+    fn resolve_identity(env: Env, did: String) -> Result<DidDocument, ContractError>;
+
     fn create_dids_batch(
         env: Env,
         entries: Vec<(Address, Map<String, String>)>,
@@ -63,6 +88,8 @@ pub trait IdentityRegistryInterface {
 
     fn get_did_count(env: Env) -> u32;
 
+    fn list_dids(env: Env, offset: u32, limit: u32) -> Vec<DidDocument>;
+
     fn get_storage_stats(env: Env) -> IdentityStorageStats;
 
     fn remove_service(
@@ -72,6 +99,69 @@ pub trait IdentityRegistryInterface {
     ) -> Result<(), ContractError>;
 
     fn get_services(env: Env, controller: Address) -> Result<Vec<ServiceEndpoint>, ContractError>;
+
+    /// Resolve a DID through the universal resolver, dispatching to the
+    /// appropriate method-specific resolver (`did:stellar`, `did:ethr`,
+    /// `did:web`, or a registered custom plugin) with caching and fallback.
+    ///
+    /// Returns `Err(ContractError::DidNotFound)` (rather than panicking) when
+    /// the DID is unknown or cannot be resolved by any configured resolver.
+    fn resolve_did_universal(env: Env, did: String) -> Result<DidDocument, ContractError>;
+
+    /// Register a custom resolver plugin for a DID method.
+    fn register_resolver_plugin(
+        env: Env,
+        admin: Address,
+        plugin: ResolverPlugin,
+    ) -> Result<(), ContractError>;
+
+    /// Configure the ordered fallback chain of resolver methods.
+    fn set_fallback_chain(
+        env: Env,
+        admin: Address,
+        chain: Vec<String>,
+    ) -> Result<(), ContractError>;
+
+    /// Fetch a previously cached resolved DID document, if present.
+    ///
+    /// Returns `Err(ContractError::DidNotFound)` (rather than panicking) when
+    /// no cached document exists for the given DID.
+    fn get_cached_did(env: Env, did: String) -> Result<DidDocument, ContractError>;
+
+    /// Validate a DID document against the resolver's structural rules.
+    fn validate_did_document(env: Env, document: DidDocument) -> Result<bool, ContractError>;
+
+    fn register_did_method(
+        env: Env,
+        controller: Address,
+        method: DidMethod,
+    ) -> Result<(), ContractError>;
+
+    /// Resolve a DID string to its document.
+    ///
+    /// Returns `Err(ContractError::DidNotFound)` (rather than panicking) when
+    /// the DID is unknown or cannot be resolved.
+    fn resolve_did_string(env: Env, did: String) -> Result<DidDocument, ContractError>;
+
+    fn get_did_methods(env: Env, controller: Address) -> Result<Vec<DidMethod>, ContractError>;
+
+    fn initiate_signer_rotation(
+        env: Env,
+        controller: Address,
+        new_signers: Vec<Address>,
+    ) -> Result<u32, ContractError>;
+
+    fn approve_signer_rotation(
+        env: Env,
+        signer: Address,
+        rotation_id: u32,
+    ) -> Result<(), ContractError>;
+
+    fn complete_signer_rotation(
+        env: Env,
+        controller: Address,
+        rotation_id: u32,
+    ) -> Result<(), ContractError>;
 }
 
 /// Blanket implementation delegating to `IdentityRegistry`'s existing
@@ -112,6 +202,28 @@ impl IdentityRegistryInterface for IdentityRegistry {
         metadata: Map<String, String>,
     ) -> Result<String, ContractError> {
         Self::create_did(env, controller, metadata)
+    }
+
+    fn create_identity(
+        env: Env,
+        owner: Address,
+        did: String,
+        metadata_hash: BytesN<32>,
+    ) -> Result<String, ContractError> {
+        Self::create_identity(env, owner, did, metadata_hash)
+    }
+
+    fn update_identity(
+        env: Env,
+        owner: Address,
+        did: String,
+        metadata_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        Self::update_identity(env, owner, did, metadata_hash)
+    }
+
+    fn resolve_identity(env: Env, did: String) -> Result<DidDocument, ContractError> {
+        Self::resolve_identity(env, did)
     }
 
     fn create_dids_batch(
@@ -161,6 +273,10 @@ impl IdentityRegistryInterface for IdentityRegistry {
         Self::get_did_count(env)
     }
 
+    fn list_dids(env: Env, offset: u32, limit: u32) -> Vec<DidDocument> {
+        Self::list_dids(env, offset, limit)
+    }
+
     fn get_storage_stats(env: Env) -> IdentityStorageStats {
         Self::get_storage_stats(env)
     }
@@ -175,5 +291,73 @@ impl IdentityRegistryInterface for IdentityRegistry {
 
     fn get_services(env: Env, controller: Address) -> Result<Vec<ServiceEndpoint>, ContractError> {
         Self::get_services(env, controller)
+    }
+
+    fn resolve_did_universal(env: Env, did: String) -> Result<DidDocument, ContractError> {
+        Self::resolve_did_universal(env, did)
+    }
+
+    fn register_resolver_plugin(
+        env: Env,
+        admin: Address,
+        plugin: ResolverPlugin,
+    ) -> Result<(), ContractError> {
+        Self::register_resolver_plugin(env, admin, plugin)
+    }
+
+    fn set_fallback_chain(
+        env: Env,
+        admin: Address,
+        chain: Vec<String>,
+    ) -> Result<(), ContractError> {
+        Self::set_fallback_chain(env, admin, chain)
+    }
+
+    fn get_cached_did(env: Env, did: String) -> Result<DidDocument, ContractError> {
+        Self::get_cached_did(env, did)
+    }
+
+    fn validate_did_document(env: Env, document: DidDocument) -> Result<bool, ContractError> {
+        Self::validate_did_document(env, document)
+    }
+
+    fn register_did_method(
+        env: Env,
+        controller: Address,
+        method: DidMethod,
+    ) -> Result<(), ContractError> {
+        Self::register_did_method(env, controller, method)
+    }
+
+    fn resolve_did_string(env: Env, did: String) -> Result<DidDocument, ContractError> {
+        Self::resolve_did_string(env, did)
+    }
+
+    fn get_did_methods(env: Env, controller: Address) -> Result<Vec<DidMethod>, ContractError> {
+        Self::get_did_methods(env, controller)
+    }
+
+    fn initiate_signer_rotation(
+        env: Env,
+        controller: Address,
+        new_signers: Vec<Address>,
+    ) -> Result<u32, ContractError> {
+        Self::initiate_signer_rotation(env, controller, new_signers)
+    }
+
+    fn approve_signer_rotation(
+        env: Env,
+        signer: Address,
+        rotation_id: u32,
+    ) -> Result<(), ContractError> {
+        Self::approve_signer_rotation(env, signer, rotation_id)
+    }
+
+    fn complete_signer_rotation(
+        env: Env,
+        controller: Address,
+        rotation_id: u32,
+    ) -> Result<(), ContractError> {
+        Self::complete_signer_rotation(env, controller, rotation_id)
     }
 }
