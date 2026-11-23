@@ -1,0 +1,336 @@
+{
+  "app": {
+    "title": "Soroban Identity",
+    "subtitle": "Identité Décentralisée pour un Monde sans Confiance",
+    "lightMode": "☀ Clair",
+    "darkMode": "☾ Sombre",
+    "networkOnline": "Réseau OK",
+    "networkOffline": "Erreur Réseau"
+  },
+  "tabs": {
+    "identity": "Identité (DID)",
+    "credentials": "Justificatifs",
+    "issuerAnalytics": "Analytique de l'émetteur",
+    "label": "Sections",
+    "networkStatistics": "Statistiques du réseau",
+    "activityFeed": "Fil d’activité"
+  },
+  "wallet": {
+    "connect": "Connecter le Portefeuille",
+    "disconnect": "Déconnecter",
+    "connecting": "Connexion…"
+  },
+  "identity": {
+    "resolveDid": "Résoudre le DID",
+    "resolveAddress": "Adresse Stellar (G…)",
+    "resolve": "Résoudre",
+    "resolving": "Résolution…",
+    "reputation": "Réputation",
+    "score": "Score",
+    "reporters": "Rapporteurs",
+    "lastUpdated": "Dernière mise à jour",
+    "noReputation": "Aucun enregistrement de réputation trouvé pour cette adresse.",
+    "loadingReputation": "Chargement de la réputation…",
+    "antiSybil": "Vérification Anti-Sybil",
+    "minScore": "Score Minimum",
+    "minReporters": "Rapporteurs Minimum",
+    "runSybilCheck": "Lancer la Vérification Sybil",
+    "checkingSybil": "Vérification…",
+    "passesSybil": "✓ Passe la vérification sybil",
+    "failsSybil": "✗ Échoue la vérification sybil",
+    "resolveDIDFirst": "Résolvez un DID ci-dessus pour lancer la vérification anti-sybil.",
+    "createDid": "Créer un DID",
+    "creating": "Création…",
+    "connectToCreate": "Connectez votre portefeuille Freighter pour créer un nouveau DID en chaîne.",
+    "connectedAs": "Connecté en tant que",
+    "showQr": "Afficher le Code QR",
+    "hideQr": "Masquer le Code QR"
+  },
+  "credentials": {
+    "credentials": "Justificatifs",
+    "verifyCredential": "Vérifier le Justificatif",
+    "credentialIdPlaceholder": "ID du Justificatif (hex)",
+    "verify": "Vérifier",
+    "verifying": "Vérification…",
+    "valid": "Valide",
+    "revokedMsg": "Invalide — le justificatif a été révoqué",
+    "expiredMsg": "Invalide — le justificatif a expiré",
+    "notFoundMsg": "Invalide — justificatif introuvable",
+    "invalid": "Invalide",
+    "issueCredential": "Émettre un Justificatif",
+    "issuingAs": "Émission en tant que",
+    "subjectPlaceholder": "Adresse du sujet (G…)",
+    "issueKyc": "Émettre un Justificatif KYC",
+    "issuing": "Émission…",
+    "connectToIssue": "Connectez votre portefeuille Freighter pour émettre des justificatifs en tant qu'émetteur enregistré.",
+    "noCredentials": "Aucun justificatif de type {{type}} trouvé.",
+    "noExpiry": "Pas d'expiration",
+    "expiredDaysAgo": "Expiré il y a {{count}} jour",
+    "expiredDaysAgo_plural": "Expiré il y a {{count}} jours",
+    "expiredHoursAgo": "Expiré il y a {{count}} heure",
+    "expiredHoursAgo_plural": "Expiré il y a {{count}} heures",
+    "expiredMinsAgo": "Expiré il y a {{count}} min",
+    "expiredMinsAgo_plural": "Expiré il y a {{count}} mins",
+    "expiresInDays": "Expire dans {{count}} jour",
+    "expiresInDays_plural": "Expire dans {{count}} jours",
+    "expiresInHours": "Expire dans {{count}} heure",
+    "expiresInHours_plural": "Expire dans {{count}} heures",
+    "expiresInMins": "Expire dans {{count}} min",
+    "expiresInMins_plural": "Expire dans {{count}} mins",
+    "exportCredential": "Exporter l'attestation",
+    "exportJson": "JSON",
+    "exportXml": "XML",
+    "exportPdf": "PDF",
+    "exportedAs": "Exporté {{filename}}",
+    "exportFailed": "L'export a échoué — rien n'a été téléchargé"
+  },
+  "a11y": {
+    "skipToContent": "Passer au contenu principal",
+    "switchLanguage": "Changer de langue",
+    "dismissNotification": "Fermer la notification"
+  },
+  "biometric": {
+    "title": "Authentification Biométrique",
+    "description": "Utilisez votre empreinte digitale ou votre reconnaissance faciale pour vous connecter en toute sécurité.",
+    "devices": "Appareils Enregistrés",
+    "noDevices": "Aucun appareil biométrique enregistré.",
+    "registerDevice": "Enregistrer un Appareil",
+    "registering": "Enregistrement…",
+    "removeDevice": "Supprimer l'Appareil",
+    "removing": "Suppression…",
+    "deviceName": "Nom de l'Appareil",
+    "deviceNamePlaceholder": "ex. MacBook Pro, iPhone de Marie",
+    "registeredOn": "Enregistré le",
+    "lastUsed": "Dernière utilisation",
+    "neverUsed": "Jamais utilisé",
+    "removeConfirm": "Supprimer cet appareil ? Vous devrez l’enregistrer à nouveau pour utiliser la biométrie.",
+    "prompt": "Confirmez votre identité avec votre empreinte digitale ou votre reconnaissance faciale.",
+    "authenticating": "Authentification…",
+    "authenticated": "Authentifié avec succès",
+    "authFailed": "Échec de l'authentification biométrique. Veuillez réessayer.",
+    "authCancelled": "Authentification biométrique annulée.",
+    "usePassword": "Utiliser le mot de passe à la place",
+    "fallbackHint": "Vous pouvez toujours vous connecter avec votre mot de passe si la biométrie n'est pas disponible.",
+    "unsupportedBrowser": "Votre navigateur ne prend pas en charge l'authentification biométrique (WebAuthn). Veuillez utiliser un navigateur plus récent ou vous connecter avec votre mot de passe.",
+    "unsupportedPlatform": "Cet appareil ne dispose pas d'un authentificateur de plateforme (Touch ID, Face ID).",
+    "notAvailable": "L'authentification biométrique n'est pas disponible sur cet appareil.",
+    "enableBiometric": "Activer la connexion biométrique",
+    "disableBiometric": "Désactiver la connexion biométrique",
+    "deviceRegistered": "Appareil enregistré avec succès.",
+    "deviceRemoved": "Appareil supprimé avec succès.",
+    "registerFailed": "Échec de l'enregistrement de l'appareil. Veuillez réessayer.",
+    "removeFailed": "Échec de la suppression de l'appareil. Veuillez réessayer.",
+    "registeredDevices": "Appareils enregistrés",
+    "authenticate": "S’authentifier avec la biométrie",
+    "authenticationFailed": "Échec de l’authentification. Réessayez.",
+    "registrationSuccess": "Appareil enregistré avec succès.",
+    "registrationFailed": "Impossible d’enregistrer cet appareil.",
+    "removeSuccess": "Appareil supprimé.",
+    "promptTitle": "Vérification biométrique",
+    "promptMessage": "Confirmez votre identité à l’aide du capteur biométrique de votre appareil.",
+    "promptCancelled": "La demande de vérification biométrique a été annulée.",
+    "fallbackToPassword": "Utiliser plutôt le mot de passe",
+    "unsupportedBrowserHint": "Utilisez un navigateur compatible ou continuez avec votre mot de passe.",
+    "notEnrolled": "Aucun justificatif biométrique n’est enregistré sur cet appareil."
+  },
+  "voice": {
+    "title": "Commandes Vocales",
+    "description": "Contrôlez l'application à la voix pour une utilisation mains libres.",
+    "startListening": "Démarrer l'écoute",
+    "stopListening": "Arrêter l'écoute",
+    "listening": "Écoute en cours…",
+    "listeningIndicator": "Microphone actif — parlez maintenant",
+    "processing": "Traitement de la commande…",
+    "commandNotRecognized": "Commande non reconnue. Veuillez réessayer.",
+    "commandExecuted": "Commande exécutée : {{command}}",
+    "confirmCommand": "Voulez-vous exécuter « {{command}} » ?",
+    "confirm": "Confirmer",
+    "cancel": "Annuler",
+    "language": "Langue",
+    "selectLanguage": "Sélectionner la langue",
+    "commands": {
+      "search": "Rechercher",
+      "navigate": "Naviguer",
+      "verify": "Vérifier",
+      "searchHint": "Dites « rechercher » suivi de votre requête",
+      "navigateHint": "Dites « naviguer vers » suivi du nom de la page",
+      "verifyHint": "Dites « vérifier » suivi de l'ID du justificatif"
+    },
+    "permission": {
+      "title": "Accès au Microphone",
+      "requesting": "Demande d'accès au microphone…",
+      "granted": "Accès au microphone accordé.",
+      "denied": "Accès au microphone refusé. Activez-le dans les paramètres de votre navigateur pour utiliser les commandes vocales.",
+      "prompt": "L'accès au microphone est requis pour les commandes vocales.",
+      "requestAccess": "Autoriser le Microphone",
+      "notSupported": "Votre navigateur ne prend pas en charge la reconnaissance vocale."
+    },
+    "feedback": {
+      "enabled": "Retour vocal activé",
+      "disabled": "Retour vocal désactivé",
+      "toggle": "Activer/désactiver le retour vocal"
+    },
+    "enable": "Activer les commandes vocales",
+    "disable": "Désactiver les commandes vocales",
+    "commandSearch": "Rechercher",
+    "commandNavigate": "Naviguer",
+    "commandVerify": "Vérifier",
+    "searchExample": "Dites « rechercher des justificatifs »",
+    "navigateExample": "Dites « aller aux justificatifs »",
+    "verifyExample": "Dites « vérifier un justificatif »",
+    "confirmSearch": "Recherche de {{query}}.",
+    "confirmNavigate": "Navigation vers {{destination}}.",
+    "confirmVerify": "Vérification du justificatif.",
+    "feedbackSuccess": "C’est fait.",
+    "feedbackError": "Une erreur s’est produite. Réessayez.",
+    "permissionTitle": "Accès au microphone",
+    "permissionMessage": "Les commandes vocales nécessitent l’accès à votre microphone.",
+    "permissionRequest": "Autoriser le microphone",
+    "permissionGranted": "Accès au microphone autorisé.",
+    "permissionDenied": "L’accès au microphone a été refusé. Autorisez-le dans les paramètres de votre navigateur pour utiliser les commandes vocales.",
+    "permissionPrompt": "Veuillez autoriser l’accès au microphone pour utiliser les commandes vocales.",
+    "unavailable": "Les commandes vocales ne sont pas disponibles dans ce navigateur.",
+    "unavailableHint": "Utilisez un navigateur compatible pour utiliser les commandes vocales.",
+    "noSpeechDetected": "Aucune parole détectée. Réessayez.",
+    "visualFeedback": "Saisie vocale active"
+  },
+  "shortcuts": {
+    "title": "Raccourcis Clavier",
+    "description": "Utilisez les raccourcis clavier pour naviguer et interagir plus efficacement avec l'application.",
+    "close": "Fermer l'aide des raccourcis",
+    "enableShortcuts": "Activer les raccourcis clavier",
+    "hint": "Appuyez sur ? pour afficher les raccourcis à tout moment. {{key}}+/ fonctionne également.",
+    "category": {
+      "navigation": "Navigation",
+      "actions": "Actions",
+      "ui": "Interface Utilisateur"
+    },
+    "table": {
+      "shortcut": "Raccourci",
+      "description": "Description"
+    },
+    "search": "Ouvrir la recherche",
+    "createCredential": "Créer un nouveau justificatif",
+    "goToDIDs": "Aller à l'onglet DIDs",
+    "goToCredentials": "Aller à l'onglet Justificatifs",
+    "toggleTheme": "Basculer le thème",
+    "showHelp": "Afficher les raccourcis clavier",
+    "closeDialog": "Fermer la boîte de dialogue ou le modal"
+  },
+  "networkStatistics": {
+    "title": "Statistiques du réseau",
+    "totalDids": "Nombre total de DID",
+    "totalCredentials": "Nombre total de justificatifs",
+    "overTime": "DID et justificatifs au fil du temps",
+    "topIssuers": "Principaux émetteurs",
+    "topIssuersByVolume": "Principaux émetteurs par volume",
+    "geographicDistribution": "Répartition géographique",
+    "verificationSuccessRate": "Taux de réussite des vérifications",
+    "credentialTypeDistribution": "Répartition par type de justificatif",
+    "interactiveExploration": "Exploration interactive des données",
+    "exportChartAsImage": "Exporter le graphique en image",
+    "exportedChart": "{{filename}} exporté",
+    "exportFailed": "Échec de l’exportation — aucun fichier n’a été téléchargé",
+    "noData": "Aucune donnée disponible",
+    "loading": "Chargement des statistiques…",
+    "volume": "Volume",
+    "issuer": "Émetteur",
+    "region": "Région",
+    "count": "Nombre",
+    "percentage": "Pourcentage",
+    "successRate": "Taux de réussite",
+    "credentialType": "Type de justificatif"
+  },
+  "comparison": {
+    "compareCredentials": "Comparer des justificatifs",
+    "selectCredentials": "Sélectionnez 2 à 4 justificatifs à comparer",
+    "selectCredentialsHint": "Sélectionnez 2 à 4 justificatifs à comparer",
+    "copyComparisonLink": "Copier le lien de comparaison",
+    "comparisonLinkCopied": "Lien de comparaison copié",
+    "exportComparisonAsImage": "Exporter la comparaison en image",
+    "exportComparisonAsPdf": "Exporter la comparaison en PDF",
+    "attributes": "Attributs",
+    "differences": "Différences",
+    "highlightDifferences": "Mettre les différences en évidence",
+    "issuerReputation": "Réputation de l’émetteur",
+    "expiryDate": "Date d’expiration",
+    "verificationStatus": "Statut de vérification",
+    "noDifferences": "Aucune différence trouvée",
+    "tooManyCredentials": "Vous pouvez comparer au maximum 4 justificatifs",
+    "tooFewCredentials": "Sélectionnez au moins 2 justificatifs à comparer"
+  },
+  "tour": {
+    "helpLabel": "Aide et visite guidée",
+    "startTour": "Commencer la visite",
+    "restartTour": "Recommencer la visite",
+    "next": "Suivant",
+    "back": "Retour",
+    "skip": "Passer",
+    "finish": "Terminer",
+    "stepOf": "Étape {{current}} sur {{total}}",
+    "choosePath": "Choisissez votre visite",
+    "choosePathDescription": "Choisissez le parcours qui correspond à votre utilisation de Soroban Identity.",
+    "paths": {
+      "issuer": {
+        "title": "Parcours émetteur",
+        "description": "Découvrez comment créer un DID et émettre des justificatifs vérifiables."
+      },
+      "holder": {
+        "title": "Parcours détenteur",
+        "description": "Découvrez comment créer un DID et gérer vos justificatifs."
+      }
+    },
+    "issuer": {
+      "welcome": {
+        "title": "Bienvenue, émetteur",
+        "description": "Cette courte visite vous montre comment configurer votre identité et émettre des justificatifs."
+      },
+      "createDid": {
+        "title": "Créez votre DID",
+        "description": "Commencez par créer un identifiant décentralisé sur la blockchain pour votre organisation."
+      },
+      "connectWallet": {
+        "title": "Connectez votre portefeuille",
+        "description": "Connectez Freighter pour signer la transaction qui crée votre DID."
+      },
+      "issueCredential": {
+        "title": "Émettre un justificatif",
+        "description": "Émettez des justificatifs KYC ou d’autres justificatifs vérifiables aux adresses des personnes concernées."
+      },
+      "verifyCredential": {
+        "title": "Vérifier des justificatifs",
+        "description": "Vérifiez qu’un justificatif est valide, non révoqué et non expiré."
+      },
+      "analytics": {
+        "title": "Suivre les émissions",
+        "description": "Utilisez les statistiques de l’émetteur pour suivre les justificatifs que vous avez émis."
+      }
+    },
+    "holder": {
+      "welcome": {
+        "title": "Bienvenue, détenteur",
+        "description": "Cette courte visite vous montre comment configurer votre identité et gérer vos justificatifs."
+      },
+      "createDid": {
+        "title": "Créez votre DID",
+        "description": "Créez un identifiant décentralisé sur la blockchain qui vous représente."
+      },
+      "connectWallet": {
+        "title": "Connectez votre portefeuille",
+        "description": "Connectez Freighter pour signer la transaction qui crée votre DID."
+      },
+      "viewCredentials": {
+        "title": "Consulter vos justificatifs",
+        "description": "Parcourez les justificatifs émis à votre adresse dans l’onglet Justificatifs."
+      },
+      "verifyCredential": {
+        "title": "Vérifier un justificatif",
+        "description": "Vérifiez qu’un justificatif est valide avant de vous y fier."
+      },
+      "exportCredential": {
+        "title": "Exporter des justificatifs",
+        "description": "Téléchargez vos justificatifs aux formats JSON, XML ou PDF."
+      }
+    }
+  }
+}

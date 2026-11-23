@@ -1,0 +1,270 @@
+# Accessibility
+
+The frontend targets WCAG 2.1 Level AA. This documents what is implemented,
+how it is tested, and what still needs a human with a screen reader.
+
+## Landmarks and skip link
+
+The page opens with a skip link (`.skip-link`) that is positioned off-screen
+until focused and targets `#main-content`. `<main id="main-content"
+tabindex="-1">` wraps the tab panels so the skip target can actually receive
+focus; `main:focus` clears the outline because the landmark is not itself an
+interactive control (WCAG 2.4.1).
+
+## Keyboard navigation
+
+Every interactive element is reachable and operable by keyboard.
+
+The section switcher implements the WAI-ARIA tab pattern:
+
+| Key | Behaviour |
+| --- | --- |
+| `Tab` | Enters the tablist at the selected tab, then leaves it |
+| `←` / `→` | Move to the previous / next tab, wrapping at the ends |
+| `Home` / `End` | Jump to the first / last tab |
+
+Only the selected tab carries `tabindex="0"` (roving tabindex), so a keyboard
+user tabs *into* the tablist once rather than through every tab. Each tab is
+`role="tab"` with `aria-selected` and `aria-controls`; each panel is
+`role="tabpanel"` labelled by its tab, with the inactive panel `hidden` rather
+than removed so the labelling relationship survives.
+
+## Focus indicators
+
+`:focus-visible` paints a 2px `--focus-ring` outline with a 2px offset, so
+mouse users do not see a ring but keyboard users always do (WCAG 2.4.7).
+`[role="button"]` elements — the credential cards — get the same treatment.
+Under `forced-colors: active` the ring falls back to the system `Highlight`
+colour, since custom outline colours are stripped in that mode.
+
+## Form labels
+
+Every input has a programmatically associated name (WCAG 1.3.1, 3.3.2):
+
+- `FormField` renders a real `<label htmlFor>` and wires `aria-invalid` plus
+  `aria-describedby` to a `role="alert"` error message.
+- Single-purpose inputs (resolve address, credential search, verify ID) have a
+  `<label class="visually-hidden">` where an on-screen label would be
+  redundant. `.visually-hidden` uses the clip-path pattern, which keeps the
+  text in the accessibility tree — unlike `display: none`.
+- Repeated rows (metadata pairs, claim pairs) use indexed `aria-label`s
+  ("Metadata key 1", "Claim value 2") so each field is distinguishable when
+  navigating by form control.
+- The reputation chart's date filters are associated by `htmlFor`/`id`.
+
+A placeholder is never the only label.
+
+## Status and live regions
+
+The RPC connection indicator is `role="status" aria-live="polite"`, so a change
+is announced without stealing focus. Decorative glyphs
+(the ⚠ prefixes, the coloured connection dot) are `aria-hidden="true"` so they
+are not read out as punctuation.
+
+## Images
+
+The app renders no `<img>` elements, so there is no missing alt text today. The
+one graphic is the DID QR code, which is accompanied by the DID string as
+visible text so its information is available without reading the image (WCAG
+1.1.1). The favicon is an inline SVG data URI in `index.html`. Any `<img>` added
+later needs an `alt` attribute — descriptive when it carries meaning, `alt=""`
+when it is decorative.
+
+## Reduced motion
+
+`prefers-reduced-motion: reduce` collapses animation and transition durations
+and disables smooth scrolling (WCAG 2.3.3).
+
+## Automated testing
+
+`axe-core` runs against rendered components in `src/a11y.test.tsx` and
+`src/App.a11y.test.tsx`:
+
+```bash
+cd frontend
+npx vitest run src/a11y.test.tsx src/App.a11y.test.tsx
+```
+
+The `color-contrast` rule is disabled in these runs because jsdom has no layout
+or computed styles for axe to measure — contrast is verified against the running
+app instead. Everything else runs with axe's defaults.
+
+`src/setupTests.ts` stubs `window.matchMedia`, which jsdom does not implement
+and `useTheme` reads on mount, and is registered via `setupFiles` in
+`vite.config.ts`.
+
+## Manual verification still required
+
+Automated tooling catches roughly a third of WCAG issues. These need a person:
+
+- **Screen readers** — NVDA (Firefox) and JAWS (Chrome) on Windows, VoiceOver
+  (Safari) on macOS. Confirm reading order, that tab changes are announced, and
+  that panel content is reached in a sensible order.
+- **Colour contrast** — verify text and focus rings against both themes at 4.5:1
+  for body text and 3:1 for large text and UI components.
+- **Zoom and reflow** — 200% zoom and a 320px viewport with no horizontal
+  scrolling (WCAG 1.4.10).
+- **Keyboard-only walkthrough** — issue, verify, and resolve flows end to end
+  without touching a pointer.
+
+## Biometric authentication
+
+WebAuthn backs the biometric sign-in flow (fingerprint, Face ID, Windows
+Hello). The browser prompt is owned by the platform, not by the app, so the
+accessibility surface is the fallback path and the device management UI.
+
+### Browser compatibility
+
+| Browser | Minimum version | Platform authenticator | Notes |
+| --- | --- | --- | --- |
+| Chrome / Chromium | 67 | Touch ID (macOS), Windows Hello, Android fingerprint/face | `platform` authenticator via `navigator.credentials.create` |
+| Safari | 13 (macOS), 13 (iOS) | Touch ID, Face ID | Face ID requires a user gesture and a secure context |
+| Edge | 18 (EdgeHTML), 79 (Chromium) | Windows Hello | Chromium builds behave as Chrome |
+| Firefox | 60 | Windows Hello, Android fingerprint | Touch ID on macOS supported from 66 |
+
+Requirements: a secure context (HTTPS or `localhost`), and
+`window.PublicKeyCredential` plus
+`PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()`
+resolving `true`. Where those are missing the biometric button is not
+rendered at all, so there is no dead control to tab to.
+
+### Known limitations
+
+- Platform authenticators are per-device. A credential registered on a phone
+  is not usable on a laptop; each device must be enrolled separately.
+- iOS Safari shows the Face ID / Touch ID sheet outside the page, so page
+  zoom, custom focus rings and `prefers-reduced-motion` do not apply to it.
+- Some Android browsers fall back to a PIN or pattern instead of a biometric
+  when no fingerprint is enrolled. The prompt still satisfies user
+  verification, so the flow succeeds.
+- Firefox on Linux has no platform authenticator; only the password/wallet
+  fallback is offered.
+- The credential is bound to the origin. Changing the frontend origin
+  invalidates existing registrations and users must re-enrol.
+
+### Fallback behaviour
+
+Password and wallet sign-in remain available at all times and are never
+hidden behind the biometric option:
+
+- If WebAuthn is unsupported, the biometric control is absent and the
+  password form is the only path.
+- If the user cancels or the platform prompt fails, focus returns to the
+  biometric button and an inline `role="alert"` message explains the failure
+  and points at the password form. The error is announced because it is a
+  live region, not because focus moved.
+- The device management UI lists enrolled devices with a "Remove" button per
+  device. Removing the last device leaves password sign-in intact.
+
+### Screen-reader behaviour
+
+The platform prompt is not in the accessibility tree of the page, so screen
+readers announce it through the OS (VoiceOver announces the Face ID sheet,
+NVDA announces the Windows Hello dialog). Nothing in the app can label it.
+What the app does control:
+
+- The biometric button has a visible label plus an `aria-label` naming the
+  authenticator ("Sign in with Touch ID").
+- While the prompt is open the button is `aria-busy="true"` and disabled, so
+  it is not re-triggered by a stray Enter.
+- Success and failure are announced through the same `role="status"` /
+  `role="alert"` pattern used elsewhere in the app.
+- The device list is a real `<ul>` with one remove button per item, each
+  labelled with the device name, so it is navigable by list and by button.
+
+### Manual test results
+
+| Platform | Browser | Result |
+| --- | --- | --- |
+| iOS 17 | Safari | Face ID registration and sign-in pass; fallback to password pass |
+| Android 14 | Chrome | Fingerprint registration and sign-in pass; PIN fallback pass |
+| Windows 11 | Chrome / Edge | Windows Hello pass; fallback pass |
+| macOS 14 | Safari / Chrome | Touch ID pass; fallback pass |
+
+Re-run these whenever the WebAuthn options change, since the platform prompt
+is not covered by the automated axe runs.
+
+## Voice commands
+
+Voice input uses the Web Speech API (`SpeechRecognition` /
+`webkitSpeechRecognition`). It is an enhancement: every command has a
+keyboard-accessible equivalent, and the feature is never the only way to
+reach a control.
+
+### Browser compatibility
+
+| Browser | Support | Notes |
+| --- | --- | --- |
+| Chrome / Chromium | Yes | `webkitSpeechRecognition`; requires a network round trip for recognition |
+| Edge | Yes | Chromium builds behave as Chrome |
+| Safari | Partial | `webkitSpeechRecognition` on macOS and iOS; iOS recognition is short-lived and stops on backgrounding |
+| Firefox | No | The API is not implemented; the microphone control is not rendered |
+
+Where the API is missing the microphone button is absent rather than
+disabled, so there is no unreachable control in the tab order.
+
+### Recognition accuracy
+
+Recognition is server-side and varies with accent, background noise and
+microphone quality. Known limitations:
+
+- Numbers and hex strings (DIDs, credential IDs) are frequently misheard;
+  the app reads the transcript back for confirmation before acting.
+- Accuracy degrades in noisy environments and with long utterances.
+- Non-English recognition depends on the browser's language packs; the
+  language selector only offers locales the browser reports as available.
+- Recognition stops after a period of silence; the user restarts it with the
+  same button.
+
+### Microphone permission
+
+The browser prompts for microphone access on first use. If permission is
+denied the app shows an inline `role="alert"` explaining how to re-enable it
+in browser settings, and the keyboard alternative remains available. The
+permission prompt itself is browser chrome and is not announced by the page.
+
+### Keyboard alternative
+
+Every voice command has a keyboard path, so voice is never required:
+
+| Voice command | Keyboard equivalent |
+| --- | --- |
+| Search | Focus the search field and type |
+| Navigate to a section | `Tab` to the tablist, then `←` / `→` |
+| Verify | Focus the verify button and press `Enter` |
+
+The microphone button is a real `<button>` with an `aria-label`, reachable by
+`Tab` and toggled with `Enter` or `Space`.
+
+### Visual and screen-reader feedback
+
+While listening, the button shows a pulsing indicator and the state is exposed
+as `aria-pressed="true"` with a `role="status"` message ("Listening…"). The
+pulse is suppressed under `prefers-reduced-motion: reduce`; the status text
+carries the same information without motion.
+
+Recognised commands are announced through a polite live region before they
+run ("Verifying credential 0x…"), and failures through `role="alert"`. The
+transcript is never the only feedback: the resulting UI change is also
+announced, so a screen-reader user who misses the transcript still hears the
+outcome.
+
+## Automated testing (#827)
+
+`tests/a11y/` runs axe-core through Playwright against every frontend route on each PR (`.github/workflows/a11y.yml`). The build fails on any **critical** or **serious** WCAG 2.1 AA violation. Violation reports are uploaded as the `a11y-report` artifact.
+
+### Requirements
+- WCAG 2.1 Level AA conformance.
+- Text contrast of at least 4.5:1, and 3:1 for large text and UI components.
+- Every interactive element can be reached by keyboard and shows a visible focus indicator.
+- Each page has one `main` landmark and one `h1`.
+- Form controls have labels. Icon-only buttons have an `aria-label`.
+- ARIA roles and attributes are valid. `aria-hidden` is never set on a focusable element.
+
+### PR accessibility checklist
+- [ ] `npm test` in `tests/a11y` passes locally, or the CI `a11y` job is green
+- [ ] New UI can be operated with the keyboard alone (Tab, Shift+Tab, Enter, Space, Esc)
+- [ ] Focus stays visible and follows a logical order. Modals trap focus and restore it when closed
+- [ ] Images have `alt` text. Decorative images use `alt=""`
+- [ ] Colour is not the only way information is shown
+- [ ] Checked with a screen reader (NVDA, JAWS or VoiceOver) for any significant UI change

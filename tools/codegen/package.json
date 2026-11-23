@@ -1,0 +1,15 @@
+{
+  "name": "@soroban-identity/codegen",
+  "version": "0.1.0",
+  "private": true,
+  "description": "API client code generators for the Soroban Identity server API (TypeScript, Python, Go).",
+  "scripts": {
+    "generate": "node scripts/generate.mjs",
+    "generate:ts": "node scripts/generate.mjs --typescript",
+    "generate:python": "node scripts/generate.mjs --python",
+    "generate:go": "node scripts/generate.mjs --go"
+  },
+  "devDependencies": {
+    "@openapitools/openapi-generator-cli": "^2.41.0"
+  }
+}

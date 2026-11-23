@@ -1,0 +1,106 @@
+name: API Codegen CI
+
+on:
+  pull_request:
+    paths:
+      - "server/openapi.json"
+      - "docs/openapi.yaml"
+      - "tools/codegen/**"
+  push:
+    branches: [main]
+    paths:
+      - "server/openapi.json"
+      - "docs/openapi.yaml"
+      - "tools/codegen/**"
+
+jobs:
+  regenerate-and-lint:
+    name: Regenerate + lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Lint pinned OpenAPI spec
+        working-directory: tools/codegen
+        run: npx --yes @openapitools/openapi-generator-cli@2.41.0 validate --input-spec spec/openapi.json
+
+      - name: Install codegen workspace
+        working-directory: tools/codegen
+        run: npm ci
+
+      - name: Regenerate clients
+        working-directory: tools/codegen
+        run: npm run generate
+
+      - name: Ensure committed output is in sync
+        run: git diff --exit-code
+
+  verify-typescript:
+    name: Verify TypeScript client
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build TypeScript client
+        working-directory: tools/codegen/generated/typescript
+        run: |
+          npm install
+          npm run build
+
+      - name: Typecheck example
+        working-directory: tools/codegen
+        run: npx --yes typescript@5 tsc --project examples/typescript/tsconfig.json
+
+  verify-python:
+    name: Verify Python client
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install + import Python client
+        working-directory: tools/codegen/generated/python
+        run: |
+          pip install -e .
+          python -c "from soroban_identity_client import ApiClient, Configuration, CredentialsApi; from soroban_identity_client.models import Credential; print('import ok')"
+
+  verify-go:
+    name: Verify Go client
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Build + vet Go client
+        working-directory: tools/codegen/generated/go
+        run: |
+          go build ./...
+          go vet ./...
+
+      - name: Vet Go example
+        working-directory: tools/codegen/examples/go
+        run: go vet ./...

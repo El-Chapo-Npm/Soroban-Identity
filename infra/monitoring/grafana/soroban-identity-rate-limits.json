@@ -1,0 +1,89 @@
+{
+  "title": "Soroban Identity — Rate Limiting",
+  "schemaVersion": 39,
+  "tags": ["soroban-identity", "rate-limiting"],
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Decisions by outcome",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum(rate(rate_limit_decisions_total[5m])) by (outcome)",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Denials by scope",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum(rate(rate_limit_decisions_total{outcome=\"denied\"}[5m])) by (scope)",
+          "legendFormat": "{{scope}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Denial rate",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "100 * sum(rate(rate_limit_decisions_total{outcome=\"denied\"}[5m])) / clamp_min(sum(rate(rate_limit_decisions_total[5m])), 1)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 5 },
+              { "color": "red", "value": 20 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 8 }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Premium / whitelist bypasses (1h)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum(increase(rate_limit_decisions_total{outcome=\"bypass\"}[1h])) by (scope)",
+          "legendFormat": "{{scope}}"
+        }
+      ],
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 8 }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "429 responses by route",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "topk(10, sum(rate(http_requests_total{status_code=\"429\"}[5m])) by (route))",
+          "legendFormat": "{{route}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 8 }
+    }
+  ]
+}

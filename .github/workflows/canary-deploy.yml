@@ -1,0 +1,89 @@
+name: Canary deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Container image tag to canary
+        required: true
+        type: string
+      canary_duration_hours:
+        description: Observation window before promotion
+        required: true
+        default: "1"
+        type: choice
+        options: ["1", "2", "3", "4"]
+      canary_health_url:
+        description: Public canary health URL
+        required: true
+        type: string
+      metrics_url:
+        description: 'JSON endpoint returning {"errorRate": number, "requests": number}'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_TAG: ${{ inputs.image_tag }}
+      CANARY_DURATION_HOURS: ${{ inputs.canary_duration_hours }}
+      CANARY_HEALTH_URL: ${{ inputs.canary_health_url }}
+      METRICS_URL: ${{ inputs.metrics_url }}
+      ERROR_RATE_THRESHOLD: "0.02"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read cluster credentials from Vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ secrets.VAULT_ADDR }}
+          method: jwt
+          role: ${{ vars.VAULT_GITHUB_ROLE }}
+          jwtGithubAudience: https://github.com/${{ github.repository }}
+          secrets: |
+            secret/data/soroban-identity/production kubeconfig | KUBECONFIG_B64 ;
+            secret/data/soroban-identity/production kube_context | KUBE_CONTEXT
+      - name: Install Argo Rollouts plugin
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/kubectl-argo-rollouts" https://github.com/argoproj/argo-rollouts/releases/latest/download/kubectl-argo-rollouts-linux-amd64
+          chmod +x "$RUNNER_TEMP/kubectl-argo-rollouts"
+          sudo mv "$RUNNER_TEMP/kubectl-argo-rollouts" /usr/local/bin/kubectl-argo-rollouts
+      - name: Configure kubectl
+        run: |
+          install -d -m 700 "$RUNNER_TEMP/kube"
+          printf '%s' "$KUBECONFIG_B64" | base64 --decode > "$RUNNER_TEMP/kube/config"
+          chmod 600 "$RUNNER_TEMP/kube/config"
+          echo "KUBECONFIG=$RUNNER_TEMP/kube/config" >> "$GITHUB_ENV"
+          kubectl config use-context "$KUBE_CONTEXT"
+        env:
+          KUBECONFIG_B64: ${{ env.KUBECONFIG_B64 }}
+          KUBE_CONTEXT: ${{ env.KUBE_CONTEXT }}
+      - name: Capture stable revision
+        id: stable
+        run: echo "revision=$(kubectl argo rollouts get rollout soroban-identity -o jsonpath='{.status.stableRS}')" >> "$GITHUB_OUTPUT"
+      - name: Deploy 10% canary and validate health
+        run: |
+          envsubst < infra/kubernetes/canary/rollout.yaml | kubectl apply -f -
+          for attempt in {1..12}; do
+            curl --fail --silent --show-error "$CANARY_HEALTH_URL" && exit 0
+            sleep 10
+          done
+          echo 'Canary health check did not pass.' >&2
+          exit 1
+      - name: Observe canary error rate
+        run: |
+          deadline=$(( $(date +%s) + CANARY_DURATION_HOURS * 3600 ))
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            payload=$(curl --fail --silent --show-error "$METRICS_URL")
+            node -e 'const m=JSON.parse(process.argv[1]); if (m.requests > 0 && m.errorRate > Number(process.env.ERROR_RATE_THRESHOLD)) { console.error(`error rate ${m.errorRate} exceeded ${process.env.ERROR_RATE_THRESHOLD}`); process.exit(1); }' "$payload"
+            sleep 60
+          done
+      - name: Promote canary
+        run: kubectl argo rollouts promote soroban-identity
+      - name: Roll back on failure
+        if: failure()
+        run: kubectl argo rollouts abort soroban-identity && kubectl argo rollouts undo soroban-identity

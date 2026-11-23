@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Soroban Identity Analytics</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="viz-root">
+      <header class="page-head">
+        <div>
+          <h1>Soroban Identity Analytics</h1>
+          <p class="muted">DIDs, credentials and verifications on the network</p>
+        </div>
+        <div class="live" id="live" data-state="connecting">
+          <span class="live-dot" aria-hidden="true"></span>
+          <span id="live-label">Connecting…</span>
+        </div>
+      </header>
+
+      <div class="filters" role="toolbar" aria-label="Filters">
+        <div class="segmented" id="range" role="radiogroup" aria-label="Date range">
+          <button role="radio" data-days="7">7 days</button>
+          <button role="radio" data-days="30" aria-checked="true">30 days</button>
+          <button role="radio" data-days="90">90 days</button>
+          <button role="radio" data-days="0">All</button>
+        </div>
+        <div class="export">
+          <label for="report" class="muted">Export</label>
+          <select id="report">
+            <option value="summary">Summary</option>
+            <option value="dids">DIDs over time</option>
+            <option value="issuance">Issuance</option>
+            <option value="types">Credential types</option>
+            <option value="issuers">Top issuers</option>
+            <option value="verifications">Verifications</option>
+            <option value="geography">Geography</option>
+            <option value="events">Raw event log</option>
+          </select>
+          <a class="button" id="export-csv" href="/api/export?report=summary&format=csv">CSV</a>
+          <a class="button" id="export-json" href="/api/export?report=summary&format=json">JSON</a>
+        </div>
+      </div>
+
+      <section class="tiles" id="tiles" aria-label="Key figures"></section>
+
+      <section class="grid">
+        <article class="card wide" data-chart="dids">
+          <header><h2>DIDs created over time</h2><p class="muted">Cumulative DIDs registered</p></header>
+          <div class="chart"></div>
+          <details><summary>View data</summary><div class="table-wrap"></div></details>
+        </article>
+
+        <article class="card" data-chart="issuance">
+          <header><h2>Credential issuance</h2><p class="muted">Per day</p></header>
+          <div class="legend"></div>
+          <div class="chart"></div>
+          <details><summary>View data</summary><div class="table-wrap"></div></details>
+        </article>
+
+        <article class="card" data-chart="hourly">
+          <header><h2>Issuance rate</h2><p class="muted">Credentials per hour, last 48 hours</p></header>
+          <div class="chart"></div>
+          <details><summary>View data</summary><div class="table-wrap"></div></details>
+        </article>
+
+        <article class="card" data-chart="verifications">
+          <header><h2>Verification frequency</h2><p class="muted">Per day, by where it was observed</p></header>
+          <div class="legend"></div>
+          <div class="chart"></div>
+          <p class="note muted" id="verify-outcomes"></p>
+          <details><summary>View data</summary><div class="table-wrap"></div></details>
+        </article>
+
+        <article class="card" data-chart="issuers">
+          <header><h2>Top issuers</h2><p class="muted">By credentials issued, all time</p></header>
+          <div class="chart"></div>
+          <details><summary>View data</summary><div class="table-wrap"></div></details>
+        </article>
+
+        <article class="card" data-chart="types">
+          <header><h2>Credential types</h2><p class="muted">Issued by type, all time</p></header>
+          <div class="chart"></div>
+          <details><summary>View data</summary><div class="table-wrap"></div></details>
+        </article>
+
+        <article class="card wide" data-chart="geo">
+          <header><h2>Geographic distribution</h2><p class="muted">DIDs by the <code>country</code> in their metadata, all time</p></header>
+          <div class="chart"></div>
+          <p class="note muted" id="geo-note"></p>
+          <details><summary>View data</summary><div class="table-wrap"></div></details>
+        </article>
+      </section>
+
+      <footer class="muted" id="footer"></footer>
+    </main>
+
+    <div class="tooltip" id="tooltip" role="status" hidden></div>
+    <script src="/dashboard.js"></script>
+  </body>
+</html>

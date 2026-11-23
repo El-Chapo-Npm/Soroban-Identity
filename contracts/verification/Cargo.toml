@@ -1,0 +1,18 @@
+[package]
+name = "soroban-identity-verification"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Formal models and Kani proof harnesses for the Soroban Identity contracts (#957)"
+
+# Standalone: not a member of the contracts workspace, so it never affects
+# contract builds or WASM size budgets.
+[workspace]
+
+[features]
+# Model the fixes proposed in RESULTS.md instead of the current contract
+# behaviour. Every harness is expected to pass with this feature enabled.
+patched = []
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }

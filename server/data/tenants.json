@@ -1,0 +1,34 @@
+{
+  "tenants": [
+    {
+      "id": "default",
+      "name": "Default Organization",
+      "subdomain": "default",
+      "tier": "enterprise",
+      "status": "active",
+      "branding": {
+        "logoUrl": "",
+        "primaryColor": "#0066cc",
+        "appName": "Soroban Identity"
+      },
+      "contracts": {
+        "identityRegistry": "",
+        "credentialManager": "",
+        "reputation": ""
+      },
+      "rateLimits": {
+        "readsPerMinute": 1200,
+        "writesPerMinute": 500
+      },
+      "quotas": {
+        "maxCredentials": 100000,
+        "maxDids": 50000
+      },
+      "admins": [
+        "admin@default.org"
+      ],
+      "createdAt": "2026-10-16T12:56:27.261Z",
+      "updatedAt": "2026-10-16T12:56:27.261Z"
+    }
+  ]
+}
