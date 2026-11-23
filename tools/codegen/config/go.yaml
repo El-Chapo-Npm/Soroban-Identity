@@ -1,0 +1,11 @@
+generatorName: go
+output: generated/go
+inputSpec: spec/openapi.json
+additionalProperties:
+  packageName: "sorobanidentity"
+  moduleName: "github.com/El-Chapo-Npm/Soroban-Identity/tools/codegen/generated/go"
+  packageVersion: "0.1.0"
+  withGoMod: "true"
+  useOneOfDiscriminatorLookup: "true"
+  enumClassPrefix: "true"
+  disallowAdditionalPropertiesIfNotPresent: "false"

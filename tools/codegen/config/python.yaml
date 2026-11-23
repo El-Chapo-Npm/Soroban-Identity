@@ -1,0 +1,12 @@
+generatorName: python
+output: generated/python
+inputSpec: spec/openapi.json
+additionalProperties:
+  packageName: "soroban_identity_client"
+  projectName: "soroban-identity-python"
+  packageVersion: "0.1.0"
+  packageUrl: "https://github.com/El-Chapo-Npm/Soroban-Identity"
+  library: "urllib3"
+  useOneOfDiscriminatorLookup: "true"
+  pythonAttrNoneIfUnset: "true"
+  generateSourceCodeOnly: "false"

@@ -1,0 +1,50 @@
+name: Staging Deploy
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+concurrency:
+  group: staging
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: https://staging.soroban-identity.app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install Stellar CLI
+        run: cargo install --locked stellar-cli
+
+      - name: Deploy contracts to testnet
+        env:
+          STELLAR_SECRET_KEY: ${{ secrets.STAGING_STELLAR_SECRET_KEY }}
+        run: ./infrastructure/staging/deploy-staging.sh
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build frontend
+        working-directory: frontend
+        env:
+          VITE_WALLETCONNECT_PROJECT_ID: ${{ secrets.STAGING_WALLETCONNECT_PROJECT_ID }}
+        run: |
+          npm ci || npm install
+          npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: staging-deployment
+          path: |
+            infrastructure/staging/contracts.staging.json
+            frontend/dist

@@ -28,8 +28,15 @@
   --badge-green-text:         #166534;
   --badge-red-bg:             #fee2e2;
   --badge-red-text:           #991b1b;
+  --badge-gray-bg:            #e2e8f0;
+  --badge-gray-text:          #475569;
   --badge-purple-bg:          #ede9fe;
   --badge-purple-text:        #5b21b6;
+  --badge-yellow-bg:          #fef9c3;
+  --badge-yellow-text:        #854d0e;
+  --warning-bg:               #fff7ed;
+  --warning-text:             #9a3412;
+  --warning-border:           #fdba74;
   --error-text:               #dc2626;
   --sybil-pass-bg:            rgba(34,197,94,0.15);
   --sybil-pass-text:          #16a34a;
@@ -39,12 +46,19 @@
   --sybil-fail-border:        #dc2626;
   --filter-badge-active-bg:   #7c3aed;
   --filter-badge-active-text: #ffffff;
+  --btn-text:                 #ffffff;
+  --focus-ring:               #7c3aed;
+  --success-bg:               var(--badge-green-bg);
+  --success-text:             var(--badge-green-text);
+  --danger-bg:                var(--badge-red-bg);
+  --danger-text:              var(--badge-red-text);
+  --danger-border:            #f87171;
 }
 
-/* ── Dark mode via system preference ─────────────────────────────────────────── */
+/* ── Dark mode via system preference (when no manual override) ──────────────── */
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not(.light):not(.dark) {
     --bg:                       #0a0a0f;
     --bg-subtle:                #0f172a;
     --card-bg:                  #111827;
@@ -70,8 +84,15 @@
     --badge-green-text:         #6ee7b7;
     --badge-red-bg:             #450a0a;
     --badge-red-text:           #fca5a5;
+    --badge-gray-bg:            #334155;
+    --badge-gray-text:          #cbd5e1;
     --badge-purple-bg:          #2e1065;
     --badge-purple-text:        #c4b5fd;
+    --badge-yellow-bg:          #422006;
+    --badge-yellow-text:        #fde047;
+    --warning-bg:               #431407;
+    --warning-text:             #fed7aa;
+    --warning-border:           #c2410c;
     --error-text:               #fca5a5;
     --sybil-pass-bg:            rgba(34,197,94,0.15);
     --sybil-pass-text:          #4ade80;
@@ -81,6 +102,13 @@
     --sybil-fail-border:        #f87171;
     --filter-badge-active-bg:   #a78bfa;
     --filter-badge-active-text: #1e1b4b;
+    --btn-text:                 #ffffff;
+    --focus-ring:               #a78bfa;
+    --success-bg:               var(--badge-green-bg);
+    --success-text:             var(--badge-green-text);
+    --danger-bg:                var(--badge-red-bg);
+    --danger-text:              var(--badge-red-text);
+    --danger-border:            #f87171;
   }
 }
 
@@ -112,8 +140,15 @@ html.dark {
   --badge-green-text:         #6ee7b7;
   --badge-red-bg:             #450a0a;
   --badge-red-text:           #fca5a5;
+  --badge-gray-bg:            #334155;
+  --badge-gray-text:          #cbd5e1;
   --badge-purple-bg:          #2e1065;
   --badge-purple-text:        #c4b5fd;
+  --badge-yellow-bg:          #422006;
+  --badge-yellow-text:        #fde047;
+  --warning-bg:               #431407;
+  --warning-text:             #fed7aa;
+  --warning-border:           #c2410c;
   --error-text:               #fca5a5;
   --sybil-pass-bg:            rgba(34,197,94,0.15);
   --sybil-pass-text:          #4ade80;
@@ -123,6 +158,13 @@ html.dark {
   --sybil-fail-border:        #f87171;
   --filter-badge-active-bg:   #a78bfa;
   --filter-badge-active-text: #1e1b4b;
+  --btn-text:                 #ffffff;
+  --focus-ring:               #a78bfa;
+  --success-bg:               var(--badge-green-bg);
+  --success-text:             var(--badge-green-text);
+  --danger-bg:                var(--badge-red-bg);
+  --danger-text:              var(--badge-red-text);
+  --danger-border:            #f87171;
 }
 
 /* ── Light mode forced via manual class toggle ───────────────────────────────── */
@@ -153,8 +195,15 @@ html.light {
   --badge-green-text:         #166534;
   --badge-red-bg:             #fee2e2;
   --badge-red-text:           #991b1b;
+  --badge-gray-bg:            #e2e8f0;
+  --badge-gray-text:          #475569;
   --badge-purple-bg:          #ede9fe;
   --badge-purple-text:        #5b21b6;
+  --badge-yellow-bg:          #fef9c3;
+  --badge-yellow-text:        #854d0e;
+  --warning-bg:               #fff7ed;
+  --warning-text:             #9a3412;
+  --warning-border:           #fdba74;
   --error-text:               #dc2626;
   --sybil-pass-bg:            rgba(34,197,94,0.15);
   --sybil-pass-text:          #16a34a;
@@ -164,6 +213,28 @@ html.light {
   --sybil-fail-border:        #dc2626;
   --filter-badge-active-bg:   #7c3aed;
   --filter-badge-active-text: #ffffff;
+  --btn-text:                 #ffffff;
+  --focus-ring:               #7c3aed;
+  --success-bg:               var(--badge-green-bg);
+  --success-text:             var(--badge-green-text);
+  --danger-bg:                var(--badge-red-bg);
+  --danger-text:              var(--badge-red-text);
+  --danger-border:            #f87171;
+}
+
+/* ── Animation tokens ────────────────────────────────────────────────────────
+   Shared durations and easings for view transitions, list entry/exit,
+   skeleton cross-fades and button micro-interactions. Keeping them as custom
+   properties lets components stay consistent and lets the reduced-motion
+   block below neutralise everything in one place. */
+:root {
+  --anim-duration-fast:   120ms;
+  --anim-duration-base:   200ms;
+  --anim-duration-slow:   320ms;
+  --anim-ease-standard:   cubic-bezier(0.2, 0, 0, 1);
+  --anim-ease-decelerate: cubic-bezier(0, 0, 0, 1);
+  --anim-ease-accelerate: cubic-bezier(0.3, 0, 1, 1);
+  --anim-ease-spring:     cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 /* ── Base styles ─────────────────────────────────────────────────────────────── */
@@ -176,17 +247,114 @@ body {
   transition: background 0.2s, color 0.2s;
 }
 
-.container { max-width: 900px; margin: 0 auto; padding: 2rem 1rem; }
-
-header {
-  text-align: center;
-  padding: 3rem 0 2rem;
-  border-bottom: 1px solid var(--header-border);
-  margin-bottom: 2rem;
+/* ── Base transitions for interactive elements ───────────────────────────────
+   Only transform/opacity/colour are animated so the compositor can do the
+   work without triggering layout. */
+button,
+a,
+[role="button"],
+.card,
+.theme-toggle,
+.export-secondary,
+.export-select {
+  transition:
+    background-color var(--anim-duration-base) var(--anim-ease-standard),
+    border-color     var(--anim-duration-base) var(--anim-ease-standard),
+    color            var(--anim-duration-base) var(--anim-ease-standard),
+    transform        var(--anim-duration-fast) var(--anim-ease-standard),
+    opacity          var(--anim-duration-base) var(--anim-ease-standard);
 }
 
-header h1 { font-size: 2rem; color: var(--accent); }
-header p  { color: var(--text-muted); margin-top: 0.5rem; }
+button:not(:disabled):active,
+[role="button"]:active {
+  transform: scale(0.97);
+}
+
+/* ── Page transition animations ──────────────────────────────────────────────
+   Applied to the routed view container on mount. Uses transform + opacity
+   only, so it stays on the compositor thread. */
+@keyframes view-enter {
+  from { opacity: 0; transform: translate3d(0, 8px, 0); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+
+@keyframes view-exit {
+  from { opacity: 1; transform: translate3d(0, 0, 0); }
+  to   { opacity: 0; transform: translate3d(0, -8px, 0); }
+}
+
+.view-enter {
+  animation: view-enter var(--anim-duration-slow) var(--anim-ease-decelerate) both;
+}
+
+.view-exit {
+  animation: view-exit var(--anim-duration-base) var(--anim-ease-accelerate) both;
+}
+
+/* ── List item entry / exit ──────────────────────────────────────────────────
+   Staggered via --list-index set by the component. */
+@keyframes list-item-enter {
+  from { opacity: 0; transform: translate3d(0, 6px, 0); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+
+@keyframes list-item-exit {
+  from { opacity: 1; transform: scale(1); }
+  to   { opacity: 0; transform: scale(0.96); }
+}
+
+.list-item-enter {
+  animation: list-item-enter var(--anim-duration-base) var(--anim-ease-decelerate) both;
+  animation-delay: calc(var(--list-index, 0) * 30ms);
+}
+
+.list-item-exit {
+  animation: list-item-exit var(--anim-duration-fast) var(--anim-ease-accelerate) both;
+}
+
+/* ── Skeleton screen transitions ─────────────────────────────────────────────
+   Cross-fade between the skeleton placeholder and the loaded content. */
+@keyframes skeleton-fade-out {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+
+@keyframes content-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.skeleton-fade-out {
+  animation: skeleton-fade-out var(--anim-duration-base) var(--anim-ease-standard) both;
+}
+
+.content-fade-in {
+  animation: content-fade-in var(--anim-duration-base) var(--anim-ease-standard) both;
+}
+
+/* ── Button micro-interactions ───────────────────────────────────────────────
+   Subtle lift on hover, press-down on active. Transform-only so it is cheap. */
+@keyframes button-press {
+  0%   { transform: scale(1); }
+  50%  { transform: scale(0.96); }
+  100% { transform: scale(1); }
+}
+
+button:not(:disabled):hover,
+[role="button"]:hover {
+  transform: translate3d(0, -1px, 0);
+}
+
+button:not(:disabled):active,
+[role="button"]:active {
+  transform: translate3d(0, 0, 0) scale(0.97);
+}
+
+.btn-press {
+  animation: button-press var(--anim-duration-fast) var(--anim-ease-spring);
+}
+
+/* Page layout, header, navigation and touch targets: see ./styles/ (#882). */
 
 .card {
   background: var(--card-bg);
@@ -209,9 +377,18 @@ input, textarea {
   margin-bottom: 0.75rem;
 }
 
+select {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-input);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 0.85rem;
+  padding: 0.3rem 0.6rem;
+}
+
 button {
   background: var(--accent);
-  color: #fff;
+  color: var(--btn-text);
   border: none;
   border-radius: 8px;
   padding: 0.6rem 1.2rem;
@@ -233,7 +410,10 @@ button:disabled { background: var(--btn-disabled-bg); color: var(--btn-disabled-
 
 .badge-green  { background: var(--badge-green-bg);  color: var(--badge-green-text); }
 .badge-red    { background: var(--badge-red-bg);    color: var(--badge-red-text); }
+.badge-gray   { background: var(--badge-gray-bg);   color: var(--badge-gray-text); }
 .badge-purple { background: var(--badge-purple-bg); color: var(--badge-purple-text); }
+.badge-yellow { background: var(--badge-yellow-bg); color: var(--badge-yellow-text); }
+.badge-gray   { background: var(--border-input);    color: var(--text-muted); }
 
 .result {
   margin-top: 1rem;
@@ -245,15 +425,38 @@ button:disabled { background: var(--btn-disabled-bg); color: var(--btn-disabled-
   color: var(--result-text);
 }
 
-.tabs { display: flex; gap: 0.5rem; margin-bottom: 2rem; }
-.tab {
-  background: transparent;
-  border: 1px solid var(--tab-border);
-  color: var(--tab-color);
-  padding: 0.5rem 1rem;
-  border-radius: 8px;
+/* ── Spinner ─────────────────────────────────────────────────────────────────── */
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.spinner {
+  display: inline-block;
+  width: 0.85em;
+  height: 0.85em;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  vertical-align: middle;
 }
-.tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+/* ── Skeleton loader ─────────────────────────────────────────────────────────── */
+
+@keyframes shimmer {
+  0%   { background-position: -400px 0; }
+  100% { background-position:  400px 0; }
+}
+
+.skeleton {
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--border-input) 25%, var(--bg-subtle) 50%, var(--border-input) 75%);
+  background-size: 800px 100%;
+  animation: shimmer 1.4s infinite linear;
+}
+
+.skeleton-card { display: flex; flex-direction: column; gap: 0.75rem; }
+.skeleton-title { height: 1.1rem; width: 40%; }
+.skeleton-row   { height: 0.85rem; }
 
 .theme-toggle {
   background: transparent;
@@ -308,3 +511,337 @@ button:disabled { background: var(--btn-disabled-bg); color: var(--btn-disabled-
 }
 @keyframes skeleton-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 @media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }
+.network-switcher {
+  align-items: center;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-input);
+  border-radius: 8px;
+  color: var(--text-muted);
+  display: flex;
+  gap: 0.4rem;
+  padding: 0.25rem 0.4rem 0.25rem 0.7rem;
+}
+
+.network-switcher span {
+  color: var(--text);
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.network-switcher select {
+  border: none;
+  margin: 0;
+  padding: 0.15rem 0.2rem;
+}
+
+.mainnet-warning {
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  border-radius: 8px;
+  color: var(--warning-text);
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin-bottom: 1rem;
+  padding: 0.7rem 1rem;
+}
+
+.loading-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.65rem;
+  min-height: 12rem;
+  color: var(--text-muted);
+}
+
+.loading-fallback__spinner {
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: loading-fallback-spin 0.8s linear infinite;
+}
+
+@keyframes loading-fallback-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loading-fallback__spinner { animation: none; }
+}
+
+/* ── Focus rings ─────────────────────────────────────────────────────────────
+   Visible focus indicator for all interactive elements.
+   Uses :focus-visible so mouse users don't see the ring. */
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Credential cards are divs with role="button" — same ring treatment */
+[role="button"]:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: 0.5rem;
+}
+
+/* Forced-colors mode strips custom outline colours; keep a ring visible. */
+@media (forced-colors: active) {
+  :focus-visible,
+  [role="button"]:focus-visible {
+    outline: 2px solid Highlight;
+  }
+}
+
+/* ── Skip link ───────────────────────────────────────────────────────────────
+   Off-screen until focused, so keyboard users can jump past the header
+   controls straight into the page content (WCAG 2.4.1). */
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 1100;
+  padding: 0.6rem 1rem;
+  background: var(--card-bg, #fff);
+  color: var(--text, #111);
+  border: 2px solid var(--focus-ring);
+  border-radius: 0 0 0.4rem 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.skip-link:focus,
+.skip-link:focus-visible {
+  left: 0;
+}
+
+/* The main landmark is focused programmatically by the skip link; it is not an
+   interactive control, so it must not paint a focus ring of its own. */
+main:focus {
+  outline: none;
+}
+
+/* ── Reduced motion ──────────────────────────────────────────────────────────
+   Honour a user's OS-level preference to limit animation (WCAG 2.3.3). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* Neutralise the new animation classes explicitly so no motion survives
+     even if a component overrides the global reset above. */
+  .view-enter,
+  .view-exit,
+  .list-item-enter,
+  .list-item-exit,
+  .skeleton-fade-out,
+  .content-fade-in,
+  .btn-press {
+    animation: none !important;
+    transition: none !important;
+    transform: none !important;
+    opacity: 1 !important;
+  }
+
+  button:not(:disabled):hover,
+  button:not(:disabled):active,
+  [role="button"]:hover,
+  [role="button"]:active {
+    transform: none !important;
+  }
+}
+
+/* ── Visually hidden ─────────────────────────────────────────────────────────
+   Removes content from the visual layout while keeping it in the accessibility
+   tree, for labels that would be redundant on screen. Uses the clip-path
+   pattern rather than display:none, which would hide it from screen readers. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Issue #735: Dark mode image contrast ────────────────────────────────────
+   Images and credential badges can appear washed-out in dark mode because
+   they were designed for a light background. The brightness+contrast filter
+   slightly compensates; the :hover rule removes it so full fidelity is
+   preserved when the user deliberately inspects an image.
+   Applied only under dark-mode selectors so light mode is unaffected. */
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.light):not(.dark) img:not([data-no-dark-filter]),
+  :root:not(.light):not(.dark) .credential-badge img {
+    filter: brightness(0.9) contrast(1.1);
+    transition: filter 0.2s;
+  }
+
+  :root:not(.light):not(.dark) img:not([data-no-dark-filter]):hover,
+  :root:not(.light):not(.dark) .credential-badge img:hover {
+    filter: none;
+  }
+}
+
+html.dark img:not([data-no-dark-filter]),
+html.dark .credential-badge img {
+  filter: brightness(0.9) contrast(1.1);
+  transition: filter 0.2s;
+}
+
+html.dark img:not([data-no-dark-filter]):hover,
+html.dark .credential-badge img:hover {
+  filter: none;
+}
+
+/* ── Voice command support (issue #1046) ─────────────────────────────────────
+   Styles for the microphone button and the listening indicator. The button
+   reflects four states: idle, listening, denied and unsupported. */
+
+.voice-mic-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-input);
+  color: var(--text-muted);
+  border-radius: 999px;
+  padding: 0.4rem 0.9rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition:
+    background-color var(--anim-duration-base) var(--anim-ease-standard),
+    border-color     var(--anim-duration-base) var(--anim-ease-standard),
+    color            var(--anim-duration-base) var(--anim-ease-standard),
+    transform        var(--anim-duration-fast) var(--anim-ease-standard);
+}
+
+.voice-mic-button:hover:not(:disabled) {
+  background: var(--card-bg);
+  color: var(--text);
+}
+
+.voice-mic-button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.voice-mic-button[data-state="listening"] {
+  background: var(--badge-red-bg);
+  border-color: var(--sybil-fail-border);
+  color: var(--badge-red-text);
+}
+
+.voice-mic-button[data-state="denied"] {
+  background: var(--warning-bg);
+  border-color: var(--warning-border);
+  color: var(--warning-text);
+}
+
+.voice-mic-button[data-state="unsupported"] {
+  background: var(--btn-disabled-bg);
+  border-color: var(--border-input);
+  color: var(--btn-disabled-color);
+  cursor: not-allowed;
+}
+
+/* ── Listening indicator ─────────────────────────────────────────────────────
+   Pulsing dot shown while the Web Speech API is capturing audio. */
+@keyframes voice-pulse {
+  0%   { transform: scale(1);   opacity: 1; }
+  50%  { transform: scale(1.6); opacity: 0.4; }
+  100% { transform: scale(1);   opacity: 1; }
+}
+
+.voice-listening-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.voice-listening-indicator__dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  background: var(--sybil-fail-border);
+  animation: voice-pulse 1.2s var(--anim-ease-standard) infinite;
+}
+
+.voice-listening-indicator__label {
+  white-space: nowrap;
+}
+
+/* ── Credential export (src/export) ────────────────────────────────────────── */
+
+.export-select,
+.export-secondary {
+  padding: 0.5rem 0.75rem;
+  font-size: 0.85rem;
+  border-radius: 0.25rem;
+  border: 1px solid var(--border-input);
+  background-color: var(--card-bg);
+  color: var(--text);
+}
+
+.export-secondary { cursor: pointer; }
+.export-secondary:hover { background-color: var(--bg-subtle); }
+
+.export-template-editor {
+  margin: 0 0 1rem;
+  padding: 1rem;
+  border: 1px solid var(--card-border);
+  border-radius: 0.5rem;
+  background: var(--bg-subtle);
+}
+
+.export-label {
+  display: block;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin: 0.75rem 0 0.35rem;
+}
+
+.export-field-grid { display: grid; gap: 0.25rem; }
+.export-field-row { display: grid; grid-template-columns: 1fr; gap: 0.75rem; align-items: center; }
+.export-field-row input:not([type="checkbox"]) { margin-bottom: 0; }
+
+.export-check { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; margin: 0.5rem 0; }
+.export-check input { width: auto; margin: 0; }
+
+.export-color { width: 4rem; height: 2.2rem; padding: 0.2rem; }
+
+.export-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 1rem; }
+
+@media (min-width: 600px) {
+  .export-field-row { grid-template-columns: 10rem 1fr; }
+}
+
+/* ── Voice command reduced-motion override ───────────────────────────────────
+   The pulsing indicator is decorative; stop it when the user asks for less
+   motion but keep the dot visible as a static status cue. */
+@media (prefers-reduced-motion: reduce) {
+  .voice-listening-indicator__dot {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+}

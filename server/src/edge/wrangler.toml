@@ -1,0 +1,18 @@
+name = "soroban-identity-edge"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+# Smart placement keeps the worker close to users and minimises cold starts.
+[placement]
+mode = "smart"
+
+[vars]
+EDGE_REQUESTS_PER_MINUTE = "300"
+DID_CACHE_TTL_SECONDS = "300"
+AB_TEST_PERCENTAGE = "50"
+BOT_DETECTION = "on"
+# ORIGIN_URL, ORIGIN_REGIONS (JSON map of continent -> origin) and
+# CREDENTIAL_VERIFY_SECRET are set with `wrangler secret put`.
+
+[[analytics_engine_datasets]]
+binding = "EDGE_ANALYTICS"
+dataset = "soroban_identity_edge"

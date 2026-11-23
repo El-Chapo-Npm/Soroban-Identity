@@ -1,0 +1,2304 @@
+openapi: 3.0.3
+info:
+  description: "Operational REST and GraphQL HTTP service for Soroban Identity contracts,\
+    \ covering Decentralized Identifiers (DIDs), Verifiable Credentials, Webhook delivery,\
+    \ and Reputation systems on Stellar Soroban."
+  title: Soroban Identity Server API
+  version: 0.1.0
+servers:
+- description: Local development server
+  url: http://localhost:3001
+- description: Production API gateway
+  url: https://api.soroban-identity.stellar.org
+tags:
+- description: "Verifiable credential issuance, verification, revocation, and queries"
+  name: credentials
+- description: "Webhook subscription management, delivery logs, and testing"
+  name: webhooks
+- description: Flexible GraphQL querying and mutations
+  name: graphql
+- description: W3C DID resolution and registry endpoints
+  name: identity
+- description: Administrative issuer management and expiry reporting
+  name: admin
+- description: "Liveness probes, Prometheus metrics, and server metadata"
+  name: system
+- description: "OAuth 2.0 client registration, authorization code grant, token introspection\
+    \ and revocation"
+  name: oauth
+paths:
+  /openapi.json:
+    get:
+      description: Returns the complete OpenAPI 3.0.3 specification JSON.
+      operationId: getOpenApi
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+          description: OpenAPI specification document
+      summary: Get OpenAPI Specification
+      tags:
+      - system
+  /info:
+    get:
+      description: "Returns server version, API versioning info, and supported feature\
+        \ flags."
+      operationId: getServerInfo
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                version: 0.1.0
+                apiVersion: v1
+                supportedVersions:
+                - v1
+                - v2
+                features:
+                - webhook_delivery
+                - batch_issuance
+                - event_polling
+                - graphql_api
+                - api_versioning
+                minSdkVersion: 0.1.0
+              schema:
+                $ref: "#/components/schemas/ServerInfo"
+          description: Server capability metadata
+      summary: Server capability discovery
+      tags:
+      - system
+  /health:
+    get:
+      description: Checks connectivity to Soroban RPC node and smart contracts with
+        circuit breaker state.
+      operationId: getHealth
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                status: ok
+                apiVersion: v1
+                supportedVersions:
+                - v1
+                - v2
+                deprecatedVersions: []
+                defaultVersion: v1
+                contracts:
+                  identity: true
+                  credential: true
+                  reputation: true
+                circuitBreaker:
+                  state: CLOSED
+                  failureCount: 0
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+          description: Server and all upstream contracts are healthy
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+          description: Server or upstream contracts are degraded
+      summary: Liveness and contract health probe
+      tags:
+      - system
+  /metrics:
+    get:
+      description: Renders Prometheus-formatted operational metrics.
+      operationId: getMetrics
+      responses:
+        "200":
+          content:
+            text/plain:
+              schema:
+                type: string
+          description: Prometheus text metrics
+      summary: Prometheus Metrics
+      tags:
+      - system
+  /credentials:
+    get:
+      description: Retrieves a cursor-paginated list of credentials. Cursors are opaque
+        tokens returned as nextCursor/previousCursor; pass one back as `cursor` (with
+        `direction=next` or `direction=prev`) to continue paging. The response also
+        carries a weak ETag; a matching If-None-Match returns 304.
+      operationId: listCredentials
+      parameters:
+      - description: Number of records to return (max 200)
+        explode: true
+        in: query
+        name: limit
+        required: false
+        schema:
+          default: 50
+          maximum: 200
+          type: integer
+        style: form
+      - description: Opaque pagination cursor from a previous response's nextCursor/previousCursor
+        explode: true
+        in: query
+        name: cursor
+        required: false
+        schema:
+          type: string
+        style: form
+      - description: Direction to page in relative to cursor. 'prev' walks backward
+          through results in the same forward order.
+        explode: true
+        in: query
+        name: direction
+        required: false
+        schema:
+          default: next
+          enum:
+          - next
+          - prev
+          type: string
+        style: form
+      - description: "Comma-separated list of fields to include in each returned credential,\
+          \ e.g. 'id,subject,claims.tier'. Omit to receive the full object."
+        explode: true
+        in: query
+        name: fields
+        required: false
+        schema:
+          type: string
+        style: form
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                items:
+                - id: cred-001
+                  subject: GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF
+                  issuer: GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF
+                  expiresAt: 1893456000
+                  revoked: false
+                nextCursor: eyJpZCI6ImNyZWQtMDAxIn0
+                previousCursor: null
+              schema:
+                $ref: "#/components/schemas/PaginatedCredentials"
+          description: List of credentials
+          headers:
+            ETag:
+              description: Weak entity tag for this page. Send back via If-None-Match
+                to revalidate.
+              explode: false
+              schema:
+                type: string
+              style: simple
+        "304":
+          description: Not Modified - the caller's If-None-Match matches the current
+            page.
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Invalid query parameters
+      summary: List credentials (cursor-paginated)
+      tags:
+      - credentials
+    post:
+      description: "Persists a newly issued credential, appends an audit log record,\
+        \ and triggers the `credential.issued` webhook event."
+      operationId: issueCredential
+      requestBody:
+        content:
+          application/json:
+            example:
+              id: cred-kyc-2026-001
+              subject: GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF
+              issuer: GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF
+              expiresAt: 1893456000
+              schema: https://schema.org/KYCCredential
+              claims:
+                tier: tier_3
+                country: US
+                verified: true
+            schema:
+              $ref: "#/components/schemas/IssueCredentialRequest"
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              example:
+                id: cred-kyc-2026-001
+                subject: GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF
+                issuer: GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF
+                expiresAt: 1893456000
+                schema: https://schema.org/KYCCredential
+                claims:
+                  tier: tier_3
+                  country: US
+                  verified: true
+              schema:
+                $ref: "#/components/schemas/Credential"
+          description: Credential successfully issued and persisted
+        "400":
+          content:
+            application/json:
+              example:
+                code: INVALID_REQUEST
+                message: Request body must include a credential id.
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Missing required fields or invalid body format
+        "401":
+          content:
+            application/json:
+              example:
+                code: UNAUTHORIZED
+                error: unauthorized
+                message: Invalid API key
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Missing or invalid API key authentication token
+        "403":
+          content:
+            application/json:
+              example:
+                code: INSUFFICIENT_SCOPE
+                error: forbidden
+                message: API key does not have required permissions
+                requiredScopes:
+                - credentials:write
+                missingScopes:
+                - credentials:write
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: API key lacks required scope ('credentials:write')
+        "409":
+          content:
+            application/json:
+              example:
+                code: CREDENTIAL_ALREADY_EXISTS
+                message: Credential with ID "cred-kyc-2026-001" already exists
+                details:
+                - field: id
+                  value: cred-kyc-2026-001
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Credential with the given ID already exists
+        "413":
+          content:
+            application/json:
+              example:
+                code: PAYLOAD_TOO_LARGE
+                message: Request body exceeds the size limit.
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Request body exceeds maximum payload size limit
+        "415":
+          content:
+            application/json:
+              example:
+                code: UNSUPPORTED_MEDIA_TYPE
+                message: Content-Type must be application/json
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Unsupported Media Type (must be application/json)
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Internal server or storage failure
+      security:
+      - ApiKeyAuth:
+        - credentials:write
+      - BearerAuth:
+        - credentials:write
+      summary: Issue a new Verifiable Credential
+      tags:
+      - credentials
+  /credentials/issue:
+    post:
+      description: Alias route for credential issuance.
+      operationId: issueCredentialAlias
+      requestBody:
+        content:
+          application/json:
+            example:
+              id: cred-kyc-2026-001
+              subject: GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF
+              issuer: GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF
+              expiresAt: 1893456000
+              schema: https://schema.org/KYCCredential
+              claims:
+                tier: tier_3
+                country: US
+                verified: true
+            schema:
+              $ref: "#/components/schemas/IssueCredentialRequest"
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              example:
+                id: cred-kyc-2026-001
+                subject: GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF
+                issuer: GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF
+                expiresAt: 1893456000
+                schema: https://schema.org/KYCCredential
+                claims:
+                  tier: tier_3
+                  country: US
+                  verified: true
+              schema:
+                $ref: "#/components/schemas/Credential"
+          description: Credential successfully issued and persisted
+        "400":
+          content:
+            application/json:
+              example:
+                code: INVALID_REQUEST
+                message: Request body must include a credential id.
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Missing required fields or invalid body format
+        "401":
+          content:
+            application/json:
+              example:
+                code: UNAUTHORIZED
+                error: unauthorized
+                message: Invalid API key
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Missing or invalid API key authentication token
+        "403":
+          content:
+            application/json:
+              example:
+                code: INSUFFICIENT_SCOPE
+                error: forbidden
+                message: API key does not have required permissions
+                requiredScopes:
+                - credentials:write
+                missingScopes:
+                - credentials:write
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: API key lacks required scope ('credentials:write')
+        "409":
+          content:
+            application/json:
+              example:
+                code: CREDENTIAL_ALREADY_EXISTS
+                message: Credential with ID "cred-kyc-2026-001" already exists
+                details:
+                - field: id
+                  value: cred-kyc-2026-001
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Credential with the given ID already exists
+      security:
+      - ApiKeyAuth:
+        - credentials:write
+      summary: Issue a credential (alias for POST /credentials)
+      tags:
+      - credentials
+  /credentials/{id}:
+    delete:
+      description: Marks the credential as revoked in persistent storage and dispatches
+        a `credential.revoked` webhook notification.
+      operationId: deleteCredential
+      parameters:
+      - description: Unique identifier of the credential
+        example: cred-kyc-2026-001
+        explode: false
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+        style: simple
+      - description: "Optimistic concurrency. When present, the revoke is rejected\
+          \ with 412 unless it matches the credential's current ETag."
+        explode: false
+        in: header
+        name: If-Match
+        required: false
+        schema:
+          type: string
+        style: simple
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                revoked: true
+                credential:
+                  id: cred-kyc-2026-001
+                  subject: GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF
+                  issuer: GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF
+                  revoked: true
+                  revokedAt: 2026-08-25T11:00:00.000Z
+              schema:
+                $ref: "#/components/schemas/CredentialRevokeResponse"
+          description: Credential revoked successfully
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Unauthorized - missing or invalid API key
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Forbidden - missing credentials:write scope
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Credential not found
+        "412":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Precondition Failed - If-Match did not match the credential's
+            current ETag.
+      security:
+      - ApiKeyAuth:
+        - credentials:write
+      - BearerAuth:
+        - credentials:write
+      summary: Revoke a credential
+      tags:
+      - credentials
+    get:
+      description: Retrieves the full record of an existing credential.
+      operationId: getCredential
+      parameters:
+      - description: Unique identifier of the credential
+        example: cred-kyc-2026-001
+        explode: false
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+        style: simple
+      - description: "Comma-separated list of fields to include in the response, e.g.\
+          \ 'id,claims.tier'. Supports dotted paths into nested objects."
+        explode: true
+        in: query
+        name: fields
+        required: false
+        schema:
+          type: string
+        style: form
+      - description: "Conditional GET. When it matches the current strong ETag, the\
+          \ server returns 304 with no body."
+        explode: false
+        in: header
+        name: If-None-Match
+        required: false
+        schema:
+          type: string
+        style: simple
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                id: cred-kyc-2026-001
+                subject: GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF
+                issuer: GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF
+                expiresAt: 1893456000
+                revoked: false
+                schema: https://schema.org/KYCCredential
+              schema:
+                $ref: "#/components/schemas/Credential"
+          description: Credential found
+          headers:
+            ETag:
+              description: Strong entity tag for the canonical credential state (computed
+                the same way regardless of any `fields` filtering). Reuse it in If-Match
+                on a later write.
+              explode: false
+              schema:
+                type: string
+              style: simple
+        "304":
+          description: Not Modified - If-None-Match matched the current ETag.
+        "404":
+          content:
+            application/json:
+              example:
+                error: not_found
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Credential not found
+      summary: Get credential by ID
+      tags:
+      - credentials
+  /credentials/{id}/revoke:
+    delete:
+      description: Explicit revocation path matching DELETE /credentials/:id/revoke.
+      operationId: deleteCredentialRevocation
+      parameters:
+      - explode: false
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+        style: simple
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                revoked: true
+                credential:
+                  id: cred-kyc-2026-001
+                  subject: GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF
+                  issuer: GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF
+                  revoked: true
+                  revokedAt: 2026-08-25T11:00:00.000Z
+              schema:
+                $ref: "#/components/schemas/CredentialRevokeResponse"
+          description: Credential revoked successfully
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Unauthorized - missing or invalid API key
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Forbidden - missing credentials:write scope
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Credential not found
+      security:
+      - ApiKeyAuth:
+        - credentials:write
+      summary: Revoke a credential via DELETE
+      tags:
+      - credentials
+    post:
+      description: Alias endpoint for credential revocation.
+      operationId: revokeCredential
+      parameters:
+      - explode: false
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+        style: simple
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                revoked: true
+                credential:
+                  id: cred-kyc-2026-001
+                  subject: GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF
+                  issuer: GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF
+                  revoked: true
+                  revokedAt: 2026-08-25T11:00:00.000Z
+              schema:
+                $ref: "#/components/schemas/CredentialRevokeResponse"
+          description: Credential revoked successfully
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Unauthorized - missing or invalid API key
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Forbidden - missing credentials:write scope
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Credential not found
+      security:
+      - ApiKeyAuth:
+        - credentials:write
+      summary: Revoke a credential via POST
+      tags:
+      - credentials
+  /credentials/{id}/verify:
+    post:
+      description: "Verifies that the credential exists, is not revoked, and has not\
+        \ expired. Returns the complete credential object when verified."
+      operationId: verifyCredential
+      parameters:
+      - description: Identifier of the credential to verify
+        explode: false
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+        style: simple
+      responses:
+        "200":
+          content:
+            application/json:
+              examples:
+                valid:
+                  summary: Valid Credential
+                  value:
+                    verified: true
+                    credential:
+                      id: cred-kyc-2026-001
+                      subject: GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF
+                      issuer: GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF
+                      expiresAt: 1893456000
+                      revoked: false
+                revoked:
+                  summary: Revoked Credential
+                  value:
+                    verified: false
+                    reason: revoked
+                expired:
+                  summary: Expired Credential
+                  value:
+                    verified: false
+                    reason: expired
+                notFound:
+                  summary: Not Found Credential
+                  value:
+                    verified: false
+                    reason: not_found
+              schema:
+                $ref: "#/components/schemas/CredentialVerifyResponse"
+          description: Verification evaluation result
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Forbidden - missing credentials:read scope
+      security:
+      - ApiKeyAuth:
+        - credentials:read
+      - BearerAuth:
+        - credentials:read
+      summary: Verify credential status
+      tags:
+      - credentials
+  /webhooks:
+    get:
+      operationId: listWebhooks
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/listWebhooks_200_response"
+          description: List of webhooks
+      security:
+      - ApiKeyAuth:
+        - admin:read
+      summary: List registered webhooks
+      tags:
+      - webhooks
+    post:
+      operationId: registerWebhook
+      requestBody:
+        content:
+          application/json:
+            example:
+              url: https://client.example.com/webhook
+              events:
+              - credential.issued
+              - credential.revoked
+              secret: whsec_custom_secret_key_123
+              description: Primary webhook listener for credential lifecycle
+            schema:
+              $ref: "#/components/schemas/RegisterWebhookRequest"
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Webhook"
+          description: Webhook registered successfully
+      security:
+      - ApiKeyAuth:
+        - admin:write
+      summary: Register a new webhook endpoint
+      tags:
+      - webhooks
+  /webhooks/{id}:
+    delete:
+      operationId: deleteWebhook
+      parameters:
+      - explode: false
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+        style: simple
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/deleteWebhook_200_response"
+          description: Webhook deleted
+      security:
+      - ApiKeyAuth:
+        - admin:write
+      summary: Delete webhook
+      tags:
+      - webhooks
+    get:
+      operationId: getWebhook
+      parameters:
+      - explode: false
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+        style: simple
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Webhook"
+          description: Webhook details
+        "404":
+          description: Webhook not found
+      security:
+      - ApiKeyAuth:
+        - admin:read
+      summary: Get webhook by ID
+      tags:
+      - webhooks
+  /webhooks/{id}/test:
+    post:
+      operationId: testWebhook
+      parameters:
+      - explode: false
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+        style: simple
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookLog"
+          description: Test delivery result
+      security:
+      - ApiKeyAuth:
+        - admin:write
+      summary: Test webhook delivery
+      tags:
+      - webhooks
+  /webhooks/logs:
+    get:
+      operationId: listWebhookLogs
+      parameters:
+      - explode: true
+        in: query
+        name: webhookId
+        required: false
+        schema:
+          type: string
+        style: form
+      - explode: true
+        in: query
+        name: limit
+        required: false
+        schema:
+          default: 50
+          type: integer
+        style: form
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/listWebhookLogs_200_response"
+          description: Delivery logs
+      security:
+      - ApiKeyAuth:
+        - admin:read
+      summary: Query webhook delivery logs
+      tags:
+      - webhooks
+  /graphql:
+    get:
+      description: Renders interactive GraphiQL playground in browser or executes
+        query via query string.
+      operationId: graphqlGet
+      responses:
+        "200":
+          description: Playground HTML or JSON query response
+      summary: GraphQL Playground / GET Query
+      tags:
+      - graphql
+    post:
+      description: Executes GraphQL operation with DataLoader caching and batching.
+      operationId: graphqlPost
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/graphqlPost_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/graphqlPost_200_response"
+          description: GraphQL Execution Result
+      summary: Execute GraphQL query or mutation
+      tags:
+      - graphql
+  /1.0/identifiers/{did}:
+    get:
+      description: W3C DID Resolution endpoint for did:stellar identifiers.
+      operationId: resolveDid
+      parameters:
+      - example: did:stellar:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF
+        explode: false
+        in: path
+        name: did
+        required: true
+        schema:
+          type: string
+        style: simple
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/resolveDid_200_response"
+          description: DID Resolution response
+        "400":
+          description: Invalid DID format
+        "502":
+          description: Upstream RPC failure
+      summary: Resolve a DID document
+      tags:
+      - identity
+  /oauth/clients:
+    post:
+      description: Dynamically registers a client for the authorization code grant.
+        The client_secret is returned only in this response and cannot be retrieved
+        again.
+      operationId: registerOauthClient
+      requestBody:
+        content:
+          application/json:
+            example:
+              name: Partner Dashboard
+              redirectUris:
+              - https://partner.example.com/callback
+              scopes:
+              - credentials:read
+            schema:
+              $ref: "#/components/schemas/registerOauthClient_request"
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/registerOauthClient_201_response"
+          description: Client registered
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Invalid registration request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Missing or invalid credentials
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Missing admin:write scope
+      security:
+      - ApiKeyAuth:
+        - admin:write
+      - BearerAuth:
+        - admin:write
+      summary: Register an OAuth 2.0 client
+      tags:
+      - oauth
+  /oauth/authorize:
+    get:
+      description: "Issues a short-lived authorization code and redirects to redirect_uri.\
+        \ There is no separate login/consent page: the resource owner is whoever this\
+        \ request is already authenticated as, and a requested scope can never exceed\
+        \ both the client's registered scopes and the caller's own."
+      operationId: oauthAuthorize
+      parameters:
+      - explode: true
+        in: query
+        name: response_type
+        required: true
+        schema:
+          enum:
+          - code
+          type: string
+        style: form
+      - explode: true
+        in: query
+        name: client_id
+        required: true
+        schema:
+          type: string
+        style: form
+      - explode: true
+        in: query
+        name: redirect_uri
+        required: true
+        schema:
+          format: uri
+          type: string
+        style: form
+      - description: Space-delimited scopes. Defaults to the client's full registered
+          scope set.
+        explode: true
+        in: query
+        name: scope
+        required: false
+        schema:
+          type: string
+        style: form
+      - description: "Opaque value echoed back unchanged, to protect against CSRF."
+        explode: true
+        in: query
+        name: state
+        required: false
+        schema:
+          type: string
+        style: form
+      responses:
+        "302":
+          description: Redirect to redirect_uri with code and state query parameters.
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: "Invalid request, unknown client, or unregistered redirect_uri"
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Missing or invalid credentials
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Caller does not hold a requested scope
+      security:
+      - ApiKeyAuth: []
+      - BearerAuth: []
+      summary: Authorization endpoint (authorization code grant)
+      tags:
+      - oauth
+  /oauth/token:
+    post:
+      description: "Exchanges an authorization code, or a refresh token, for an access\
+        \ token. Accepts a JSON body (not the RFC 6749 form-encoding) to match the\
+        \ rest of this API."
+      operationId: oauthToken
+      requestBody:
+        content:
+          application/json:
+            example:
+              grant_type: authorization_code
+              code: ac_...
+              redirect_uri: https://partner.example.com/callback
+              client_id: client_...
+              client_secret: secret_...
+            schema:
+              $ref: "#/components/schemas/oauthToken_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/oauthToken_200_response"
+          description: Token issued
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: invalid_request / invalid_grant / invalid_scope
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: invalid_client
+      summary: Token endpoint
+      tags:
+      - oauth
+  /oauth/introspect:
+    post:
+      description: Reports whether a token is currently active. Callers authenticate
+        either as the OAuth client the token was issued to (client_id/client_secret
+        in the body) or as an admin (admin:read).
+      operationId: oauthIntrospect
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/oauthIntrospect_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                active: true
+                scope: credentials:read
+                client_id: client_abc
+                token_type: Bearer
+                exp: 1893456000
+                iat: 1893452400
+              schema:
+                $ref: "#/components/schemas/oauthIntrospect_200_response"
+          description: Introspection result
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Missing or invalid credentials
+      security:
+      - ApiKeyAuth:
+        - admin:read
+      - BearerAuth:
+        - admin:read
+      summary: Token introspection (RFC 7662)
+      tags:
+      - oauth
+  /oauth/revoke:
+    post:
+      description: "Revokes an access or refresh token. Always responds 200 once the\
+        \ caller's own credentials check out, whether or not the token was recognized,\
+        \ so a caller cannot use this endpoint to probe for valid tokens."
+      operationId: oauthRevoke
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/oauthIntrospect_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/oauthRevoke_200_response"
+          description: Revoked (or already inactive)
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Missing or invalid credentials
+      security:
+      - ApiKeyAuth:
+        - admin:write
+      - BearerAuth:
+        - admin:write
+      summary: Token revocation (RFC 7009)
+      tags:
+      - oauth
+  /credentials/verify/batch:
+    post:
+      description: Verifies up to 50 credentials in a single request for efficiency
+        with partial success handling.
+      operationId: verifyCredentialsBatch
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/verifyCredentialsBatch_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/verifyCredentialsBatch_200_response"
+          description: Batch verification results
+        "400":
+          description: Invalid request format or limit exceeded
+        "401":
+          description: Unauthorized
+      summary: Verify multiple credentials in a single batch request
+  /admin/api-keys:
+    get:
+      description: Returns metadata for all issued API keys.
+      operationId: listApiKeys
+      responses:
+        "200":
+          description: List of API keys
+      summary: List API keys
+    post:
+      description: Issue an API key with configurable permissions and subscription
+        tier.
+      operationId: createApiKey
+      responses:
+        "201":
+          description: API key created
+        "401":
+          description: Unauthorized
+      summary: Issue a new API key
+  /admin/api-keys/{id}:
+    delete:
+      operationId: deleteApiKey
+      parameters:
+      - explode: false
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+        style: simple
+      responses:
+        "200":
+          description: API key revoked
+        "404":
+          description: API key not found
+      summary: Revoke an API key
+    get:
+      operationId: getApiKey
+      parameters:
+      - explode: false
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+        style: simple
+      responses:
+        "200":
+          description: API key metadata
+        "404":
+          description: API key not found
+      summary: Get API key metadata
+  /admin/api-keys/{id}/rotate:
+    post:
+      operationId: rotateApiKey
+      parameters:
+      - explode: false
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+        style: simple
+      responses:
+        "200":
+          description: API key rotated
+        "404":
+          description: API key not found
+      summary: Rotate an API key
+  /batch:
+    post:
+      description: "Processes up to 100 issue/verify/revoke operations in a single\
+        \ request, returning one result per operation. Partial failures do not abort\
+        \ the batch unless `atomic` is true, in which case the batch stops at the\
+        \ first failure and rolls back any credentials it already issued in this batch."
+      operationId: executeBatch
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/executeBatch_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/executeBatch_200_response"
+          description: Batch processed; check each result's `success` field for its
+            individual outcome.
+        "400":
+          description: "Invalid batch: empty, over 100 operations, or a malformed\
+            \ operation"
+        "401":
+          description: Unauthorized
+        "403":
+          description: Missing credentials:read/credentials:write scope for the operation
+            types present
+      summary: Execute multiple credential operations in one request (#749)
+  /quota:
+    get:
+      description: "Returns the caller's daily and monthly quota usage for its subscription\
+        \ tier. Independent of rate limiting (X-RateLimit-* headers), which is a separate,\
+        \ rolling per-minute budget."
+      operationId: getQuota
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/getQuota_200_response"
+          description: Current quota usage
+        "401":
+          description: Unauthorized
+      summary: Get current API quota usage (#748)
+  /events/poll:
+    get:
+      description: "Alternative to the GET /events SSE stream for clients that cannot\
+        \ hold an open text/event-stream connection. Holds the request open until\
+        \ at least one matching event arrives or the timeout elapses, then responds\
+        \ once with a JSON batch and closes."
+      operationId: pollEvents
+      parameters:
+      - description: Filter to events from one contract.
+        explode: true
+        in: query
+        name: contractId
+        required: false
+        schema:
+          type: string
+        style: form
+      - description: "Comma-separated topic filter, positional (e.g. IDENTITY,updated)."
+        explode: true
+        in: query
+        name: topic
+        required: false
+        schema:
+          type: string
+        style: form
+      - description: "Requested timeout in milliseconds, clamped to [1000, LONG_POLL_MAX_TIMEOUT_MS]\
+          \ (default 30000, max 60000)."
+        explode: true
+        in: query
+        name: timeout
+        required: false
+        schema:
+          type: integer
+        style: form
+      - description: Ledger cursor to resume from; also accepted as a `lastEventId`
+          or `since` query param.
+        explode: false
+        in: header
+        name: Last-Event-ID
+        required: false
+        schema:
+          type: string
+        style: simple
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/pollEvents_200_response"
+          description: "One batch of matching events, or an empty batch if the request\
+            \ timed out first."
+      summary: Long-poll for contract events (#750)
+components:
+  schemas:
+    Credential:
+      example:
+        id: cred-kyc-2026-001
+        subject: GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF
+        issuer: GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF
+        expiresAt: 1893456000
+        revoked: false
+        revokedAt: 2000-01-23T04:56:07.000+00:00
+        schema: https://schema.org/KYCCredential
+        claims: "{}"
+        source: http
+        expiry_notified_at: 2000-01-23T04:56:07.000+00:00
+      properties:
+        id:
+          example: cred-kyc-2026-001
+          type: string
+        subject:
+          example: GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF
+          type: string
+        issuer:
+          example: GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF
+          type: string
+        expiresAt:
+          example: 1893456000
+          type: number
+        revoked:
+          example: false
+          type: boolean
+        revokedAt:
+          format: date-time
+          type: string
+        schema:
+          example: https://schema.org/KYCCredential
+          type: string
+        claims:
+          type: object
+        source:
+          example: http
+          type: string
+        expiry_notified_at:
+          format: date-time
+          type: string
+      required:
+      - id
+      - issuer
+      - subject
+      type: object
+    IssueCredentialRequest:
+      example:
+        id: id
+        subject: subject
+        issuer: issuer
+        expiresAt: 0.8008281904610115
+        schema: schema
+        claims: "{}"
+      properties:
+        id:
+          description: Unique identifier for the credential
+          type: string
+        subject:
+          description: Stellar public address of the credential subject
+          type: string
+        issuer:
+          description: Stellar public address of the credential issuer
+          type: string
+        expiresAt:
+          description: Unix timestamp in seconds (0 = no expiry)
+          type: number
+        schema:
+          description: Schema URI
+          type: string
+        claims:
+          description: Arbitrary claim dictionary
+          type: object
+      required:
+      - id
+      - issuer
+      - subject
+      type: object
+    CredentialVerifyResponse:
+      example:
+        verified: true
+        reason: not_found
+        credential:
+          id: cred-kyc-2026-001
+          subject: GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF
+          issuer: GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF
+          expiresAt: 1893456000
+          revoked: false
+          revokedAt: 2000-01-23T04:56:07.000+00:00
+          schema: https://schema.org/KYCCredential
+          claims: "{}"
+          source: http
+          expiry_notified_at: 2000-01-23T04:56:07.000+00:00
+      properties:
+        verified:
+          description: "True if valid, active, and unexpired"
+          type: boolean
+        reason:
+          enum:
+          - not_found
+          - revoked
+          - expired
+          nullable: true
+          type: string
+        credential:
+          $ref: "#/components/schemas/Credential"
+      required:
+      - verified
+      type: object
+    CredentialRevokeResponse:
+      example:
+        revoked: true
+        credential:
+          id: cred-kyc-2026-001
+          subject: GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF
+          issuer: GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF
+          expiresAt: 1893456000
+          revoked: false
+          revokedAt: 2000-01-23T04:56:07.000+00:00
+          schema: https://schema.org/KYCCredential
+          claims: "{}"
+          source: http
+          expiry_notified_at: 2000-01-23T04:56:07.000+00:00
+      properties:
+        revoked:
+          example: true
+          type: boolean
+        credential:
+          $ref: "#/components/schemas/Credential"
+      required:
+      - credential
+      - revoked
+      type: object
+    PaginatedCredentials:
+      example:
+        items:
+        - id: cred-kyc-2026-001
+          subject: GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF
+          issuer: GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF
+          expiresAt: 1893456000
+          revoked: false
+          revokedAt: 2000-01-23T04:56:07.000+00:00
+          schema: https://schema.org/KYCCredential
+          claims: "{}"
+          source: http
+          expiry_notified_at: 2000-01-23T04:56:07.000+00:00
+        - id: cred-kyc-2026-001
+          subject: GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF
+          issuer: GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF
+          expiresAt: 1893456000
+          revoked: false
+          revokedAt: 2000-01-23T04:56:07.000+00:00
+          schema: https://schema.org/KYCCredential
+          claims: "{}"
+          source: http
+          expiry_notified_at: 2000-01-23T04:56:07.000+00:00
+        nextCursor: cred-050
+      properties:
+        items:
+          items:
+            $ref: "#/components/schemas/Credential"
+          type: array
+        nextCursor:
+          example: cred-050
+          nullable: true
+          type: string
+      required:
+      - items
+      type: object
+    Webhook:
+      example:
+        id: whk_a1b2c3d4
+        url: https://example.com/webhooks
+        events:
+        - credential.issued
+        - credential.revoked
+        secret: secret
+        authToken: authToken
+        active: true
+        description: description
+        createdAt: 2000-01-23T04:56:07.000+00:00
+        updatedAt: 2000-01-23T04:56:07.000+00:00
+      properties:
+        id:
+          example: whk_a1b2c3d4
+          type: string
+        url:
+          example: https://example.com/webhooks
+          format: uri
+          type: string
+        events:
+          example:
+          - credential.issued
+          - credential.revoked
+          items:
+            type: string
+          type: array
+        secret:
+          type: string
+        authToken:
+          nullable: true
+          type: string
+        active:
+          example: true
+          type: boolean
+        description:
+          type: string
+        createdAt:
+          format: date-time
+          type: string
+        updatedAt:
+          format: date-time
+          type: string
+      required:
+      - active
+      - events
+      - id
+      - url
+      type: object
+    RegisterWebhookRequest:
+      example:
+        url: https://openapi-generator.tech
+        events:
+        - events
+        - events
+        secret: secret
+        authToken: authToken
+        description: description
+      properties:
+        url:
+          format: uri
+          type: string
+        events:
+          default:
+          - '*'
+          items:
+            type: string
+          type: array
+        secret:
+          type: string
+        authToken:
+          type: string
+        description:
+          type: string
+      required:
+      - url
+      type: object
+    WebhookLog:
+      example:
+        deliveryId: del_123
+        webhookId: whk_456
+        url: url
+        event: credential.issued
+        statusCode: 200
+        success: true
+        attempt: 1
+        durationMs: 45
+        timestamp: 2000-01-23T04:56:07.000+00:00
+        error: error
+      properties:
+        deliveryId:
+          example: del_123
+          type: string
+        webhookId:
+          example: whk_456
+          type: string
+        url:
+          type: string
+        event:
+          example: credential.issued
+          type: string
+        statusCode:
+          example: 200
+          type: integer
+        success:
+          example: true
+          type: boolean
+        attempt:
+          example: 1
+          type: integer
+        durationMs:
+          example: 45
+          type: integer
+        timestamp:
+          format: date-time
+          type: string
+        error:
+          nullable: true
+          type: string
+      required:
+      - deliveryId
+      - event
+      - success
+      - webhookId
+      type: object
+    ServerInfo:
+      example:
+        version: 0.1.0
+        apiVersion: v1
+        supportedVersions:
+        - supportedVersions
+        - supportedVersions
+        features:
+        - features
+        - features
+        minSdkVersion: 0.1.0
+      properties:
+        version:
+          example: 0.1.0
+          type: string
+        apiVersion:
+          example: v1
+          type: string
+        supportedVersions:
+          items:
+            type: string
+          type: array
+        features:
+          items:
+            type: string
+          type: array
+        minSdkVersion:
+          example: 0.1.0
+          type: string
+      required:
+      - features
+      - minSdkVersion
+      - version
+      type: object
+    HealthResponse:
+      example:
+        status: ok
+        apiVersion: apiVersion
+        supportedVersions:
+        - supportedVersions
+        - supportedVersions
+        deprecatedVersions:
+        - deprecatedVersions
+        - deprecatedVersions
+        defaultVersion: defaultVersion
+        contracts:
+          key: true
+        circuitBreaker: "{}"
+      properties:
+        status:
+          enum:
+          - ok
+          - degraded
+          type: string
+        apiVersion:
+          type: string
+        supportedVersions:
+          items:
+            type: string
+          type: array
+        deprecatedVersions:
+          items:
+            type: string
+          type: array
+        defaultVersion:
+          type: string
+        contracts:
+          additionalProperties:
+            type: boolean
+          type: object
+        circuitBreaker:
+          type: object
+      required:
+      - circuitBreaker
+      - contracts
+      - status
+      type: object
+    ErrorResponse:
+      example:
+        code: INVALID_REQUEST
+        error: unauthorized
+        message: Request body must include a credential id.
+        requiredScopes:
+        - requiredScopes
+        - requiredScopes
+        missingScopes:
+        - missingScopes
+        - missingScopes
+        details:
+        - field: field
+          value: value
+        - field: field
+          value: value
+      properties:
+        code:
+          example: INVALID_REQUEST
+          type: string
+        error:
+          example: unauthorized
+          type: string
+        message:
+          example: Request body must include a credential id.
+          type: string
+        requiredScopes:
+          items:
+            type: string
+          type: array
+        missingScopes:
+          items:
+            type: string
+          type: array
+        details:
+          items:
+            $ref: "#/components/schemas/ErrorResponse_details_inner"
+          type: array
+      type: object
+    listWebhooks_200_response:
+      example:
+        webhooks:
+        - id: whk_a1b2c3d4
+          url: https://example.com/webhooks
+          events:
+          - credential.issued
+          - credential.revoked
+          secret: secret
+          authToken: authToken
+          active: true
+          description: description
+          createdAt: 2000-01-23T04:56:07.000+00:00
+          updatedAt: 2000-01-23T04:56:07.000+00:00
+        - id: whk_a1b2c3d4
+          url: https://example.com/webhooks
+          events:
+          - credential.issued
+          - credential.revoked
+          secret: secret
+          authToken: authToken
+          active: true
+          description: description
+          createdAt: 2000-01-23T04:56:07.000+00:00
+          updatedAt: 2000-01-23T04:56:07.000+00:00
+      properties:
+        webhooks:
+          items:
+            $ref: "#/components/schemas/Webhook"
+          type: array
+      type: object
+    deleteWebhook_200_response:
+      example:
+        success: true
+        id: id
+      properties:
+        success:
+          type: boolean
+        id:
+          type: string
+      type: object
+    listWebhookLogs_200_response:
+      example:
+        logs:
+        - deliveryId: del_123
+          webhookId: whk_456
+          url: url
+          event: credential.issued
+          statusCode: 200
+          success: true
+          attempt: 1
+          durationMs: 45
+          timestamp: 2000-01-23T04:56:07.000+00:00
+          error: error
+        - deliveryId: del_123
+          webhookId: whk_456
+          url: url
+          event: credential.issued
+          statusCode: 200
+          success: true
+          attempt: 1
+          durationMs: 45
+          timestamp: 2000-01-23T04:56:07.000+00:00
+          error: error
+      properties:
+        logs:
+          items:
+            $ref: "#/components/schemas/WebhookLog"
+          type: array
+      type: object
+    graphqlPost_request:
+      properties:
+        query:
+          type: string
+        variables:
+          type: object
+        operationName:
+          type: string
+      required:
+      - query
+      type: object
+    graphqlPost_200_response:
+      example:
+        data: "{}"
+        errors:
+        - "{}"
+        - "{}"
+      properties:
+        data:
+          type: object
+        errors:
+          items:
+            type: object
+          type: array
+      type: object
+    resolveDid_200_response:
+      example:
+        didDocument: "{}"
+        didResolutionMetadata: "{}"
+        didDocumentMetadata: "{}"
+      properties:
+        didDocument:
+          nullable: true
+          type: object
+        didResolutionMetadata:
+          type: object
+        didDocumentMetadata:
+          type: object
+      required:
+      - didDocument
+      - didDocumentMetadata
+      - didResolutionMetadata
+      type: object
+    registerOauthClient_request:
+      properties:
+        name:
+          type: string
+        redirectUris:
+          items:
+            format: uri
+            type: string
+          minItems: 1
+          type: array
+        scopes:
+          description: Subset of the API's scopes this client may ever be granted.
+          items:
+            type: string
+          type: array
+        grantTypes:
+          items:
+            enum:
+            - authorization_code
+            - refresh_token
+            type: string
+          type: array
+      required:
+      - redirectUris
+      type: object
+    registerOauthClient_201_response:
+      example:
+        clientId: clientId
+        clientSecret: clientSecret
+        name: name
+        redirectUris:
+        - redirectUris
+        - redirectUris
+        scopes:
+        - scopes
+        - scopes
+        grantTypes:
+        - grantTypes
+        - grantTypes
+        createdAt: 2000-01-23T04:56:07.000+00:00
+      properties:
+        clientId:
+          type: string
+        clientSecret:
+          type: string
+        name:
+          type: string
+        redirectUris:
+          items:
+            type: string
+          type: array
+        scopes:
+          items:
+            type: string
+          type: array
+        grantTypes:
+          items:
+            type: string
+          type: array
+        createdAt:
+          format: date-time
+          type: string
+      type: object
+    oauthToken_request:
+      properties:
+        grant_type:
+          enum:
+          - authorization_code
+          - refresh_token
+          type: string
+        code:
+          description: Required for grant_type=authorization_code
+          type: string
+        redirect_uri:
+          description: Required for grant_type=authorization_code; must match the
+            value used at /oauth/authorize
+          format: uri
+          type: string
+        refresh_token:
+          description: Required for grant_type=refresh_token
+          type: string
+        client_id:
+          type: string
+        client_secret:
+          type: string
+        scope:
+          description: Optional on refresh; may only narrow the original grant
+          type: string
+      required:
+      - client_id
+      - client_secret
+      - grant_type
+      type: object
+    oauthToken_200_response:
+      example:
+        access_token: access_token
+        token_type: Bearer
+        expires_in: 0
+        refresh_token: refresh_token
+        scope: scope
+      properties:
+        access_token:
+          type: string
+        token_type:
+          example: Bearer
+          type: string
+        expires_in:
+          description: Seconds until access_token expires
+          type: integer
+        refresh_token:
+          type: string
+        scope:
+          type: string
+      type: object
+    oauthIntrospect_request:
+      properties:
+        token:
+          type: string
+        token_type_hint:
+          enum:
+          - access_token
+          - refresh_token
+          type: string
+        client_id:
+          type: string
+        client_secret:
+          type: string
+      required:
+      - token
+      type: object
+    oauthIntrospect_200_response:
+      example:
+        active: true
+        scope: scope
+        client_id: client_id
+        token_type: token_type
+        exp: 0
+        iat: 6
+        sub: sub
+      properties:
+        active:
+          type: boolean
+        scope:
+          type: string
+        client_id:
+          type: string
+        token_type:
+          type: string
+        exp:
+          type: integer
+        iat:
+          type: integer
+        sub:
+          type: string
+      type: object
+    oauthRevoke_200_response:
+      example:
+        revoked: true
+      properties:
+        revoked:
+          type: boolean
+      type: object
+    verifyCredentialsBatch_request:
+      properties:
+        ids:
+          items:
+            type: string
+          maxItems: 50
+          type: array
+      required:
+      - ids
+      type: object
+    verifyCredentialsBatch_200_response_results_inner:
+      example:
+        id: id
+        verified: true
+        reason: reason
+        credential: "{}"
+      properties:
+        id:
+          type: string
+        verified:
+          type: boolean
+        reason:
+          type: string
+        credential:
+          type: object
+      required:
+      - id
+      - verified
+      type: object
+    verifyCredentialsBatch_200_response:
+      example:
+        results:
+        - id: id
+          verified: true
+          reason: reason
+          credential: "{}"
+        - id: id
+          verified: true
+          reason: reason
+          credential: "{}"
+        total: 0
+        verifiedCount: 6
+      properties:
+        results:
+          items:
+            $ref: "#/components/schemas/verifyCredentialsBatch_200_response_results_inner"
+          type: array
+        total:
+          type: integer
+        verifiedCount:
+          type: integer
+      required:
+      - results
+      - total
+      - verifiedCount
+      type: object
+    executeBatch_request_operations_inner:
+      properties:
+        id:
+          description: Optional client-supplied reference echoed back on the matching
+            result.
+          type: string
+        type:
+          enum:
+          - issue
+          - verify
+          - revoke
+          type: string
+        payload:
+          description: "issue: a full credential body. verify/revoke: { credentialId\
+            \ }."
+          type: object
+      required:
+      - payload
+      - type
+      type: object
+    executeBatch_request:
+      properties:
+        atomic:
+          description: "Stop at the first failure and revoke any credentials issued\
+            \ earlier in this batch, instead of continuing through the remaining operations."
+          type: boolean
+        operations:
+          items:
+            $ref: "#/components/schemas/executeBatch_request_operations_inner"
+          maxItems: 100
+          minItems: 1
+          type: array
+      required:
+      - operations
+      type: object
+    executeBatch_200_response_results_inner:
+      example:
+        id: id
+        type: type
+        success: true
+        status: status
+        data: "{}"
+        error: "{}"
+      properties:
+        id:
+          nullable: true
+          type: string
+        type:
+          type: string
+        success:
+          type: boolean
+        status:
+          type: string
+        data:
+          type: object
+        error:
+          type: object
+      type: object
+    executeBatch_200_response_summary:
+      example:
+        total: 0
+        succeeded: 6
+        failed: 1
+      properties:
+        total:
+          type: integer
+        succeeded:
+          type: integer
+        failed:
+          type: integer
+      type: object
+    executeBatch_200_response:
+      example:
+        results:
+        - id: id
+          type: type
+          success: true
+          status: status
+          data: "{}"
+          error: "{}"
+        - id: id
+          type: type
+          success: true
+          status: status
+          data: "{}"
+          error: "{}"
+        summary:
+          total: 0
+          succeeded: 6
+          failed: 1
+        atomic: true
+        aborted: true
+      properties:
+        results:
+          items:
+            $ref: "#/components/schemas/executeBatch_200_response_results_inner"
+          type: array
+        summary:
+          $ref: "#/components/schemas/executeBatch_200_response_summary"
+        atomic:
+          type: boolean
+        aborted:
+          type: boolean
+      type: object
+    getQuota_200_response_daily:
+      example:
+        limit: 0
+        used: 6
+        remaining: 1
+        resetAt: 5
+      properties:
+        limit:
+          type: integer
+        used:
+          type: integer
+        remaining:
+          type: integer
+        resetAt:
+          description: "Unix seconds, next UTC midnight"
+          type: integer
+      type: object
+    getQuota_200_response_monthly:
+      example:
+        limit: 5
+        used: 2
+        remaining: 7
+        resetAt: 9
+      properties:
+        limit:
+          type: integer
+        used:
+          type: integer
+        remaining:
+          type: integer
+        resetAt:
+          description: "Unix seconds, 1st of next UTC month"
+          type: integer
+      type: object
+    getQuota_200_response:
+      example:
+        tier: free
+        daily:
+          limit: 0
+          used: 6
+          remaining: 1
+          resetAt: 5
+        monthly:
+          limit: 5
+          used: 2
+          remaining: 7
+          resetAt: 9
+        overageMode: block
+      properties:
+        tier:
+          enum:
+          - free
+          - pro
+          - enterprise
+          type: string
+        daily:
+          $ref: "#/components/schemas/getQuota_200_response_daily"
+        monthly:
+          $ref: "#/components/schemas/getQuota_200_response_monthly"
+        overageMode:
+          enum:
+          - block
+          - allow
+          type: string
+      type: object
+    pollEvents_200_response:
+      example:
+        events:
+        - "{}"
+        - "{}"
+        lastEventId: lastEventId
+        count: 0
+        timedOut: true
+      properties:
+        events:
+          items:
+            type: object
+          type: array
+        lastEventId:
+          description: Cursor to send back on the next call.
+          type: string
+        count:
+          type: integer
+        timedOut:
+          type: boolean
+      type: object
+    ErrorResponse_details_inner:
+      example:
+        field: field
+        value: value
+      properties:
+        field:
+          type: string
+        value:
+          type: string
+      type: object
+  securitySchemes:
+    ApiKeyAuth:
+      description: "API Key token (e.g. `secret_key:credentials:read,credentials:write`\
+        \ or admin key)."
+      in: header
+      name: x-api-key
+      type: apiKey
+    BearerAuth:
+      description: Bearer authorization header token.
+      scheme: bearer
+      type: http

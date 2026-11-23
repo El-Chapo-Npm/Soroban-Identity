@@ -1,0 +1,76 @@
+# Soroban Identity Contracts
+
+This directory contains the on-chain contracts that power the Soroban Identity protocol:
+
+- **identity-registry** — DID creation, resolution, and lifecycle
+- **credential-manager** — verifiable credential issuance and verification
+- **reputation** — score aggregation and anti-sybil signals
+- **schema-registry** — on-chain verifiable credential schema storage and validation (#726)
+- **revocation-registry** — centralized bitmap-based revocation registry with reasons and merkle root proofs (#725)
+- **selective-disclosure** — commitment-based selective disclosure of credential attributes with ZK-friendly proofs (#724)
+
+## Canonical admin initialization pattern
+
+Every contract in this repository that accepts an admin must follow the same
+initialization sequence. Keeping the steps identical makes security reviews
+straightforward: a fix to the pattern is applied once and copied to each contract.
+
+### Steps
+
+1. **`require_uninitialized`** — abort with `AlreadyInitialized` if the `ADMIN`
+   instance key is already set.
+2. **`set_admin`** — persist the admin address under the shared `ADMIN` symbol.
+3. **Emit an init event** — publish `(ADMIN, "init")` with the admin address so
+   indexers can observe deployment.
+
+### Reference implementation
+
+```rust
+// Follows the canonical pattern documented in contracts/README.md
+pub fn initialize(env: Env, admin: Address) -> Result<(), ContractError> {
+    Self::require_uninitialized(&env)?;
+    Self::set_admin(&env, &admin);
+    env.events().publish((ADMIN, symbol_short!("init")), admin);
+    Ok(())
+}
+
+fn require_uninitialized(env: &Env) -> Result<(), ContractError> {
+    if env.storage().instance().has(&ADMIN) {
+        return Err(ContractError::AlreadyInitialized);
+    }
+    Ok(())
+}
+
+fn set_admin(env: &Env, admin: &Address) {
+    env.storage().instance().set(&ADMIN, admin);
+}
+```
+
+### Rules for new contracts
+
+- Do **not** skip the init event — downstream tooling relies on it.
+- Do **not** allow re-initialization; use `transfer_admin` for admin changes.
+- Copy the helper names (`require_uninitialized`, `set_admin`) verbatim so
+  grepping the repo finds every implementation.
+
+## Storage key conventions
+
+Persistent data is keyed by short `Symbol` namespaces (for example `IDENTITY`,
+`CRED`, `SUB`) rather than raw byte prefixes. Each contract defines named
+constants at the top of `src/lib.rs` so keys are grep-friendly and cannot be
+accidentally duplicated. Unit tests in each crate assert that namespace symbols
+and byte-string prefixes (where used) are pairwise distinct.
+
+## Migration notes
+
+### credential-manager: credential IDs now include an issuance nonce (#467)
+
+`derive_id` used to hash only `issuer || subject || type`, so re-issuing a
+credential of the same type to the same subject after a revocation silently
+overwrote the original storage record at the same ID. IDs are now derived as
+`sha256(issuer_xdr || subject_xdr || type_tag || nonce)`, where `nonce` is a
+per-`(issuer, subject, type)` issuance counter tracked in a new `ISSNONCE`
+storage entry. Any credential ID computed or cached before this change (e.g.
+in off-chain indexes or Verifiable Presentations) corresponds to `nonce = 1`
+and must be recomputed accordingly; existing on-chain records are unaffected
+since storage keys are unchanged for already-issued credentials.

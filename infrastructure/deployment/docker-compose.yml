@@ -1,0 +1,199 @@
+# Blue/green API server environments. Health check semantics are documented
+# in docs/container-health-checks.md (#883).
+#
+# Geo-distributed read replicas (#1051): the primary Postgres instance below
+# accepts writes; the three regional replicas (us/eu/asia) stream from it via
+# physical replication and serve read-only traffic. The API servers use
+# read/write splitting (see DB_REPLICA_* env vars) and route reads to the
+# nearest healthy replica, falling back to the primary on replica failure.
+# Topology is documented in docs/replication-topology.md.
+x-server: &server
+  image: ${IMAGE:-soroban-identity:latest}
+  # Restarts the container when the process exits. Docker itself does not
+  # restart a container that is merely *unhealthy*; that needs an orchestrator
+  # (Kubernetes liveness probe, Swarm) or an autoheal sidecar.
+  restart: unless-stopped
+  # Longer than the server's graceful shutdown timeout (SHUTDOWN_TIMEOUT_MS,
+  # 30 s by default) so in-flight requests drain before SIGKILL.
+  stop_grace_period: 35s
+  healthcheck:
+    # node:20-alpine ships no curl, so probe with the bundled Node script.
+    test: ["CMD", "node", "scripts/healthcheck.mjs", "/live"]
+    interval: 10s
+    timeout: 5s
+    retries: 3
+    start_period: 30s
+  depends_on:
+    primary-db:
+      condition: service_healthy
+
+# Shared Postgres image/config for the primary and its read replicas.
+x-postgres: &postgres
+  image: postgres:16-alpine
+  restart: unless-stopped
+  environment:
+    POSTGRES_USER: ${POSTGRES_USER:-soroban}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be supplied}
+    POSTGRES_DB: ${POSTGRES_DB:-soroban_identity}
+    # Required for physical replication (replica streaming).
+    POSTGRES_INITDB_ARGS: "--data-checksums"
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-soroban} -d ${POSTGRES_DB:-soroban_identity}"]
+    interval: 10s
+    timeout: 5s
+    retries: 5
+    start_period: 20s
+
+# Shared environment for each regional standby.
+x-replica-env: &replica-env
+  POSTGRES_USER: ${POSTGRES_USER:-soroban}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be supplied}
+  POSTGRES_DB: ${POSTGRES_DB:-soroban_identity}
+  PGUSER: ${POSTGRES_USER:-soroban}
+  PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be supplied}
+  PRIMARY_HOST: primary-db
+  PRIMARY_PORT: "5432"
+  REPLICATION_USER: ${REPLICATION_USER:-replicator}
+  REPLICATION_PASSWORD: ${REPLICATION_PASSWORD:?REPLICATION_PASSWORD must be supplied}
+
+# Read replica template. Each replica streams from the primary and is
+# read-only; the API routes reads to the nearest healthy replica.
+x-replica: &replica
+  <<: *postgres
+  environment:
+    <<: *replica-env
+  # Replicas are read-only; writes are rejected and must go to the primary.
+  command: >
+    postgres
+    -c hot_standby=on
+    -c primary_conninfo='host=primary-db port=5432 user=${REPLICATION_USER:-replicator} password=${REPLICATION_PASSWORD:?REPLICATION_PASSWORD must be supplied}'
+    -c primary_slot_name=${REPLICATION_SLOT:-replica_slot}
+  depends_on:
+    primary-db:
+      condition: service_healthy
+
+services:
+  # --- Primary (read/write) -------------------------------------------------
+  primary-db:
+    <<: *postgres
+    # Enables streaming replication and a replication slot for each replica.
+    command: >
+      postgres
+      -c wal_level=replica
+      -c max_wal_senders=10
+      -c max_replication_slots=10
+      -c hot_standby=on
+    ports: ["127.0.0.1:5432:5432"]
+    volumes:
+      - primary-db-data:/var/lib/postgresql/data
+      # Creates the replication role and slots on first boot.
+      - ./initdb/primary:/docker-entrypoint-initdb.d:ro
+
+  # --- Read replicas (US / EU / Asia) --------------------------------------
+  # Each replica is exposed on a distinct host port so the API's nearest-replica
+  # routing and failover logic can be exercised locally.
+  replica-us:
+    <<: *replica
+    environment:
+      <<: *replica-env
+      REGION: us
+    ports: ["127.0.0.1:5433:5432"]
+    volumes:
+      - replica-us-data:/var/lib/postgresql/data
+
+  replica-eu:
+    <<: *replica
+    environment:
+      <<: *replica-env
+      REGION: eu
+    ports: ["127.0.0.1:5434:5432"]
+    volumes:
+      - replica-eu-data:/var/lib/postgresql/data
+
+  replica-asia:
+    <<: *replica
+    environment:
+      <<: *replica-env
+      REGION: asia
+    ports: ["127.0.0.1:5435:5432"]
+    volumes:
+      - replica-asia-data:/var/lib/postgresql/data
+
+  # --- API servers (read/write splitting) ----------------------------------
+  blue:
+    <<: *server
+    environment:
+      COLOR: blue
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be supplied}
+      # Writes always target the primary.
+      DB_PRIMARY_URL: postgres://${POSTGRES_USER:-soroban}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be supplied}@primary-db:5432/${POSTGRES_DB:-soroban_identity}
+      # Reads are routed to the nearest healthy replica; on replica failure the
+      # client fails over to the primary (see DB_REPLICA_FAILOVER).
+      DB_REPLICA_URLS: >-
+        us=postgres://${POSTGRES_USER:-soroban}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be supplied}@replica-us:5432/${POSTGRES_DB:-soroban_identity},
+        eu=postgres://${POSTGRES_USER:-soroban}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be supplied}@replica-eu:5432/${POSTGRES_DB:-soroban_identity},
+        asia=postgres://${POSTGRES_USER:-soroban}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be supplied}@replica-asia:5432/${POSTGRES_DB:-soroban_identity}
+      DB_REPLICA_REGION: ${DB_REPLICA_REGION:-us}
+      DB_REPLICA_FAILOVER: "true"
+      # Replica lag monitoring: warn/abort thresholds in milliseconds.
+      DB_REPLICA_LAG_WARN_MS: "1000"
+      DB_REPLICA_LAG_MAX_MS: "30000"
+      # Eventual consistency: reads that must observe the latest write can be
+      # pinned to the primary via this header/flag.
+      DB_READ_AFTER_WRITE_PRIMARY: "true"
+    ports: ["127.0.0.1:3001:3001"]
+    depends_on:
+      primary-db:
+        condition: service_healthy
+      replica-us:
+        condition: service_healthy
+      replica-eu:
+        condition: service_healthy
+      replica-asia:
+        condition: service_healthy
+
+  green:
+    <<: *server
+    environment:
+      COLOR: green
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be supplied}
+      DB_PRIMARY_URL: postgres://${POSTGRES_USER:-soroban}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be supplied}@primary-db:5432/${POSTGRES_DB:-soroban_identity}
+      DB_REPLICA_URLS: >-
+        us=postgres://${POSTGRES_USER:-soroban}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be supplied}@replica-us:5432/${POSTGRES_DB:-soroban_identity},
+        eu=postgres://${POSTGRES_USER:-soroban}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be supplied}@replica-eu:5432/${POSTGRES_DB:-soroban_identity},
+        asia=postgres://${POSTGRES_USER:-soroban}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be supplied}@replica-asia:5432/${POSTGRES_DB:-soroban_identity}
+      DB_REPLICA_REGION: ${DB_REPLICA_REGION:-us}
+      DB_REPLICA_FAILOVER: "true"
+      DB_REPLICA_LAG_WARN_MS: "1000"
+      DB_REPLICA_LAG_MAX_MS: "30000"
+      DB_READ_AFTER_WRITE_PRIMARY: "true"
+    ports: ["127.0.0.1:3002:3001"]
+    depends_on:
+      primary-db:
+        condition: service_healthy
+      replica-us:
+        condition: service_healthy
+      replica-eu:
+        condition: service_healthy
+      replica-asia:
+        condition: service_healthy
+
+  # Stable entry point. traffic-switch.sh replaces the upstream include and
+  # reloads Nginx gracefully, leaving established requests to drain.
+  router:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports: ["127.0.0.1:8080:8080"]
+    volumes:
+      - ./nginx:/etc/nginx:ro
+    depends_on:
+      blue:
+        condition: service_healthy
+      green:
+        condition: service_healthy
+
+volumes:
+  primary-db-data:
+  replica-us-data:
+  replica-eu-data:
+  replica-asia-data:

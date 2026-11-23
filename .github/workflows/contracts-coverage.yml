@@ -1,0 +1,42 @@
+name: Contract Coverage
+
+on:
+  pull_request:
+    paths: ["contracts/**", ".github/workflows/contracts-coverage.yml"]
+  push:
+    branches: [main]
+    paths: ["contracts/**"]
+  workflow_dispatch:
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Generate coverage & enforce thresholds
+        run: ./contracts/coverage/coverage.sh
+      - uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          files: contracts/coverage/report/lcov.info
+          flags: contracts
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: contract-coverage
+          path: contracts/coverage/report

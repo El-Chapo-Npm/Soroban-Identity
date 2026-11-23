@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Soroban Identity Verifier",
+  "version": "0.1.0",
+  "description": "Browser extension for one-click credential verification, local storage, sync with Soroban Identity, and form auto-fill.",
+  "permissions": [
+    "storage",
+    "contextMenus",
+    "alarms",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "src/popup.html",
+    "default_title": "Soroban Identity Verifier"
+  },
+  "options_ui": {
+    "page": "src/options.html",
+    "open_in_tab": true
+  }
+}

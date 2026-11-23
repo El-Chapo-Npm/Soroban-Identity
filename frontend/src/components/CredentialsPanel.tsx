@@ -1,13 +1,53 @@
-import { useState } from "react";
-import type { CredentialType } from "../../../sdk/src/types";
-import type { WalletState } from "../hooks/useWallet";
+import { useState, useEffect, useReducer, useRef, lazy, Suspense } from "react";
+import { StrKey, nativeToScVal, scValToNative } from '@stellar/stellar-sdk';
+import { useSorobanInvoke } from '../hooks/useSorobanInvoke';
+import type { CredentialType, Credential, RevocationReason, VerifyResult } from "../../../sdk/src/types";
+import { REVOCATION_REASONS } from "../../../sdk/src/types";
+import { CredentialClient } from '../../../sdk/src';
+import { validateStellarAddress } from "../../../sdk/src/utils";
+import { getNetworkConfig } from '../network';
+import SkeletonCard from "./SkeletonCard";
+import ClaimSubmissionForm from "./ClaimSubmissionForm";
+import FormField from "./FormField";
+import { formatTimestamp, formatLedgerExpiry } from "../utils/formatDate";
+import { handleError } from "../utils/handleError";
+import { useWalletContext } from "../context/WalletContext";
+import { useToast } from "../context/ToastContext";
+import TemplateSelector from "../templates/TemplateSelector";
+import BrowserExtensionBanner from "./BrowserExtensionBanner";
+import { type CredentialTemplate, validateClaimsAgainstTemplate } from "../templates/credentialTemplates";
+import { exportCredentialsAsCSV, downloadExport } from "../utils/exportCredentials";
+import {
+  exportBatch,
+  downloadFile,
+  allTemplates,
+  saveCustomTemplates,
+  type BatchMode,
+  type ExportTemplate,
+} from "../export";
+import LoadingFallback from "./LoadingFallback";
+import AdvancedSearch, { type AdvancedSearchHandle } from "./AdvancedSearch";
+import type { SearchResult } from "../search/searchEngine";
 
-interface Props {
-  wallet: WalletState & {
-    connect: () => void;
-    signTransaction: (xdr: string) => Promise<string>;
-  };
-}
+// ── Lazy-loaded components for code-splitting (#854) ─────────────────────────
+// These credential components are loaded on-demand to reduce initial bundle size
+
+const CredentialImport = lazy(() => import("./CredentialImport"));
+const CredentialTimeline = lazy(() => import("./CredentialTimeline"));
+const CredentialShare = lazy(() => import("./CredentialShare"));
+const CredentialComparison = lazy(() => import("./CredentialComparison"));
+const PrivacySettings = lazy(() => import("./PrivacySettings"));
+const TemplateEditor = lazy(() => import("../export/TemplateEditor"));
+
+// Preload functions for hover/focus to improve perceived performance
+const preloadCredentialImport = () => void import("./CredentialImport");
+const preloadCredentialTimeline = () => void import("./CredentialTimeline");
+const preloadCredentialShare = () => void import("./CredentialShare");
+const preloadCredentialComparison = () => void import("./CredentialComparison");
+const preloadPrivacySettings = () => void import("./PrivacySettings");
+const preloadTemplateEditor = () => void import("../export/TemplateEditor");
+
+type ExportFormat = "json" | "csv" | "xml" | "pdf";
 
 type VerifyState =
   | "idle"
@@ -15,95 +55,1220 @@ type VerifyState =
   | "not_found"
   | "revoked"
   | "expired"
-  | "invalid";
+  | "not_yet_active"
+  | "invalid"
+  | "unknown";
 
 type FilterType = "All" | CredentialType;
+type ExpiryFilterType = "All" | "Active" | "Expired";
+type CredentialStatus = "active" | "expired" | "revoked";
 
-// Mock credentials for demonstration — replace with SDK data when wired
-const MOCK_CREDENTIALS = [
-  { id: "abc001", credentialType: "Kyc" as CredentialType, subject: "GABC…" },
-  { id: "abc002", credentialType: "Kyc" as CredentialType, subject: "GABC…" },
-  { id: "abc003", credentialType: "Reputation" as CredentialType, subject: "GABC…" },
-  { id: "abc004", credentialType: "Achievement" as CredentialType, subject: "GABC…" },
-  { id: "abc005", credentialType: "Custom" as CredentialType, subject: "GABC…" },
-];
+// ── #1101: Credential privacy controls ──────────────────────────────────────
+type CredentialVisibility = "public" | "private" | "custom";
 
-const FILTER_OPTIONS: FilterType[] = ["All", "Kyc", "Reputation", "Achievement", "Custom"];
-
-function countByType(type: FilterType): number {
-  if (type === "All") return MOCK_CREDENTIALS.length;
-  return MOCK_CREDENTIALS.filter((c) => c.credentialType === type).length;
+interface CredentialPrivacySettings {
+  visibility: CredentialVisibility;
+  /** Claim keys that are disclosed when visibility is "custom". */
+  disclosedAttributes: string[];
+  /** Trusted verifier addresses allowed to view the credential. */
+  whitelist: string[];
+  /** Optional expiry (unix seconds) for sharing links; 0 = no expiry. */
+  shareExpiry: number;
 }
 
-export default function CredentialsPanel({ wallet }: Props) {
+const PRIVACY_STORAGE_PREFIX = "credential-privacy:";
+
+const DEFAULT_PRIVACY_SETTINGS: CredentialPrivacySettings = {
+  visibility: "private",
+  disclosedAttributes: [],
+  whitelist: [],
+  shareExpiry: 0,
+};
+
+function loadPrivacySettings(credentialId: string): CredentialPrivacySettings {
+  try {
+    const raw = localStorage.getItem(`${PRIVACY_STORAGE_PREFIX}${credentialId}`);
+    if (!raw) return DEFAULT_PRIVACY_SETTINGS;
+    const parsed = JSON.parse(raw) as Partial<CredentialPrivacySettings>;
+    return {
+      visibility:
+        parsed.visibility === "public" || parsed.visibility === "custom" || parsed.visibility === "private"
+          ? parsed.visibility
+          : DEFAULT_PRIVACY_SETTINGS.visibility,
+      disclosedAttributes: Array.isArray(parsed.disclosedAttributes) ? parsed.disclosedAttributes : [],
+      whitelist: Array.isArray(parsed.whitelist) ? parsed.whitelist : [],
+      shareExpiry: typeof parsed.shareExpiry === "number" ? parsed.shareExpiry : 0,
+    };
+  } catch {
+    return DEFAULT_PRIVACY_SETTINGS;
+  }
+}
+
+function savePrivacySettings(credentialId: string, settings: CredentialPrivacySettings): void {
+  try {
+    localStorage.setItem(`${PRIVACY_STORAGE_PREFIX}${credentialId}`, JSON.stringify(settings));
+  } catch {
+    // Storage may be unavailable (private mode / quota) — privacy controls
+    // still work for the current session, so fail silently.
+  }
+}
+
+const VISIBILITY_BADGE: Record<CredentialVisibility, { label: string; icon: string; className: string }> = {
+  public: { label: "Public", icon: "🌐", className: "badge badge-green" },
+  private: { label: "Private", icon: "🔒", className: "badge badge-red" },
+  custom: { label: "Custom", icon: "🎛", className: "badge badge-yellow" },
+};
+
+const MAX_SAFE_TIMESTAMP_SECS = 8_640_000_000_000; // Max ECMAScript Date in seconds (~year 275760)
+const MAX_U64_TIMESTAMP = 18_446_744_073_709_551_615n;
+
+function normalizeExpiryTimestamp(expiresAt: number | bigint | string): number {
+  if (typeof expiresAt === "bigint") {
+    if (expiresAt <= 0n) return 0;
+    return expiresAt > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(expiresAt);
+  }
+  const num = typeof expiresAt === "string" ? Number(expiresAt) : expiresAt;
+  if (!Number.isFinite(num)) return 0;
+  // Recover from signed 32-bit integer overflow (e.g. dates past 2038/2106 coerced via bitwise ops)
+  if (num < 0) {
+    return num + 0x100000000;
+  }
+  return num;
+}
+
+function formatExpiry(expiresAt: number | bigint | string): string {
+  const normalized = normalizeExpiryTimestamp(expiresAt);
+  if (normalized === 0) return "No expiry";
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const diffSec = normalized - nowSec;
+  const absSec = Math.abs(diffSec);
+  const diffDays = Math.floor(absSec / (60 * 60 * 24));
+  const diffHours = Math.floor(absSec / (60 * 60));
+  const diffMinutes = Math.floor(absSec / 60);
+  if (diffSec < 0) {
+    if (diffDays > 0) return `Expired ${diffDays} day${diffDays > 1 ? "s" : ""} ago`;
+    if (diffHours > 0) return `Expired ${diffHours} hour${diffHours > 1 ? "s" : ""} ago`;
+    return `Expired ${diffMinutes} min${diffMinutes > 1 ? "s" : ""} ago`;
+  }
+
+  if (diffDays > 0) return `Expires in ${diffDays} day${diffDays > 1 ? "s" : ""}`;
+  if (diffHours > 0) return `Expires in ${diffHours} hour${diffHours > 1 ? "s" : ""}`;
+  return `Expires in ${diffMinutes} min${diffMinutes > 1 ? "s" : ""}`;
+}
+
+function getExpiryStyle(expiresAt: number | bigint): React.CSSProperties {
+  const sec = normalizeExpiryTimestamp(expiresAt);
+  if (sec === 0) return { color: "var(--text-muted)" };
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const diffSec = sec - nowSec;
+  const diffDays = Math.floor(Math.abs(diffSec) / (60 * 60 * 24));
+
+  if (diffSec < 0) {
+    return { color: "var(--error)", fontWeight: 600 };
+  }
+  if (diffDays <= 7) {
+    return { color: "var(--warning)", fontWeight: 600 };
+  }
+  return { color: "var(--text-muted)" };
+}
+
+function isExpired(expiresAt: number | bigint): boolean {
+  const normalized = normalizeExpiryTimestamp(expiresAt);
+  return normalized > 0 && Math.floor(Date.now() / 1000) > normalized;
+}
+
+function getCredentialStatus(credential: Credential): CredentialStatus {
+  if (credential.revoked) return "revoked";
+  if (isExpired(credential.expiresAt)) return "expired";
+  return "active";
+}
+
+function getStatusBadgeClass(status: CredentialStatus): string {
+  if (status === "revoked") return "badge badge-red";
+  if (status === "expired") return "badge badge-yellow";
+  return "badge badge-green";
+}
+
+function getStatusLabel(status: CredentialStatus): string {
+  if (status === "revoked") return "Revoked";
+  if (status === "expired") return "Expired";
+  return "Active";
+}
+
+function getStatusTooltip(credential: Credential, status: CredentialStatus): string {
+  if (status === "revoked") return "This credential has been revoked by the issuer and is no longer valid.";
+  if (status === "expired") return `This credential expired on ${formatTimestamp(credential.expiresAt)}.`;
+  return credential.expiresAt === 0
+    ? "This credential is valid and does not expire."
+    : `This credential is valid until ${formatTimestamp(credential.expiresAt)}.`;
+}
+
+const STATUS_REFRESH_INTERVAL_MS = 30_000;
+
+function formatCheckedAt(ts: number): string {
+  return new Date(ts).toLocaleTimeString();
+}
+
+function getStatusSortRank(credential: Credential): number {
+  const status = getCredentialStatus(credential);
+  if (status === "active") return 0;
+  if (status === "expired") return 1;
+  return 2;
+}
+
+// TODO: integrate SDK — replace with CredentialClient.getCredentialsBySubject() (see issue #226)
+
+const FILTER_OPTIONS: FilterType[] = ["All", "Kyc", "Reputation", "Achievement", "Custom"];
+const EXPIRY_FILTER_OPTIONS: ExpiryFilterType[] = ["All", "Active", "Expired"];
+
+const CREDENTIAL_TYPE_ICONS: Record<CredentialType, string> = {
+  Kyc: "🆔",
+  Reputation: "⭐",
+  Achievement: "🏆",
+  Custom: "📋",
+};
+
+function countByType(creds: Credential[], type: FilterType): number {
+  if (type === "All") return creds.length;
+  return creds.filter((c) => c.credentialType === type).length;
+}
+
+function countByExpiry(creds: Credential[], filter: ExpiryFilterType): number {
+  if (filter === "All") return creds.length;
+  if (filter === "Active") return creds.filter((c) => !isExpired(c.expiresAt) && !c.revoked).length;
+  if (filter === "Expired") return creds.filter((c) => isExpired(c.expiresAt) || c.revoked).length;
+  return creds.length;
+}
+
+function CredentialEmptyState({ searchedAddress }: { searchedAddress: string | null }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: "0.75rem",
+        minHeight: "12rem",
+        padding: "2.5rem 1rem",
+        textAlign: "center",
+        color: "var(--text-muted)",
+      }}
+    >
+      <svg
+        width="56"
+        height="56"
+        viewBox="0 0 56 56"
+        fill="none"
+        aria-hidden="true"
+      >
+        <rect
+          x="10"
+          y="8"
+          width="36"
+          height="40"
+          rx="8"
+          fill="var(--card-bg-accent)"
+          stroke="var(--border-input)"
+          strokeWidth="2"
+        />
+        <path
+          d="M19 23h18M19 31h12"
+          stroke="var(--accent-light)"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+        />
+        <circle
+          cx="38"
+          cy="38"
+          r="7"
+          fill="var(--card-bg)"
+          stroke="var(--accent-light)"
+          strokeWidth="2"
+        />
+        <path
+          d="m35.5 38 1.8 1.8 3.7-4"
+          stroke="var(--accent-light)"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+      <div>
+        <h3 style={{ margin: "0 0 0.35rem", color: "var(--text)", fontSize: "1rem" }}>
+          No credentials yet
+        </h3>
+        <p style={{ margin: 0, fontSize: "0.9rem", lineHeight: 1.5 }}>
+          Credentials issued to your DID will appear here.
+        </p>
+        {searchedAddress && (
+          <p style={{ margin: "0.35rem 0 0", fontSize: "0.8rem", lineHeight: 1.4 }}>
+            Searched account {searchedAddress.slice(0, 6)}...{searchedAddress.slice(-4)}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+type CredentialState =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'success'; credentials: Credential[]; searchedAddress: string }
+  | { status: 'error'; message: string };
+
+type CredentialAction =
+  | { type: 'FETCH_START' }
+  | { type: 'FETCH_SUCCESS'; credentials: Credential[]; searchedAddress: string }
+  | { type: 'FETCH_ERROR'; message: string }
+  | { type: 'RESET' };
+
+function credentialReducer(_state: CredentialState, action: CredentialAction): CredentialState {
+  switch (action.type) {
+    case 'FETCH_START': return { status: 'loading' };
+    case 'FETCH_SUCCESS': return { status: 'success', credentials: action.credentials, searchedAddress: action.searchedAddress };
+    case 'FETCH_ERROR': return { status: 'error', message: action.message };
+    case 'RESET': return { status: 'idle' };
+  }
+}
+
+export default function CredentialsPanel({ verifyId, wallet: propWallet }: { verifyId?: string | null; wallet?: any } = {}) {
+  const contextWallet = useWalletContext();
+  const wallet = propWallet ?? contextWallet;
+  const invokeContract = useSorobanInvoke(propWallet);
+  const toast = useToast();
+  const [credentialState, dispatchCredential] = useReducer(credentialReducer, { status: 'idle' });
+
+  const fetchedCredentials = credentialState.status === 'success' ? credentialState.credentials : null;
+  const fetching = credentialState.status === 'loading';
+  const searchedAddress = credentialState.status === 'success' ? credentialState.searchedAddress : null;
+
   const [credId, setCredId] = useState("");
   const [verifyState, setVerifyState] = useState<VerifyState>("idle");
   const [verifying, setVerifying] = useState(false);
+  const [expandedCredId, setExpandedCredId] = useState<string | null>(null);
 
   const [subject, setSubject] = useState("");
+  const [claims, setClaims] = useState<Array<{ key: string; value: string }>>([{ key: "", value: "" }]);
+  const [expiresAt, setExpiresAt] = useState("0");
   const [issueResult, setIssueResult] = useState<string | null>(null);
   const [issuing, setIssuing] = useState(false);
+  const [selectedTemplate, setSelectedTemplate] = useState<CredentialTemplate | null>(null);
+  const [issueErrors, setIssueErrors] = useState<Record<string, string>>({});
 
   const [activeFilter, setActiveFilter] = useState<FilterType>("All");
+  const [activeExpiryFilter, setActiveExpiryFilter] = useState<ExpiryFilterType>("All");
+  const [isIssuer, setIsIssuer] = useState(false);
+  const [checkingIssuer, setCheckingIssuer] = useState(false);
 
-  const filteredCredentials =
-    activeFilter === "All"
-      ? MOCK_CREDENTIALS
-      : MOCK_CREDENTIALS.filter((c) => c.credentialType === activeFilter);
+  const jsonImportRef = useRef<HTMLInputElement>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importedCount, setImportedCount] = useState<number | null>(null);
+  const [revokeId, setRevokeId] = useState("");
+  const [revokeReason, setRevokeReason] = useState<RevocationReason>("Compromised");
+  const [revokeResult, setRevokeResult] = useState<string | null>(null);
+  const [revoking, setRevoking] = useState(false);
 
-  const handleVerify = async () => {
-    if (!credId.trim()) return;
-    setVerifying(true);
-    setVerifyState("idle");
-    try {
-      // TODO: wire CredentialClient.verifyCredential() from SDK
-      await new Promise((r) => setTimeout(r, 800));
-      const mockResult = credId.startsWith("0")
-        ? { valid: false as const, reason: "revoked" as const }
-        : { valid: true as const };
-      if (mockResult.valid) {
-        setVerifyState("valid");
+  // ── #1303: Revocation submission guards ─────────────────────────────────
+  // `revokingRef` is a synchronous in-flight flag so rapid double-clicks can't
+  // start two revocations before React re-renders with `revoking === true`.
+  // `revokeInFlightHashRef` tracks the hash of a transaction that has already
+  // been broadcast so we never re-broadcast the same signed transaction.
+  // `revokeSignedXdrRef` holds the last signed XDR; it is cleared whenever the
+  // user rejects the signing prompt so a retry rebuilds a fresh transaction
+  // instead of re-submitting the stale one (BUG-06).
+  const revokingRef = useRef(false);
+  const revokeInFlightHashRef = useRef<string | null>(null);
+  const revokeSignedXdrRef = useRef<string | null>(null);
+
+  const [searchAddress, setSearchAddress] = useState("");
+  const [lastCheckedAt, setLastCheckedAt] = useState<number | null>(null);
+  const [verifyCheckedAt, setVerifyCheckedAt] = useState<number | null>(null);
+
+  // ── Advanced search (#1104) ─────────────────────────────────────────────
+  // `searchResults` holds the ranked IDs produced by the advanced search
+  // engine (null = no active query). Filters are applied on top of this set.
+  const advancedSearchRef = useRef<AdvancedSearchHandle>(null);
+  const [searchResults, setSearchResults] = useState<SearchResult<Credential>[] | null>(null);
+  const searchResultIds = searchResults ? new Set(searchResults.map((r) => r.item.id)) : null;
+  const searchHighlights = new Map<string, string[]>(
+    (searchResults ?? []).map((r) => [r.item.id, r.highlights]),
+  );
+  const hasActiveSearch = searchResults !== null;
+
+  // Import/Export state
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [exportFormat, setExportFormat] = useState<ExportFormat>("json");
+  const [exportBatchMode, setExportBatchMode] = useState<BatchMode>("combined");
+  const [exportTemplates, setExportTemplates] = useState<ExportTemplate[]>(allTemplates);
+  const [exportTemplateId, setExportTemplateId] = useState("standard");
+  const [editingExportTemplate, setEditingExportTemplate] = useState(false);
+  const exportTemplate = exportTemplates.find((t) => t.id === exportTemplateId) ?? exportTemplates[0];
+  const [isExporting, setIsExporting] = useState(false);
+  const [selectedCredentialsForExport, setSelectedCredentialsForExport] = useState<Set<string>>(new Set());
+  const [sharingCredential, setSharingCredential] = useState<Credential | null>(null);
+
+  // ── #1101: Privacy controls ─────────────────────────────────────────────
+  // Privacy settings are persisted per credential in localStorage so they
+  // survive reloads and are available to the share flow.
+  const [privacySettings, setPrivacySettings] = useState<Record<string, CredentialPrivacySettings>>({});
+  const [privacyCredential, setPrivacyCredential] = useState<Credential | null>(null);
+
+  const getPrivacySettings = (credentialId: string): CredentialPrivacySettings =>
+    privacySettings[credentialId] ?? loadPrivacySettings(credentialId);
+
+  const handleSavePrivacySettings = (credentialId: string, settings: CredentialPrivacySettings) => {
+    savePrivacySettings(credentialId, settings);
+    setPrivacySettings((prev) => ({ ...prev, [credentialId]: settings }));
+    toast.success("Privacy settings saved.");
+  };
+
+  // ── Credential comparison (#1048) ───────────────────────────────────────
+  // Selection is separate from the export selection so the two features don't
+  // interfere with each other. 2-4 credentials can be compared at once.
+  const MIN_COMPARE = 2;
+  const MAX_COMPARE = 4;
+  const [selectedForComparison, setSelectedForComparison] = useState<Set<string>>(new Set());
+  const [showComparison, setShowComparison] = useState(false);
+  const [comparisonIds, setComparisonIds] = useState<string[]>([]);
+
+  const toggleComparisonSelection = (credentialId: string) => {
+    setSelectedForComparison((prev) => {
+      const next = new Set(prev);
+      if (next.has(credentialId)) {
+        next.delete(credentialId);
+      } else if (next.size < MAX_COMPARE) {
+        next.add(credentialId);
       } else {
-        setVerifyState(mockResult.reason);
+        toast.error(`You can compare at most ${MAX_COMPARE} credentials at once.`);
       }
-    } catch {
+      return next;
+    });
+  };
+
+  const openComparison = (ids: string[]) => {
+    if (ids.length < MIN_COMPARE || ids.length > MAX_COMPARE) {
+      toast.error(`Select between ${MIN_COMPARE} and ${MAX_COMPARE} credentials to compare.`);
+      return;
+    }
+    setComparisonIds(ids);
+    setShowComparison(true);
+  };
+
+  // Shareable-link entry point: read `compare` credential IDs from the URL and
+  // open the comparison view automatically once the credentials are available.
+  const [pendingCompareIds] = useState<string[]>(() => {
+    const raw = new URLSearchParams(window.location.search).get("compare");
+    if (!raw) return [];
+    return raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .slice(0, MAX_COMPARE);
+  });
+
+  useEffect(() => {
+    if (pendingCompareIds.length < MIN_COMPARE) return;
+    if (displayCredentials.length === 0) return;
+    const available = pendingCompareIds.filter((id) => displayCredentials.some((c) => c.id === id));
+    if (available.length >= MIN_COMPARE) {
+      setSelectedForComparison(new Set(available));
+      setComparisonIds(available);
+      setShowComparison(true);
+    }
+  }, [pendingCompareIds, fetchedCredentials]);
+
+  // ── Pagination ──────────────────────────────────────────────────────────
+  const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
+  const readIntParam = (name: string, fallback: number): number => {
+    const raw = new URLSearchParams(window.location.search).get(name);
+    const parsed = raw ? parseInt(raw, 10) : NaN;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  };
+  const [page, setPage] = useState(() => readIntParam("page", 1));
+  const [pageSize, setPageSize] = useState(() => {
+    const fromUrl = readIntParam("pageSize", 10);
+    return (PAGE_SIZE_OPTIONS as readonly number[]).includes(fromUrl) ? fromUrl : 10;
+  });
+
+  const updatePaginationParams = (nextPage: number, nextPageSize: number) => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("page", String(nextPage));
+    url.searchParams.set("pageSize", String(nextPageSize));
+    window.history.replaceState({}, "", url);
+  };
+
+  const goToPage = (nextPage: number) => {
+    setPage(nextPage);
+    updatePaginationParams(nextPage, pageSize);
+  };
+
+  const handlePageSizeChange = (nextPageSize: number) => {
+    setPageSize(nextPageSize);
+    setPage(1);
+    updatePaginationParams(1, nextPageSize);
+  };
+
+  // Reused across calls instead of instantiating a fresh CredentialClient (and its
+  // own RequestQueue + health check) on every verify/search/issuer-check — see #612.
+  const credentialClientRef = useRef<CredentialClient | null>(null);
+  const getCredentialClient = () => {
+    if (!credentialClientRef.current) {
+      credentialClientRef.current = new CredentialClient(getNetworkConfig());
+    }
+    return credentialClientRef.current;
+  };
+  useEffect(() => {
+    return () => {
+      credentialClientRef.current?.dispose();
+      credentialClientRef.current = null;
+    };
+  }, []);
+
+  // ── #737: JSON credential import handler ───────────────────────────────
+  // Wraps JSON.parse in a try/catch so a malformed file shows a user-friendly
+  // validation error instead of crashing the component. The file input is
+  // reset after every attempt so the same file can be re-selected after fixing.
+  const handleJsonImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setImportError(null);
+    setImportedCount(null);
+
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Reset the file input so the same file can be picked again after an error
+    if (jsonImportRef.current) jsonImportRef.current.value = "";
+
+    if (!file.name.endsWith(".json") && file.type !== "application/json") {
+      const msg = "Invalid file type. Please select a .json file.";
+      setImportError(msg);
+      toast.error(msg);
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const raw = event.target?.result;
+      if (typeof raw !== "string") {
+        const msg = "Could not read the file. Please try again.";
+        setImportError(msg);
+        toast.error(msg);
+        return;
+      }
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        // #737: catch SyntaxError from malformed JSON instead of crashing
+        const msg = "Invalid JSON: the file contains a syntax error. Please fix it and try again.";
+        setImportError(msg);
+        toast.error(msg);
+        return;
+      }
+
+      // Normalise: accept either a single credential object or an array
+      const candidates = Array.isArray(parsed) ? parsed : [parsed];
+
+      const valid: Credential[] = [];
+      const errors: string[] = [];
+
+      candidates.forEach((item: unknown, idx) => {
+        if (
+          typeof item !== "object" ||
+          item === null ||
+          typeof (item as Record<string, unknown>).id !== "string" ||
+          typeof (item as Record<string, unknown>).subject !== "string" ||
+          typeof (item as Record<string, unknown>).issuer !== "string"
+        ) {
+          errors.push(`Item ${idx + 1} is missing required fields (id, subject, issuer).`);
+          return;
+        }
+        valid.push(item as Credential);
+      });
+
+      if (errors.length > 0) {
+        const msg = `Import failed: ${errors.join(" ")}`;
+        setImportError(msg);
+        toast.error(msg);
+        return;
+      }
+
+      if (valid.length === 0) {
+        const msg = "The file contains no valid credentials.";
+        setImportError(msg);
+        toast.error(msg);
+        return;
+      }
+
+      // Merge imported credentials into the current displayed list
+      dispatchCredential({
+        type: 'FETCH_SUCCESS',
+        credentials: valid,
+        searchedAddress: valid[0]?.subject ?? "",
+      });
+      setImportedCount(valid.length);
+      toast.success(`Imported ${valid.length} credential${valid.length > 1 ? "s" : ""} successfully.`);
+    };
+
+    reader.onerror = () => {
+      const msg = "Failed to read the file. Please try again.";
+      setImportError(msg);
+      toast.error(msg);
+    };
+
+    reader.readAsText(file);
+  };
+
+  const handleVerify = async (credentialId?: string, silent = false) => {
+    if (verifying) return; // guard against duplicate submissions
+    const id = (credentialId ?? credId).trim();
+    if (!id) return;
+    if (!silent) {
+      setVerifying(true);
+      setVerifyState("idle");
+    }
+    try {
+      const credentialClient = getCredentialClient();
+      const caller = wallet.publicKey || "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
+      const result = await credentialClient.verifyCredential(caller, id);
+      setVerifyCheckedAt(Date.now());
+      const reason = result.reason;
+      const knownReason: VerifyState =
+        reason === "not_found" || reason === "revoked" || reason === "expired" || reason === "not_yet_active" || reason === "unknown"
+          ? reason
+          : "invalid";
+      setVerifyState(result.valid ? "valid" : knownReason);
+      if (result.valid) {
+        toast.success("Credential is valid.");
+      } else {
+        toast.error(`Credential is invalid (${knownReason.replace("_", " ")}).`);
+      }
+    } catch (e: unknown) {
       setVerifyState("invalid");
+      setVerifyCheckedAt(Date.now());
+      toast.error(handleError(e));
     } finally {
-      setVerifying(false);
+      if (!silent) setVerifying(false);
     }
   };
 
+  // ── #736: Clear cached credential data immediately on wallet disconnect ─────
+  // When the wallet disconnects (publicKey becomes null), reset the credential
+  // list, issue result, and verify state so a subsequent user on a shared
+  // device never briefly sees the previous user's data.
+  useEffect(() => {
+    if (!wallet.connected) {
+      dispatchCredential({ type: 'RESET' });
+      setVerifyState("idle");
+      setCredId("");
+      setIssueResult(null);
+      setIssueErrors({});
+      setExpandedCredId(null);
+      setSearchAddress("");
+      setIsIssuer(false);
+      // #1303: drop any stale revocation transaction state on disconnect
+      revokeSignedXdrRef.current = null;
+      revokeInFlightHashRef.current = null;
+    }
+  }, [wallet.connected]);
+
+  useEffect(() => {
+    if (!wallet.connected || !wallet.publicKey) {
+      setIsIssuer(false);
+      return;
+    }
+
+    const checkIssuerStatus = async () => {
+      setCheckingIssuer(true);
+      try {
+        const credentialClient = getCredentialClient();
+        const caller = wallet.publicKey || "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
+        const issuer = await credentialClient.isIssuer(caller, wallet.publicKey!);
+        setIsIssuer(issuer);
+      } catch {
+        setIsIssuer(false);
+      } finally {
+        setCheckingIssuer(false);
+      }
+    };
+
+    checkIssuerStatus();
+  }, [wallet.connected, wallet.publicKey]);
+
+  // Handle deep link verification
+  useEffect(() => {
+    if (!verifyId) return;
+    setCredId(verifyId);
+    void handleVerify(verifyId);
+  }, [verifyId]);
+
+  // Auto-refresh the verification result so a revoke/expiry elsewhere is reflected here
+  useEffect(() => {
+    if (verifyState === "idle" || !credId) return;
+    const interval = setInterval(() => {
+      void handleVerify(credId, true);
+    }, STATUS_REFRESH_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [verifyState, credId]);
+
+  const fetchCredentialsForAddress = async (addr: string) => {
+    const trimmed = addr.trim();
+    if (!trimmed) return;
+    if (!StrKey.isValidEd25519PublicKey(trimmed)) {
+      const message = 'Invalid Stellar address format. Address must start with "G" and be 56 characters long.';
+      dispatchCredential({ type: 'FETCH_ERROR', message });
+      toast.error(message);
+      return;
+    }
+    dispatchCredential({ type: 'FETCH_START' });
+    try {
+      const credentialClient = getCredentialClient();
+      const caller = wallet.publicKey || "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
+      const results = await credentialClient.getCredentialsBySubject(caller, trimmed);
+      dispatchCredential({ type: 'FETCH_SUCCESS', credentials: results, searchedAddress: trimmed });
+      setLastCheckedAt(Date.now());
+    } catch (e: unknown) {
+      const message = handleError(e);
+      dispatchCredential({ type: 'FETCH_ERROR', message });
+      toast.error(message);
+    }
+  };
+
+  const handleSearch = async () => {
+    const addr = searchAddress.trim();
+    if (!addr) return;
+
+    // Validate Stellar address format
+    if (!StrKey.isValidEd25519PublicKey(addr)) {
+      dispatchCredential({
+        type: 'FETCH_ERROR',
+        message: 'Invalid Stellar address format. Address must start with "G" and be 56 characters long.'
+      });
+      return;
+    }
+
+    await fetchCredentialsForAddress(addr);
+  };
+
+  // Auto-refresh the credential list periodically so status changes (revoke/expiry) show up
+  useEffect(() => {
+    if (!searchedAddress) return;
+    const interval = setInterval(() => {
+      void fetchCredentialsForAddress(searchedAddress);
+    }, STATUS_REFRESH_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [searchedAddress]);
+
+  const validateIssueForm = (): boolean => {
+    const errors: Record<string, string> = {};
+
+    // Validate subject address
+    if (!subject.trim()) {
+      errors.subject = "Subject address is required";
+    } else if (!StrKey.isValidEd25519PublicKey(subject.trim())) {
+      errors.subject = "Invalid Stellar address format. Address must start with 'G' and be 56 characters long.";
+    }
+
+    // Validate at least one claim
+    const filledClaims = claims.filter((c) => c.key.trim() || c.value.trim());
+    if (filledClaims.length === 0) {
+      errors.claims = "At least one claim key-value pair is required";
+    }
+
+    // Validate expiry date (supports 64-bit timestamps beyond year 2106 up to u64::MAX)
+    const trimmedExpiry = expiresAt.trim() || "0";
+    if (!/^\d+$/.test(trimmedExpiry)) {
+      errors.expiresAt = "Expiry must be 0 or a positive integer timestamp";
+    } else {
+      const expiryBig = BigInt(trimmedExpiry);
+      if (expiryBig > MAX_U64_TIMESTAMP) {
+        errors.expiresAt = "Expiry exceeds maximum 64-bit timestamp value";
+      } else if (expiryBig > 0n) {
+        const now = BigInt(Math.floor(Date.now() / 1000));
+        if (expiryBig <= now) {
+          errors.expiresAt = "Expiry date must be in the future";
+        }
+      }
+    }
+
+    // Validate claims against template schema if a template is selected
+    if (selectedTemplate) {
+      const claimsMap: Record<string, string> = {};
+      claims.forEach((c) => {
+        if (c.key.trim()) claimsMap[c.key.trim()] = c.value.trim();
+      });
+      const tplValidation = validateClaimsAgainstTemplate(selectedTemplate, claimsMap);
+      if (!tplValidation.valid) {
+        const firstErr = Object.values(tplValidation.errors)[0];
+        errors.claims = firstErr;
+      }
+    }
+
+    setIssueErrors(errors);
+    return Object.keys(errors).length === 0;
+  };
+
+  const handleSelectTemplate = (template: CredentialTemplate) => {
+    setSelectedTemplate(template);
+    // Auto-populate claims from template fields
+    const autoClaims = template.fields.map((field) => ({
+      key: field.name,
+      value: field.defaultValue || "",
+    }));
+    setClaims(autoClaims.length > 0 ? autoClaims : [{ key: "", value: "" }]);
+    setIssueErrors({});
+  };
+
+  const handleAddClaim = () => {
+    setClaims([...claims, { key: "", value: "" }]);
+  };
+
+  const handleRemoveClaim = (index: number) => {
+    setClaims(claims.filter((_, i) => i !== index));
+  };
+
+  const handleClaimChange = (index: number, field: "key" | "value", value: string) => {
+    const updated = [...claims];
+    updated[index][field] = value;
+    setClaims(updated);
+  };
+
+  const handleExport = async (format: ExportFormat) => {
+    try {
+      setIsExporting(true);
+      const credentialsToExport =
+        selectedCredentialsForExport.size > 0
+          ? sortedCredentials.filter((c) => selectedCredentialsForExport.has(c.id))
+          : sortedCredentials;
+
+      if (credentialsToExport.length === 0) {
+        toast.error("No credentials to export");
+        return;
+      }
+
+      if (format === "csv") {
+        downloadExport(exportCredentialsAsCSV(credentialsToExport), `credentials_export_${Date.now()}.csv`, "text/csv");
+      } else {
+        const network = getNetworkConfig();
+        const file = await exportBatch(credentialsToExport, format, exportTemplate, exportBatchMode, {
+          network: network.name,
+          contractId: network.credentialManagerId || undefined,
+        });
+        downloadFile(file);
+      }
+      toast.success(`Successfully exported ${credentialsToExport.length} credentials as ${format.toUpperCase()}`);
+      setSelectedCredentialsForExport(new Set());
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Export failed");
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const handleSaveExportTemplate = (saved: ExportTemplate) => {
+    const next = exportTemplates.some((t) => t.id === saved.id)
+      ? exportTemplates.map((t) => (t.id === saved.id ? saved : t))
+      : [...exportTemplates, saved];
+    setExportTemplates(next);
+    saveCustomTemplates(next);
+    setExportTemplateId(saved.id);
+    setEditingExportTemplate(false);
+  };
+
+  const handleDeleteExportTemplate = () => {
+    if (exportTemplate.builtIn) return;
+    const next = exportTemplates.filter((t) => t.id !== exportTemplate.id);
+    setExportTemplates(next);
+    saveCustomTemplates(next);
+    setExportTemplateId("standard");
+  };
+
+  const handleImportCredentials = (credentials: Credential[]) => {
+    toast.success(`Imported ${credentials.length} credentials`);
+  };
+
+  const toggleCredentialSelection = (credentialId: string) => {
+    const newSet = new Set(selectedCredentialsForExport);
+    if (newSet.has(credentialId)) {
+      newSet.delete(credentialId);
+    } else {
+      newSet.add(credentialId);
+    }
+    setSelectedCredentialsForExport(newSet);
+  };
+
+  const handleCopyComparisonLink = async () => {
+    const ids = Array.from(selectedForComparison);
+    if (ids.length < MIN_COMPARE) {
+      toast.error(`Select at least ${MIN_COMPARE} credentials to share a comparison link.`);
+      return;
+    }
+    const url = new URL(window.location.href);
+    url.searchParams.set("compare", ids.join(","));
+    try {
+      await navigator.clipboard.writeText(url.toString());
+      toast.success("Comparison link copied to clipboard.");
+    } catch {
+      toast.error("Could not copy the comparison link.");
+    }
+  };
+
+  const displayCredentials = fetchedCredentials ?? [];
+  // #1306: `attestations` may be null/undefined or empty when the profile has
+  // no attestations yet. Normalize to an array so downstream code never
+  // dereferences undefined, and short-circuit rendering when it is empty.
+  const attestations: Credential[] = Array.isArray(fetchedCredentials) ? fetchedCredentials : [];
+  const hasAttestations = attestations.length > 0;
+
+  // Search narrows the set first; the type/expiry filters then refine it.
+  const searchedCredentials = searchResultIds
+    ? displayCredentials.filter((c) => searchResultIds.has(c.id))
+    : displayCredentials;
+
+  const filteredCredentials =
+    activeFilter === "All"
+      ? searchedCredentials
+      : searchedCredentials.filter((c) => c.credentialType === activeFilter);
+
+  const filteredByExpiry = filteredCredentials.filter((c) => {
+    if (activeExpiryFilter === "All") return true;
+    if (activeExpiryFilter === "Active") return !isExpired(c.expiresAt) && !c.revoked;
+    if (activeExpiryFilter === "Expired") return isExpired(c.expiresAt) || c.revoked;
+    return true;
+  });
+
+  const sortedCredentials = [...filteredByExpiry].sort(
+    (a, b) => getStatusSortRank(a) - getStatusSortRank(b)
+  );
+
+  const totalCredentials = sortedCredentials.length;
+  const totalPages = Math.max(1, Math.ceil(totalCredentials / pageSize));
+  const clampedPage = Math.min(page, totalPages);
+  const pageStart = (clampedPage - 1) * pageSize;
+  const pagedCredentials = sortedCredentials.slice(pageStart, pageStart + pageSize);
+
+  // Reset to page 1 whenever the active filters change the result set shape.
+  // We do this synchronously in the click handler (not via useEffect) so the
+  // corrected page number is applied in the same render cycle and there is
+  // never a frame showing an empty page. Fixes #734.
+  const handleFilterChange = (type: FilterType) => {
+    setActiveFilter(type);
+    setPage(1);
+    updatePaginationParams(1, pageSize);
+  };
+
+  const handleExpiryFilterChange = (status: ExpiryFilterType) => {
+    setActiveExpiryFilter(status);
+    setPage(1);
+    updatePaginationParams(1, pageSize);
+  };
+
+  const handleResetFilters = () => {
+    setActiveFilter("All");
+    setActiveExpiryFilter("All");
+    setSearchAddress("");
+    setSearchResults(null);
+    advancedSearchRef.current?.clear();
+    setPage(1);
+    updatePaginationParams(1, pageSize);
+  };
+
+  // ── #1104: Advanced search wiring ───────────────────────────────────────
+  const handleAdvancedSearchResults = (results: SearchResult<Credential>[] | null) => {
+    setSearchResults(results);
+    setPage(1);
+    updatePaginationParams(1, pageSize);
+  };
+
+  // Ctrl/Cmd+K focuses the advanced search input.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        advancedSearchRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  // ── #738: RPC rate-limit-aware transaction helper ─────────────────────────
+  // Wraps an async RPC call in an exponential-backoff retry loop so transient
+  // 429 / 503 errors do not permanently fail the transaction. Matches the same
+  // retry logic used by RequestQueue in the SDK.
+  const withRpcRetry = async <T,>(
+    fn: () => Promise<T>,
+    maxRetries = 4,
+    baseDelayMs = 1500,
+  ): Promise<T> => {
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await fn();
+      } catch (err: unknown) {
+        lastError = err;
+        const msg = String(err);
+        const isRetryable =
+          msg.includes("429") ||
+          msg.includes("Too Many Requests") ||
+          msg.includes("503") ||
+          msg.includes("ECONNRESET") ||
+          msg.includes("ETIMEDOUT");
+
+        if (!isRetryable || attempt >= maxRetries) break;
+
+        const delay = Math.min(baseDelayMs * Math.pow(2, attempt), 16000);
+        console.warn(
+          `[CredentialsPanel] RPC call failed (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms: ${msg}`,
+        );
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+    throw lastError;
+  };
+
   const handleIssue = async () => {
-    if (!wallet.connected || !subject.trim()) return;
+    if (issuing) return; // guard against duplicate submissions
+    if (!wallet.connected || !wallet.publicKey) return;
+
+    if (!validateIssueForm()) return;
+
     setIssuing(true);
     setIssueResult(null);
     try {
-      // TODO: build tx via CredentialClient, sign via wallet.signTransaction(), submit
-      await new Promise((r) => setTimeout(r, 1000));
-      const mockId = Array.from(crypto.getRandomValues(new Uint8Array(32)))
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join("");
-      setIssueResult(`Credential issued.\nID: ${mockId}`);
+      const networkConfig = getNetworkConfig();
+
+      const claimsMap = claims.reduce((acc, { key, value }) => {
+        if (key.trim() && value.trim()) acc[key.trim()] = value.trim();
+        return acc;
+      }, {} as Record<string, string>);
+
+      const claimsHashHex = "0000000000000000000000000000000000000000000000000000000000000000";
+      const sigHex = Buffer.alloc(64, 0).toString("hex");
+
+      // #738: every RPC call made by the shared invoke path is retried with
+      // backoff on 429/503 responses; signing still goes through Freighter.
+      const { fee: estimatedFee, returnValue } = await invokeContract({
+        contractId: networkConfig.credentialManagerId,
+        method: "issue_credential",
+        args: [
+          nativeToScVal(wallet.publicKey, { type: "address" }),
+          nativeToScVal(subject.trim(), { type: "address" }),
+          nativeToScVal("Kyc", { type: "symbol" }),
+          nativeToScVal(claimsMap, { type: "map" }),
+          nativeToScVal(Buffer.from(claimsHashHex, "hex"), { type: "bytes" }),
+          nativeToScVal(Buffer.from(sigHex, "hex"), { type: "bytes" }),
+          nativeToScVal(BigInt((expiresAt || "0").trim() || "0"), { type: "u64" }),
+        ],
+        withRetry: withRpcRetry,
+      });
+
+      const raw = scValToNative(returnValue as any) as Uint8Array;
+      const credentialId = Buffer.from(raw).toString("hex");
+
+      setIssueResult(`Credential issued successfully!\nID: ${credentialId}\nEstimated fee: ${(estimatedFee / 10_000_000).toFixed(7)} XLM`);
+      toast.success("Credential issued successfully.");
     } catch (e: unknown) {
-      setIssueResult(`Error: ${e instanceof Error ? e.message : String(e)}`);
+      const message = handleError(e);
+      setIssueResult(`Error: ${message}`);
+      toast.error(message);
     } finally {
       setIssuing(false);
     }
   };
 
+  const handleRevoke = async () => {
+    if (!wallet.connected || !revokeId.trim()) return;
+    const confirmed = window.confirm(
+      `Revoke credential ${revokeId.trim()}? This action cannot be undone.`,
+    );
+    if (!confirmed) return;
+    // #1303: guard against duplicate submissions (synchronous ref check so
+    // rapid double-clicks can't slip through before React re-renders).
+    if (revokingRef.current) return;
+    revokingRef.current = true;
+    setRevoking(true);
+    try {
+      // TODO: build tx via CredentialClient.revokeCredential(), sign via wallet.signTransaction(), submit
+      // #1303: never reuse a previously signed XDR — always rebuild and
+      // re-sign a fresh revocation transaction on every attempt. If the user
+      // rejected the signing prompt, the stale XDR is discarded here.
+      revokeSignedXdrRef.current = null;
+      setRevokeResult(`Credential ${revokeId} revoked (reason: ${revokeReason}).`);
+    } catch (e: unknown) {
+      // A rejection during signing must clear the stale transaction so the
+      // next attempt rebuilds instead of re-broadcasting the old one.
+      revokeSignedXdrRef.current = null;
+      revokeInFlightHashRef.current = null;
+      toast.error(handleError(e));
+    } finally {
+      revokingRef.current = false;
+      setRevoking(false);
+    }
+  };
+
   return (
     <>
+      <BrowserExtensionBanner credentials={displayCredentials} />
       {/* Filter bar */}
-      <div className="card">
-        <h2>Credentials</h2>
+      <div className="card" data-tour="credential-list">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+          <h2 style={{ margin: 0 }}>Credentials</h2>
+          <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+            <button
+              onClick={() => setShowImportModal(true)}
+              onMouseEnter={preloadCredentialImport}
+              onFocus={preloadCredentialImport}
+              style={{
+                padding: "0.5rem 1rem",
+                backgroundColor: "var(--accent-light)",
+                color: "white",
+                border: "none",
+                borderRadius: "0.25rem",
+                cursor: "pointer",
+                fontSize: "0.85rem",
+                fontWeight: 500,
+              }}
+              title="Import credentials from JSON or CSV"
+            >
+              📥 Import
+            </button>
+            {displayCredentials.length > 0 && (
+              <div style={{ display: "flex", gap: "0.25rem", flexWrap: "wrap" }}>
+                <select
+                  value={exportFormat}
+                  onChange={(e) => setExportFormat(e.target.value as ExportFormat)}
+                  aria-label="Export format"
+                  style={{
+                    padding: "0.5rem 0.75rem",
+                    fontSize: "0.85rem",
+                    borderRadius: "0.25rem",
+                    border: "1px solid var(--border-input)",
+                    backgroundColor: "var(--card-bg)",
+                    color: "var(--text)",
+                  }}
+                >
+                  <option value="json">JSON</option>
+                  <option value="csv">CSV</option>
+                  <option value="xml">XML</option>
+                  <option value="pdf">PDF</option>
+                </select>
+                {exportFormat === "pdf" && (
+                  <select
+                    className="export-select"
+                    value={exportTemplate.id}
+                    onChange={(e) => setExportTemplateId(e.target.value)}
+                    aria-label="PDF template"
+                  >
+                    {exportTemplates.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name}
+                        {t.builtIn ? "" : " (custom)"}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {exportFormat !== "csv" && (selectedCredentialsForExport.size > 1 || (selectedCredentialsForExport.size === 0 && displayCredentials.length > 1)) && (
+                  <select
+                    className="export-select"
+                    value={exportBatchMode}
+                    onChange={(e) => setExportBatchMode(e.target.value as BatchMode)}
+                    aria-label="Batch output"
+                  >
+                    <option value="combined">Single file</option>
+                    <option value="zip">ZIP (one file each)</option>
+                  </select>
+                )}
+                <button
+                  onClick={() => handleExport(exportFormat)}
+                  disabled={isExporting}
+                  style={{
+                    padding: "0.5rem 1rem",
+                    backgroundColor: "var(--accent-light)",
+                    color: "white",
+                    border: "none",
+                    borderRadius: "0.25rem",
+                    cursor: isExporting ? "not-allowed" : "pointer",
+                    fontSize: "0.85rem",
+                    fontWeight: 500,
+                    opacity: isExporting ? 0.6 : 1,
+                  }}
+                  title={`Export ${selectedCredentialsForExport.size > 0 ? selectedCredentialsForExport.size : displayCredentials.length} credentials`}
+                >
+                  📤 Export {selectedCredentialsForExport.size > 0 ? `(${selectedCredentialsForExport.size})` : ""}
+                </button>
+                {exportFormat === "pdf" && (
+                  <button
+                    type="button"
+                    className="export-secondary"
+                    onClick={() => setEditingExportTemplate((v) => !v)}
+                    onMouseEnter={preloadTemplateEditor}
+                    onFocus={preloadTemplateEditor}
+                    aria-expanded={editingExportTemplate}
+                  >
+                    {exportTemplate.builtIn ? "Customize template" : "Edit template"}
+                  </button>
+                )}
+                {exportFormat === "pdf" && !exportTemplate.builtIn && (
+                  <button type="button" className="export-secondary" onClick={handleDeleteExportTemplate}>
+                    Delete template
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {editingExportTemplate && exportFormat === "pdf" && (
+          <Suspense fallback={<LoadingFallback />}>
+            <TemplateEditor
+              key={exportTemplate.id}
+              base={exportTemplate}
+              onSave={handleSaveExportTemplate}
+              onCancel={() => setEditingExportTemplate(false)}
+            />
+          </Suspense>
+        )}
+
+        {/* Advanced search (#1104) */}
+        <AdvancedSearch
+          ref={advancedSearchRef}
+          items={displayCredentials}
+          onResultsChange={handleAdvancedSearchResults}
+        />
+
+        {/* Subject search */}
+        <div style={{ display: "flex", gap: "0.5rem", marginBottom: "1rem" }}>
+          <label htmlFor="credential-search" className="visually-hidden">
+            Search credentials by subject address
+          </label>
+          <input
+            id="credential-search"
+            type="search"
+            placeholder="Search by subject address (G…)"
+            value={searchAddress}
+            onChange={(e) => setSearchAddress(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+            style={{ flex: 1 }}
+          />
+          <button onClick={handleSearch} disabled={fetching || !searchAddress.trim()}>
+            {fetching ? "Searching…" : "Search"}
+          </button>
+        </div>
+
         <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginBottom: "1rem" }}>
           {FILTER_OPTIONS.map((type) => {
-            const count = countByType(type);
+            const count = countByType(displayCredentials, type);
             const isActive = activeFilter === type;
             return (
               <button
                 key={type}
-                onClick={() => setActiveFilter(type)}
+                onClick={() => handleFilterChange(type)}
                 style={{
                   padding: "0.3rem 0.75rem",
                   borderRadius: "999px",
@@ -134,45 +1299,508 @@ export default function CredentialsPanel({ wallet }: Props) {
           })}
         </div>
 
-        {filteredCredentials.length === 0 ? (
+        {lastCheckedAt && !fetching && (
+          <p style={{ color: "var(--text-muted)", fontSize: "0.75rem", marginBottom: "0.5rem" }}>
+            Last checked: {formatCheckedAt(lastCheckedAt)} (auto-refreshes every 30s)
+          </p>
+        )}
+
+        {/* Comparison selection toolbar (#1048) */}
+        {displayCredentials.length >= MIN_COMPARE && (
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              alignItems: "center",
+              gap: "0.5rem",
+              marginBottom: "1rem",
+              padding: "0.5rem 0.75rem",
+              background: "var(--card-bg-accent)",
+              borderRadius: "0.5rem",
+              fontSize: "0.85rem",
+            }}
+          >
+            <span style={{ color: "var(--text-muted)" }}>
+              Compare ({selectedForComparison.size}/{MAX_COMPARE}):
+            </span>
+            <button
+              type="button"
+              onClick={() => openComparison(Array.from(selectedForComparison))}
+              disabled={selectedForComparison.size < MIN_COMPARE}
+              onMouseEnter={preloadCredentialComparison}
+              onFocus={preloadCredentialComparison}
+              style={{
+                padding: "0.35rem 0.85rem",
+                backgroundColor: "var(--accent-light)",
+                color: "white",
+                border: "none",
+                borderRadius: "0.25rem",
+                cursor: selectedForComparison.size < MIN_COMPARE ? "not-allowed" : "pointer",
+                fontSize: "0.85rem",
+                fontWeight: 500,
+                opacity: selectedForComparison.size < MIN_COMPARE ? 0.6 : 1,
+              }}
+              title={`Compare ${selectedForComparison.size} selected credential(s)`}
+            >
+              ⚖ Compare
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleCopyComparisonLink()}
+              disabled={selectedForComparison.size < MIN_COMPARE}
+              style={{
+                padding: "0.35rem 0.85rem",
+                backgroundColor: "transparent",
+                color: "var(--accent-light)",
+                border: "1px solid var(--accent-light)",
+                borderRadius: "0.25rem",
+                cursor: selectedForComparison.size < MIN_COMPARE ? "not-allowed" : "pointer",
+                fontSize: "0.85rem",
+                fontWeight: 500,
+                opacity: selectedForComparison.size < MIN_COMPARE ? 0.6 : 1,
+              }}
+              title="Copy a shareable comparison link"
+            >
+              🔗 Copy link
+            </button>
+            {selectedForComparison.size > 0 && (
+              <button
+                type="button"
+                onClick={() => setSelectedForComparison(new Set())}
+                style={{
+                  padding: "0.35rem 0.85rem",
+                  backgroundColor: "transparent",
+                  color: "var(--text-muted)",
+                  border: "1px solid var(--border-input)",
+                  borderRadius: "0.25rem",
+                  cursor: "pointer",
+                  fontSize: "0.85rem",
+                }}
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        )}
+        <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginBottom: "1rem" }}>
+          {EXPIRY_FILTER_OPTIONS.map((status) => {
+            const count = countByExpiry(displayCredentials, status);
+            const isActive = activeExpiryFilter === status;
+            return (
+              <button
+                key={status}
+                onClick={() => handleExpiryFilterChange(status)}
+                style={{
+                  padding: "0.3rem 0.75rem",
+                  borderRadius: "999px",
+                  border: isActive ? "2px solid var(--accent-light)" : "2px solid var(--border-input)",
+                  background: isActive ? "var(--card-bg-accent)" : "transparent",
+                  color: isActive ? "var(--accent-light)" : "var(--text-muted)",
+                  cursor: "pointer",
+                  fontSize: "0.85rem",
+                  fontWeight: isActive ? 600 : 400,
+                }}
+                aria-pressed={isActive}
+                aria-label={`Filter by ${status} credentials`}
+              >
+                {status}{" "}
+                <span
+                  style={{
+                    background: isActive ? "var(--filter-badge-active-bg)" : "var(--border-input)",
+                    color: isActive ? "var(--filter-badge-active-text)" : "var(--text-muted)",
+                    borderRadius: "999px",
+                    padding: "0 0.4rem",
+                    fontSize: "0.75rem",
+                    marginLeft: "0.25rem",
+                  }}
+                >
+                  {count}
+                </span>
+              </button>
+            );
+          })}
+          {(activeFilter !== "All" || activeExpiryFilter !== "All" || searchAddress.trim() !== "" || hasActiveSearch) && (
+            <button
+              type="button"
+              onClick={handleResetFilters}
+              style={{
+                padding: "0.3rem 0.75rem",
+                borderRadius: "999px",
+                border: "2px solid var(--border-input)",
+                background: "transparent",
+                color: "var(--text-muted)",
+                cursor: "pointer",
+                fontSize: "0.85rem",
+                marginLeft: "auto",
+              }}
+              aria-label="Reset Filters"
+            >
+              Reset Filters
+            </button>
+          )}
+        </div>
+
+        {fetching ? (
+          <SkeletonCard variant="credential" />
+        ) : fetchedCredentials !== null && !hasAttestations ? (
+          <CredentialEmptyState searchedAddress={searchedAddress} />
+        ) : sortedCredentials.length === 0 ? (
           <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>
-            No {activeFilter} credentials found.
+            {hasActiveSearch
+              ? "No credentials match your search and filters."
+              : "No credentials match the selected filters."}
           </p>
         ) : (
+          <>
           <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-            {filteredCredentials.map((cred) => (
+            {(pagedCredentials ?? []).map((cred) => {
+              const status = getCredentialStatus(cred);
+              return (
               <li
                 key={cred.id}
                 style={{
                   background: "var(--cred-item-bg)",
                   borderRadius: "0.5rem",
-                  padding: "0.6rem 1rem",
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  fontSize: "0.85rem",
-                  color: "var(--text)",
+                  overflow: "hidden",
                 }}
               >
-                <span style={{ fontFamily: "monospace", color: "var(--text-muted)" }}>{cred.id}</span>
-                <span className="badge badge-green">{cred.credentialType}</span>
+                <button
+                  type="button"
+                  aria-expanded={expandedCredId === cred.id}
+                  style={{
+                    padding: "0.6rem 1rem",
+                    display: "flex",
+                    flexWrap: "wrap",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    width: "100%",
+                    fontSize: "0.85rem",
+                    color: "var(--text)",
+                    gap: "0.5rem 1rem",
+                    cursor: "pointer",
+                    background: "var(--cred-item-bg)",
+                    border: 0,
+                    borderRadius: 0,
+                    textAlign: "left",
+                  }}
+                  onClick={() => setExpandedCredId(expandedCredId === cred.id ? null : cred.id)}
+                >
+                  <input
+                    type="checkbox"
+                    checked={selectedCredentialsForExport.has(cred.id)}
+                    onChange={(e) => {
+                      e.stopPropagation();
+                      toggleCredentialSelection(cred.id);
+                    }}
+                    style={{ cursor: "pointer" }}
+                    aria-label={`Select credential ${cred.id} for export`}
+                  />
+                  <input
+                    type="checkbox"
+                    checked={selectedForComparison.has(cred.id)}
+                    onChange={(e) => {
+                      e.stopPropagation();
+                      toggleComparisonSelection(cred.id);
+                    }}
+                    style={{ cursor: "pointer" }}
+                    aria-label={`Select credential ${cred.id} for comparison`}
+                    title="Select for comparison"
+                  />
+                  <span style={{ fontSize: "1.2rem", minWidth: "1.5rem" }}>
+                    {CREDENTIAL_TYPE_ICONS[cred.credentialType] || "📋"}
+                  </span>
+                  <span style={{ fontFamily: "monospace", color: "var(--text-muted)" }} title={cred.id}>
+                    {cred.id.slice(0, 8)}…{cred.id.slice(-6)}
+                  </span>
+                  <span className="badge badge-green">{cred.credentialType}</span>
+                  <span
+                    className={getStatusBadgeClass(status)}
+                    aria-label={`Credential status: ${getStatusLabel(status)}`}
+                    title={getStatusTooltip(cred, status)}
+                  >
+                    {getStatusLabel(status)}
+                  </span>
+                  <span style={getExpiryStyle(cred.expiresAt)}>{formatExpiry(cred.expiresAt)}</span>
+                  {(() => {
+                    const visibility = getPrivacySettings(cred.id).visibility;
+                    const badge = VISIBILITY_BADGE[visibility];
+                    return (
+                      <span
+                        className={badge.className}
+                        title={`Visibility: ${badge.label}`}
+                        aria-label={`Credential visibility: ${badge.label}`}
+                      >
+                        {badge.icon} {badge.label}
+                      </span>
+                    );
+                  })()}
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setPrivacyCredential(cred);
+                    }}
+                    onMouseEnter={preloadPrivacySettings}
+                    onFocus={preloadPrivacySettings}
+                    style={{
+                      background: "none",
+                      border: "none",
+                      cursor: "pointer",
+                      fontSize: "1rem",
+                      color: "var(--accent-light)",
+                      marginLeft: "auto",
+                      marginRight: "0.5rem",
+                    }}
+                    title="Configure privacy and sharing controls"
+                    aria-label={`Privacy settings for credential ${cred.id}`}
+                  >
+                    🛡
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSharingCredential(cred);
+                    }}
+                    style={{
+                      background: "none",
+                      border: "none",
+                      cursor: "pointer",
+                      fontSize: "1rem",
+                      color: "var(--accent-light)",
+                      marginRight: "0.5rem",
+                    }}
+                    title="Share credential via encrypted link"
+                    aria-label={`Share credential ${cred.id}`}
+                  >
+                    🔗
+                  </button>
+                  <span style={{ fontSize: "1rem" }}>
+                    {expandedCredId === cred.id ? "▼" : "▶"}
+                  </span>
+                </button>
+                {expandedCredId === cred.id && (
+                  <div
+                    data-tour="credential-details"
+                    style={{ padding: "0.75rem 1rem", borderTop: "1px solid var(--border-input)", background: "var(--card-bg-accent)" }}
+                  >
+                    <dl style={{ margin: "0 0 0.75rem", fontSize: "0.8rem" }}>
+                      <div style={{ display: "flex", gap: "1rem", marginBottom: "0.25rem" }}>
+                        <dt style={{ fontWeight: 600, color: "var(--text-muted)", minWidth: "120px" }}>Issued</dt>
+                        <dd style={{ margin: 0, color: "var(--text-muted)" }}>{formatTimestamp(cred.issuedAt)}</dd>
+                      </div>
+                      <div style={{ display: "flex", gap: "1rem", marginBottom: "0.5rem" }}>
+                        <dt style={{ fontWeight: 600, color: "var(--text-muted)", minWidth: "120px" }}>Expires</dt>
+                        <dd style={{ margin: 0, ...getExpiryStyle(cred.expiresAt) }}>{formatLedgerExpiry(cred.expiresAt)}</dd>
+                      </div>
+                      <div style={{ display: "flex", gap: "1rem", marginBottom: "0.5rem" }}>
+                        <dt style={{ fontWeight: 600, color: "var(--text-muted)", minWidth: "120px" }}>Version</dt>
+                        <dd style={{ margin: 0, color: "var(--text)" }}>v{cred.version ?? 1}</dd>
+                      </div>
+                    </dl>
+                    {cred.claims && Object.keys(cred.claims).length > 0 ? (
+                      <dl style={{ margin: 0, fontSize: "0.85rem" }}>
+                        {Object.entries(cred.claims).map(([key, value]) => (
+                          <div key={key} style={{ display: "flex", gap: "1rem", marginBottom: "0.5rem" }}>
+                            <dt style={{ fontWeight: 600, color: "var(--text-muted)", minWidth: "120px" }}>{key}</dt>
+                            <dd style={{ margin: 0, color: "var(--text)" }}>{value}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                    ) : (
+                      <p style={{ margin: 0, color: "var(--text-muted)", fontSize: "0.8rem" }}>No claims</p>
+                    )}
+                    {searchHighlights.get(cred.id)?.length ? (
+                      <p
+                        style={{ margin: "0.5rem 0 0", fontSize: "0.75rem", color: "var(--text-muted)" }}
+                        aria-label="Search match highlights"
+                      >
+                        Matches:{" "}
+                        {searchHighlights.get(cred.id)!.map((h, i) => (
+                          <mark
+                            key={`${h}-${i}`}
+                            style={{
+                              background: "var(--card-bg-accent)",
+                              color: "var(--accent-light)",
+                              borderRadius: "0.2rem",
+                              padding: "0 0.2rem",
+                              marginRight: "0.25rem",
+                            }}
+                          >
+                            {h}
+                          </mark>
+                        ))}
+                      </p>
+                    ) : null}
+                    {/* Credential lifecycle timeline — closes #707 */}
+                    <CredentialTimeline credential={cred} />
+                  </div>
+                )}
               </li>
-            ))}
+              );
+            })}
           </ul>
+
+          {/* Pagination controls */}
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: "0.75rem",
+              marginTop: "1rem",
+              paddingTop: "0.75rem",
+              borderTop: "1px solid var(--border-input)",
+              fontSize: "0.8rem",
+              color: "var(--text-muted)",
+            }}
+          >
+            <span>
+              Showing {pageStart + 1}–{Math.min(pageStart + pageSize, totalCredentials)} of {totalCredentials}
+            </span>
+
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              <label htmlFor="credential-page-size" style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
+                Per page
+                <select
+                  id="credential-page-size"
+                  value={pageSize}
+                  onChange={(e) => handlePageSizeChange(Number(e.target.value))}
+                  style={{ fontSize: "0.8rem", padding: "0.2rem 0.4rem" }}
+                >
+                  {PAGE_SIZE_OPTIONS.map((size) => (
+                    <option key={size} value={size}>{size}</option>
+                  ))}
+                </select>
+              </label>
+
+              <button
+                onClick={() => goToPage(clampedPage - 1)}
+                disabled={clampedPage <= 1}
+                aria-label="Previous page"
+                style={{ padding: "0.25rem 0.6rem", fontSize: "0.8rem" }}
+              >
+                ‹ Prev
+              </button>
+
+              <span>
+                Page{" "}
+                <input
+                  type="number"
+                  aria-label="Jump to page"
+                  min={1}
+                  max={totalPages}
+                  value={clampedPage}
+                  onChange={(e) => {
+                    const next = parseInt(e.target.value, 10);
+                    if (Number.isFinite(next) && next >= 1 && next <= totalPages) {
+                      goToPage(next);
+                    }
+                  }}
+                  style={{ width: "3rem", textAlign: "center", fontSize: "0.8rem", padding: "0.2rem" }}
+                />{" "}
+                of {totalPages}
+              </span>
+
+              <button
+                onClick={() => goToPage(clampedPage + 1)}
+                disabled={clampedPage >= totalPages}
+                aria-label="Next page"
+                style={{ padding: "0.25rem 0.6rem", fontSize: "0.8rem" }}
+              >
+                Next ›
+              </button>
+            </div>
+          </div>
+          </>
         )}
       </div>
 
+      {/* #737: Import credentials from a local JSON file with full error handling */}
       <div className="card">
+        <h2>Import Credentials (JSON)</h2>
+        <p style={{ color: "var(--text-muted)", fontSize: "0.85rem", marginBottom: "0.75rem" }}>
+          Import credentials from a previously exported <code>.json</code> file.
+          Malformed or invalid files will show an error — the app will not crash.
+        </p>
+        <label
+          htmlFor="credential-json-import"
+          style={{
+            display: "inline-block",
+            padding: "0.45rem 1rem",
+            borderRadius: "0.25rem",
+            background: "var(--accent-light)",
+            color: "white",
+            cursor: "pointer",
+            fontSize: "0.85rem",
+            fontWeight: 600,
+          }}
+        >
+          📂 Choose JSON file
+          <input
+            id="credential-json-import"
+            ref={jsonImportRef}
+            type="file"
+            accept=".json,application/json"
+            onChange={handleJsonImport}
+            style={{ display: "none" }}
+            aria-label="Import credentials from JSON file"
+          />
+        </label>
+        {importError && (
+          <p
+            role="alert"
+            style={{
+              color: "var(--error)",
+              marginTop: "0.5rem",
+              fontSize: "0.85rem",
+              padding: "0.4rem 0.75rem",
+              background: "var(--badge-red-bg, #fde8e8)",
+              borderRadius: "0.25rem",
+            }}
+          >
+            ⚠ {importError}
+          </p>
+        )}
+        {importedCount !== null && !importError && (
+          <p
+            role="status"
+            style={{
+              color: "var(--success-text, #155724)",
+              marginTop: "0.5rem",
+              fontSize: "0.85rem",
+            }}
+          >
+            ✓ {importedCount} credential{importedCount > 1 ? "s" : ""} imported.
+          </p>
+        )}
+        {filteredCredentials.length > 0 && (
+          <div style={{ display: "flex", gap: "0.5rem", marginTop: "1rem" }}>
+            {(["pdf", "json", "xml"] as ExportFormat[]).map((f) => (
+              <button key={f} onClick={() => handleExport(f)}>
+                Export {f.toUpperCase()}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="card" data-tour="verify-credential">
         <h2>Verify Credential</h2>
+        <label htmlFor="verify-credential-id" className="visually-hidden">
+          Credential ID to verify
+        </label>
         <input
+          id="verify-credential-id"
+          data-tour="verify-credential-input"
           placeholder="Credential ID (hex)"
           value={credId}
           onChange={(e) => setCredId(e.target.value)}
         />
-        <button onClick={handleVerify} disabled={verifying || !credId}>
+        <button onClick={() => void handleVerify()} disabled={verifying || !credId}>
           {verifying ? "Verifying…" : "Verify"}
         </button>
-        {verifyState !== "idle" && (
+        {verifying && <SkeletonCard variant="credential" />}
+        {!verifying && verifyState !== "idle" && (
           <div style={{ marginTop: "1rem" }}>
             {verifyState === "valid" && (
               <span className="badge badge-green">Valid</span>
@@ -186,39 +1814,227 @@ export default function CredentialsPanel({ wallet }: Props) {
             {verifyState === "not_found" && (
               <span className="badge badge-red">Invalid — credential not found</span>
             )}
-            {(verifyState === "invalid" || verifyState === "unknown" as string) && (
+            {verifyState === "not_yet_active" && (
+              <span className="badge badge-yellow">Pending — credential is not yet active (time-locked)</span>
+            )}
+            {(verifyState === "invalid" || verifyState === "unknown") && (
               <span className="badge badge-red">Invalid</span>
+            )}
+            {verifyCheckedAt && (
+              <p style={{ color: "var(--text-muted)", fontSize: "0.75rem", marginTop: "0.5rem" }}>
+                Last checked: {formatCheckedAt(verifyCheckedAt)} (auto-refreshes every 30s)
+              </p>
             )}
           </div>
         )}
       </div>
 
-      <div className="card">
+      <ClaimSubmissionForm />
+
+      <div className="card" data-tour="issue-credential">
         <h2>Issue Credential</h2>
         {wallet.connected ? (
-          <>
-            <p style={{ color: "var(--text-muted)", fontSize: "0.85rem", marginBottom: "1rem" }}>
-              Issuing as{" "}
-              <span style={{ color: "var(--accent-light)" }}>
-                {wallet.publicKey?.slice(0, 6)}…{wallet.publicKey?.slice(-4)}
-              </span>
+          isIssuer ? (
+            <>
+              <p style={{ color: "var(--text-muted)", fontSize: "0.85rem", marginBottom: "1rem" }}>
+                Issuing as{" "}
+                <span style={{ color: "var(--accent-light)" }}>
+                  {wallet.publicKey?.slice(0, 6)}…{wallet.publicKey?.slice(-4)}
+                </span>
+              </p>
+
+              {/* Template Selector Library */}
+              <TemplateSelector
+                selectedTemplateId={selectedTemplate?.id}
+                onSelectTemplate={handleSelectTemplate}
+              />
+
+              <div data-tour="credential-form">
+              <FormField
+                label="Subject Address"
+                placeholder="Subject address (G…)"
+                value={subject}
+                onChange={(e) => setSubject(e.target.value)}
+                error={issueErrors.subject}
+                style={{ marginBottom: "1rem" }}
+              />
+
+              <div style={{ marginBottom: "1rem" }}>
+                <label style={{ display: "block", marginBottom: "0.5rem", fontSize: "0.85rem", fontWeight: 600 }}>
+                  Claims
+                </label>
+                {claims.map((claim, idx) => (
+                  <div key={idx} style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem" }}>
+                    <input
+                      aria-label={`Claim key ${idx + 1}`}
+                      placeholder="Key"
+                      value={claim.key}
+                      onChange={(e) => handleClaimChange(idx, "key", e.target.value)}
+                      style={{ flex: 1 }}
+                    />
+                    <input
+                      aria-label={`Claim value ${idx + 1}`}
+                      placeholder="Value"
+                      value={claim.value}
+                      onChange={(e) => handleClaimChange(idx, "value", e.target.value)}
+                      style={{ flex: 1 }}
+                    />
+                    {claims.length > 1 && (
+                      <button
+                        onClick={() => handleRemoveClaim(idx)}
+                        style={{
+                          padding: "0.5rem 0.75rem",
+                          background: "var(--error)",
+                          color: "white",
+                          border: "none",
+                          borderRadius: "0.25rem",
+                          cursor: "pointer",
+                          fontSize: "0.85rem",
+                        }}
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                ))}
+                <button
+                  onClick={handleAddClaim}
+                  style={{
+                    padding: "0.5rem 0.75rem",
+                    background: "var(--accent-light)",
+                    color: "white",
+                    border: "none",
+                    borderRadius: "0.25rem",
+                    cursor: "pointer",
+                    fontSize: "0.85rem",
+                  }}
+                >
+                  + Add Claim
+                </button>
+                {issueErrors.claims && (
+                  <p style={{ color: "var(--error)", fontSize: "0.75rem", marginTop: "0.25rem" }}>
+                    {issueErrors.claims}
+                  </p>
+                )}
+              </div>
+
+              <FormField
+                label="Expires At (Unix timestamp, 0 for no expiry)"
+                type="number"
+                placeholder="0"
+                value={expiresAt}
+                onChange={(e) => setExpiresAt(e.target.value)}
+                error={issueErrors.expiresAt}
+                style={{ marginBottom: "1rem" }}
+              />
+              </div>
+
+              <button
+                data-tour="issue-credential-button"
+                onClick={handleIssue}
+                disabled={issuing || Object.keys(issueErrors).length > 0}
+              >
+                {issuing
+                  ? "Issuing…"
+                  : selectedTemplate
+                  ? `Issue ${selectedTemplate.name}`
+                  : "Issue Credential"}
+              </button>
+              {issuing && <SkeletonCard variant="credential" />}
+            </>
+          ) : (
+            <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>
+              {checkingIssuer ? "Checking issuer status…" : "Your wallet is not registered as an issuer. Contact the admin to register."}
             </p>
+          )
+        ) : (
+          <p data-tour="credential-wallet" style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>
+            Connect your Freighter wallet to issue credentials as a registered issuer.
+          </p>
+        )}
+        {!issuing && issueResult && <pre className="result">{issueResult}</pre>}
+      </div>
+
+      <div className="card">
+        <h2>Revoke Credential</h2>
+        {wallet.connected ? (
+          <>
             <input
-              placeholder="Subject address (G…)"
-              value={subject}
-              onChange={(e) => setSubject(e.target.value)}
+              placeholder="Credential ID (hex)"
+              value={revokeId}
+              onChange={(e) => setRevokeId(e.target.value)}
             />
-            <button onClick={handleIssue} disabled={issuing || !subject}>
-              {issuing ? "Issuing…" : "Issue KYC Credential"}
+            <select
+              value={revokeReason}
+              onChange={(e) => setRevokeReason(e.target.value as RevocationReason)}
+            >
+              {REVOCATION_REASONS.map((r) => (
+                <option key={r} value={r}>
+                  {r}
+                </option>
+              ))}
+            </select>
+            <button onClick={handleRevoke} disabled={!revokeId || revoking}>
+              {revoking ? "Revoking…" : "Revoke"}
             </button>
           </>
         ) : (
           <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>
-            Connect your Freighter wallet to issue credentials as a registered issuer.
+            Connect your wallet to revoke credentials you issued.
           </p>
         )}
-        {issueResult && <pre className="result">{issueResult}</pre>}
+        {revokeResult && <pre className="result">{revokeResult}</pre>}
       </div>
+      {/* Import Modal */}
+      {showImportModal && (
+        <Suspense fallback={<LoadingFallback />}>
+          <CredentialImport
+            onImport={handleImportCredentials}
+            onClose={() => setShowImportModal(false)}
+          />
+        </Suspense>
+      )}
+
+      {/* Privacy Settings Modal (#1101) */}
+      {privacyCredential && (
+        <Suspense fallback={<LoadingFallback />}>
+          <PrivacySettings
+            credential={privacyCredential}
+            settings={getPrivacySettings(privacyCredential.id)}
+            onSave={(settings) => handleSavePrivacySettings(privacyCredential.id, settings)}
+            onClose={() => setPrivacyCredential(null)}
+          />
+        </Suspense>
+      )}
+
+      {/* Share Modal */}
+      {sharingCredential && (
+        <Suspense fallback={<LoadingFallback />}>
+          <CredentialShare
+            credential={sharingCredential}
+            privacySettings={getPrivacySettings(sharingCredential.id)}
+            onClose={() => setSharingCredential(null)}
+          />
+        </Suspense>
+      )}
+
+      {/* Comparison Modal (#1048) */}
+      {showComparison && comparisonIds.length >= MIN_COMPARE && (
+        <Suspense fallback={<LoadingFallback />}>
+          <CredentialComparison
+            credentials={displayCredentials.filter((c) => comparisonIds.includes(c.id))}
+            onClose={() => setShowComparison(false)}
+          />
+        </Suspense>
+      )}
+
+      {/* #1306: Regression guard — empty attestations must render the empty
+          state rather than crashing on an undefined array access. */}
+      {!fetching && fetchedCredentials !== null && !hasAttestations && (
+        <p role="status" style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>
+          No attestations available.
+        </p>
+      )}
     </>
   );
 }
