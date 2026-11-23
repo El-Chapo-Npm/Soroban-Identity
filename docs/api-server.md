@@ -76,10 +76,10 @@ Admin endpoints (recommended host wiring):
 - `GET /admin/api-keys` → `store.list`
 - `DELETE /admin/api-keys/:id` → `store.remove`
 
-## Rate limiting (#254)
+## Rate limiting (#254, #681)
 
 ```ts
-import { createRateLimitMiddleware } from "@soroban-identity/sdk";
+import { createRateLimitMiddleware, TIER_LIMITS } from "@soroban-identity/sdk";
 
 app.use(createApiKeyAuthMiddleware({ store }));
 app.use(createRateLimitMiddleware({
@@ -88,18 +88,216 @@ app.use(createRateLimitMiddleware({
 }));
 ```
 
-Token-bucket. Default classifier treats GET/HEAD/OPTIONS as reads. The
+Token-bucket rate limiter with multi-tier throttling based on user subscription levels:
+
+| Tier | Read Limit (req/min) | Write Limit (req/min) | Overall Max (req/min) |
+|---|---|---|---|
+| **Free** | 60 | 20 | 60 |
+| **Pro** | 300 | 100 | 300 |
+| **Enterprise** | 1200 | 500 | 1200 |
+
+Default classifier treats GET/HEAD/OPTIONS as reads. The
 bucket key is `req.auth?.apiKey.id` (when authenticated) or
 `ip:<address>` (when not). Per-key overrides supported via the
 `overrides` map.
 
 Every response carries:
+- `X-RateLimit-Tier` (`free`, `pro`, or `enterprise`)
 - `X-RateLimit-Limit`
 - `X-RateLimit-Remaining`
 - `X-RateLimit-Reset` (unix seconds)
 
 When exhausted: `429 Too Many Requests` + `Retry-After` (seconds) +
-envelope body `{ error: { code: "RATE_LIMITED", ... } }`.
+envelope body `{ error: { code: "RATE_LIMITED", tier: "free", upgrade: { ... } } }`.
+For free tier clients, responses also include upgrade information prompting migration to Pro or Enterprise.
 
 Limits are configurable via environment variables when host
 applications read them at startup; defaults match the issue's spec.
+
+## Content Negotiation (#683)
+
+The API server supports multiple response formats based on the client's `Accept` HTTP header.
+
+### Supported Media Types
+- **JSON** (Default): `application/json`, `*/*`, `application/*`
+- **XML**: `application/xml`, `text/xml`
+- **YAML**: `application/yaml`, `application/x-yaml`, `text/yaml`, `text/x-yaml`
+
+### Content Negotiation Behavior
+1. When no `Accept` header is present or `*/*` is provided, responses are formatted as `application/json; charset=utf-8`.
+2. When `Accept: application/xml` or `Accept: text/xml` is specified, responses are serialized as standard XML with `application/xml; charset=utf-8`.
+3. When `Accept: application/yaml` or `Accept: text/yaml` is specified, responses are serialized as YAML with `application/yaml; charset=utf-8`.
+4. Quality factors (`q` parameter, e.g. `application/xml;q=0.9, application/json;q=0.8`) are parsed and respected in order of client preference.
+5. If the requested media type is unsupported and cannot be satisfied (e.g. `Accept: image/png` or `Accept: text/html`), the server returns `406 Not Acceptable`:
+
+```json
+{
+  "error": "not_acceptable",
+  "code": "NOT_ACCEPTABLE",
+  "message": "Unsupported format requested in Accept header. Supported formats: application/json, application/xml, text/xml, application/yaml, text/yaml",
+  "supportedFormats": [
+    "application/json",
+    "application/xml",
+    "text/xml",
+    "application/yaml",
+    "text/yaml"
+  ]
+}
+```
+
+## Replay Prevention (#1052)
+
+Sensitive operations are protected against replay attacks using a
+nonce-based scheme. Clients must supply a unique nonce per request and
+the server rejects any nonce it has already seen.
+
+### Request contract
+
+- Send the nonce in the `X-Nonce` request header.
+- Each nonce must be unique per request; reuse is rejected.
+- Nonces are single-use and are stored server-side in Redis with a
+  **5-minute TTL** (the nonce expiry window). After the window elapses
+  the nonce is evicted and may be reused.
+
+```http
+POST /credentials HTTP/1.1
+Authorization: Bearer sk_<hex>
+X-Nonce: 8f14e45fceea167a5a36dedd4bea2543
+Content-Type: application/json
+```
+
+### Response contract
+
+Every response to a nonce-protected request echoes the nonce that was
+accepted (or generated) for that request:
+
+- `X-Nonce` — the nonce associated with the request/response.
+
+Duplicate nonces are rejected with `409 Conflict` and the standard error
+envelope:
+
+```json
+{
+  "error": {
+    "code": "ALREADY_EXISTS",
+    "message": "Nonce has already been used",
+    "details": { "nonce": "8f14e45fceea167a5a36dedd4bea2543" }
+  }
+}
+```
+
+### Client guidance
+
+- Generate a fresh, high-entropy nonce (e.g. 16 random bytes hex-encoded)
+  for every sensitive request; never reuse a nonce across requests.
+- Treat a `409` replay response as a hard failure — do not retry with the
+  same nonce. Generate a new nonce and retry if the operation is still
+  desired.
+- A nonce may only be reused after its 5-minute expiry window has passed.
+- Nonce collisions are monitored server-side; a rising collision rate
+  indicates clients are generating insufficiently random nonces.
+
+## API Analytics & Usage Dashboard (#682)
+
+The server includes real-time API analytics monitoring and an administrative usage dashboard.
+
+### Features
+- **Requests & Latency Tracking**: Tracks total requests, response times (min, max, average), and error counts per endpoint.
+- **Top Consumers**: Tracks API consumption and error rates broken down by API key / client.
+- **Geographic Distribution**: Analyzes client geographic traffic distribution based on proxy headers (`CF-IPCountry`, `X-Country`, etc.) and client addresses.
+- **Real-Time Graphs**: Interactive dashboard rendering time-series request/error trends and geo breakdown.
+- **Export Data**: Analytics summary and recent request logs can be exported in CSV or JSON.
+
+### Endpoints (Requires `admin:read` scope)
+- `GET /admin/analytics`: Returns aggregated analytics JSON summary with overview stats, endpoints breakdown, top consumers, and time-series buckets.
+- `GET /admin/analytics/dashboard`: Serves the interactive HTML/JS dashboard with real-time charts and live status metrics.
+- `GET /admin/analytics/export`: Exports analytics data as downloadable CSV (`?format=csv`) or JSON (`?format=json`).
+
+## Geo-Distributed Read Replicas (#1051)
+
+The API server is backed by a primary database plus read replicas deployed in
+three regions: **US**, **EU**, and **Asia**. This section documents what API
+consumers should expect.
+
+### Replication topology
+
+```
+                    ┌─────────────────────┐
+   writes ─────────▶│  Primary (US-East)  │
+                    └──────────┬──────────┘
+                               │ async replication
+              ┌────────────────┼────────────────┐
+              ▼                ▼                ▼
+      ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+      │ Replica (US) │ │ Replica (EU) │ │ Replica (Asia)│
+      └──────────────┘ └──────────────┘ └──────────────┘
+              ▲                ▲                ▲
+              └──── reads routed to nearest ───┘
+```
+
+- All writes go to the primary.
+- Reads are routed to the replica nearest the caller (by region/edge).
+- Replication is **asynchronous**, so replicas may lag behind the primary.
+
+### Read/write splitting
+
+The server splits traffic automatically based on the HTTP method and route:
+
+| Operation | Target | Notes |
+|---|---|---|
+| `GET` / `HEAD` / `OPTIONS` | Nearest read replica | Read-only, safe to serve from a replica |
+| `POST` / `PUT` / `PATCH` / `DELETE` | Primary | Always consistent with the latest write |
+| Read-after-write (`?consistent=true`) | Primary | Opt-in strong consistency for a single request |
+
+Clients that need to observe their own writes immediately can pass
+`?consistent=true` (or the `X-Consistency: strong` header) to force the
+request to the primary. This is slower but guarantees the response reflects
+all writes acknowledged before the request started.
+
+### Replica routing
+
+- The server selects the replica with the lowest measured latency from the
+  caller's region, falling back to the primary if no replica is healthy.
+- The chosen target is reported in the `X-Served-By` response header
+  (`primary`, `replica-us`, `replica-eu`, `replica-asia`).
+- Routing is transparent: response bodies and status codes are identical
+  regardless of which replica served the request.
+
+### Eventual consistency guarantees
+
+- Reads served from a replica may be **stale by up to the replica lag**
+  (typically well under a second, but not bounded by a hard SLA).
+- Monotonic reads are **not** guaranteed across requests unless
+  `?consistent=true` is used.
+- Writes are only acknowledged once the primary has committed them; a
+  subsequent read from the primary always reflects the write.
+
+### Replica lag monitoring
+
+- Replica lag is tracked per region and exposed via
+  `GET /admin/replicas` (requires `admin:read` scope):
+
+```json
+{
+  "primary": { "region": "us-east", "healthy": true },
+  "replicas": [
+    { "id": "replica-us", "region": "us", "healthy": true, "lagMs": 42 },
+    { "id": "replica-eu", "region": "eu", "healthy": true, "lagMs": 118 },
+    { "id": "replica-asia", "region": "asia", "healthy": false, "lagMs": null }
+  ]
+}
+```
+
+- The current lag of the serving replica is included on every response as
+  `X-Replica-Lag-Ms` (omitted when served by the primary).
+
+### Failover
+
+- If a replica is unhealthy or its lag exceeds the configured threshold, it
+  is removed from the routing pool and traffic fails over to the primary.
+- Failover is automatic and requires no client changes; clients may observe
+  a temporary increase in latency and a `X-Served-By: primary` header.
+- When all replicas in a region are unavailable, requests from that region
+  are served by the primary until a replica recovers.
+
+

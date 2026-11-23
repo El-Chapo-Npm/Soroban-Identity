@@ -1,0 +1,452 @@
+//! Stable trait ABI for the `reputation` contract.
+
+use reputation::{
+    ContractError, DecayConfig, DecayMode, DecayParameters, ReportersPage, Reputation,
+    ReputationRecord, ReputationStorageStats, ScoreEntriesPage, ScoreEntry,
+};
+use soroban_sdk::{Address, BytesN, Env, String, Vec};
+
+/// Public entry points exposed by the `reputation` contract.
+///
+/// Integrators can depend on this trait (and the `reputation` crate's
+/// re-exported types) to code against a stable ABI without needing to track
+/// the contract's internal implementation.
+pub trait ReputationInterface {
+    fn ping(env: Env) -> u32;
+
+    fn initialize(env: Env, admin: Address) -> Result<(), ContractError>;
+
+    fn propose_admin(env: Env, admin: Address, proposed: Address) -> Result<(), ContractError>;
+
+    fn accept_admin(env: Env, proposed: Address) -> Result<(), ContractError>;
+
+    fn transfer_admin(
+        env: Env,
+        current_admin: Address,
+        new_admin: Address,
+    ) -> Result<(), ContractError>;
+
+    fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), ContractError>;
+
+    fn add_reporter(env: Env, reporter: Address) -> Result<(), ContractError>;
+
+    fn remove_reporter(env: Env, reporter: Address) -> Result<(), ContractError>;
+
+    fn update_thresholds(env: Env, min_score: i64, min_reporters: u32)
+        -> Result<(), ContractError>;
+
+    fn set_default_threshold(
+        env: Env,
+        min_score: i64,
+        min_reporters: u32,
+    ) -> Result<(), ContractError>;
+
+    fn submit_score(
+        env: Env,
+        reporter: Address,
+        subject: Address,
+        delta: i64,
+        reason: String,
+    ) -> Result<(), ContractError>;
+
+    fn get_reputation(env: Env, subject: Address) -> ReputationRecord;
+
+    fn get_history(
+        env: Env,
+        subject: Address,
+        reporter: Address,
+        offset: u32,
+        limit: u32,
+        from_timestamp: Option<u64>,
+        to_timestamp: Option<u64>,
+    ) -> Result<Vec<ScoreEntry>, ContractError>;
+
+    fn passes_sybil_check(env: Env, subject: Address, min_score: i64, min_reporters: u32) -> bool;
+
+    fn passes_sybil_check_default(env: Env, subject: Address) -> Result<bool, ContractError>;
+
+    fn get_reporters_list(env: Env) -> Vec<Address>;
+
+    fn list_reporters(env: Env, cursor: Option<u64>, limit: u32) -> ReportersPage;
+
+    fn list_history(
+        env: Env,
+        subject: Address,
+        reporter: Address,
+        cursor: Option<u64>,
+        limit: u32,
+    ) -> Result<ScoreEntriesPage, ContractError>;
+
+    fn get_storage_stats(env: Env) -> ReputationStorageStats;
+
+    fn dispute_score(
+        env: Env,
+        subject: Address,
+        reporter: Address,
+        delta_index: u32,
+    ) -> Result<u32, ContractError>;
+
+    fn resolve_dispute(
+        env: Env,
+        subject: Address,
+        reporter: Address,
+        delta_index: u32,
+        accepted: bool,
+    ) -> Result<(), ContractError>;
+
+    fn set_decay_rate(
+        env: Env,
+        admin: Address,
+        rate_bps: u32,
+        mode: DecayMode,
+    ) -> Result<(), ContractError>;
+
+    fn get_decay_rate(env: Env) -> DecayConfig;
+
+    fn set_reporter_decay_rate(
+        env: Env,
+        admin: Address,
+        reporter: Address,
+        rate_bps: u32,
+        mode: DecayMode,
+    ) -> Result<(), ContractError>;
+
+    fn clear_reporter_decay_rate(
+        env: Env,
+        admin: Address,
+        reporter: Address,
+    ) -> Result<(), ContractError>;
+
+    fn get_reporter_decay_rate(env: Env, reporter: Address) -> DecayConfig;
+
+    fn set_decay_algorithm(
+        env: Env,
+        admin: Address,
+        subject: Address,
+        params: DecayParameters,
+    ) -> Result<(), ContractError>;
+
+    fn set_subject_decay(
+        env: Env,
+        admin: Address,
+        subject: Address,
+        params: DecayParameters,
+    ) -> Result<(), ContractError>;
+
+    fn get_decay_algorithm(env: Env, subject: Address) -> Option<DecayParameters>;
+
+    fn get_subject_decay(env: Env, subject: Address) -> Option<DecayParameters>;
+
+    fn preview_reputation(env: Env, subject: Address, future_timestamp: u64) -> ReputationRecord;
+
+    fn get_last_calculation_time(env: Env, subject: Address) -> u64;
+
+    fn deposit_stake(env: Env, holder: Address, amount: i128) -> Result<(), ContractError>;
+
+    fn request_unstake(env: Env, holder: Address, amount: i128) -> Result<(), ContractError>;
+
+    fn withdraw_stake(env: Env, holder: Address) -> Result<i128, ContractError>;
+
+    fn slash_stake(
+        env: Env,
+        admin: Address,
+        holder: Address,
+        amount: i128,
+    ) -> Result<(), ContractError>;
+
+    fn distribute_rewards(
+        env: Env,
+        admin: Address,
+        total_reward: i128,
+    ) -> Result<(), ContractError>;
+
+    fn delegate_stake(
+        env: Env,
+        delegator: Address,
+        delegatee: Address,
+        amount: i128,
+    ) -> Result<(), ContractError>;
+
+    fn revoke_delegation(
+        env: Env,
+        delegator: Address,
+        delegatee: Address,
+    ) -> Result<(), ContractError>;
+
+    fn get_stake(env: Env, holder: Address) -> i128;
+
+    fn get_staking_history(
+        env: Env,
+        holder: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<ScoreEntry>, ContractError>;
+}
+
+/// Blanket implementation delegating to `Reputation`'s existing
+/// `#[contractimpl]` entry points, so the trait impl and the deployed
+/// contract can never drift apart.
+impl ReputationInterface for Reputation {
+    fn ping(env: Env) -> u32 {
+        Self::ping(env)
+    }
+
+    fn initialize(env: Env, admin: Address) -> Result<(), ContractError> {
+        Self::initialize(env, admin)
+    }
+
+    fn propose_admin(env: Env, admin: Address, proposed: Address) -> Result<(), ContractError> {
+        Self::propose_admin(env, admin, proposed)
+    }
+
+    fn accept_admin(env: Env, proposed: Address) -> Result<(), ContractError> {
+        Self::accept_admin(env, proposed)
+    }
+
+    fn transfer_admin(
+        env: Env,
+        current_admin: Address,
+        new_admin: Address,
+    ) -> Result<(), ContractError> {
+        Self::transfer_admin(env, current_admin, new_admin)
+    }
+
+    fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
+        Self::upgrade(env, admin, new_wasm_hash)
+    }
+
+    fn add_reporter(env: Env, reporter: Address) -> Result<(), ContractError> {
+        Self::add_reporter(env, reporter)
+    }
+
+    fn remove_reporter(env: Env, reporter: Address) -> Result<(), ContractError> {
+        Self::remove_reporter(env, reporter)
+    }
+
+    fn update_thresholds(
+        env: Env,
+        min_score: i64,
+        min_reporters: u32,
+    ) -> Result<(), ContractError> {
+        Self::update_thresholds(env, min_score, min_reporters)
+    }
+
+    fn set_default_threshold(
+        env: Env,
+        min_score: i64,
+        min_reporters: u32,
+    ) -> Result<(), ContractError> {
+        Self::set_default_threshold(env, min_score, min_reporters)
+    }
+
+    fn submit_score(
+        env: Env,
+        reporter: Address,
+        subject: Address,
+        delta: i64,
+        reason: String,
+    ) -> Result<(), ContractError> {
+        Self::submit_score(env, reporter, subject, delta, reason)
+    }
+
+    fn get_reputation(env: Env, subject: Address) -> ReputationRecord {
+        Self::get_reputation(env, subject)
+    }
+
+    fn get_history(
+        env: Env,
+        subject: Address,
+        reporter: Address,
+        offset: u32,
+        limit: u32,
+        from_timestamp: Option<u64>,
+        to_timestamp: Option<u64>,
+    ) -> Result<Vec<ScoreEntry>, ContractError> {
+        Self::get_history(
+            env,
+            subject,
+            reporter,
+            offset,
+            limit,
+            from_timestamp,
+            to_timestamp,
+        )
+    }
+
+    fn passes_sybil_check(env: Env, subject: Address, min_score: i64, min_reporters: u32) -> bool {
+        Self::passes_sybil_check(env, subject, min_score, min_reporters)
+    }
+
+    fn passes_sybil_check_default(env: Env, subject: Address) -> Result<bool, ContractError> {
+        Self::passes_sybil_check_default(env, subject)
+    }
+
+    fn get_reporters_list(env: Env) -> Vec<Address> {
+        Self::get_reporters_list(env)
+    }
+
+    fn list_reporters(env: Env, cursor: Option<u64>, limit: u32) -> ReportersPage {
+        Self::list_reporters(env, cursor, limit)
+    }
+
+    fn list_history(
+        env: Env,
+        subject: Address,
+        reporter: Address,
+        cursor: Option<u64>,
+        limit: u32,
+    ) -> Result<ScoreEntriesPage, ContractError> {
+        Self::list_history(env, subject, reporter, cursor, limit)
+    }
+
+    fn get_storage_stats(env: Env) -> ReputationStorageStats {
+        Self::get_storage_stats(env)
+    }
+
+    fn dispute_score(
+        env: Env,
+        subject: Address,
+        reporter: Address,
+        delta_index: u32,
+    ) -> Result<u32, ContractError> {
+        Self::dispute_score(env, subject, reporter, delta_index)
+    }
+
+    fn resolve_dispute(
+        env: Env,
+        subject: Address,
+        reporter: Address,
+        delta_index: u32,
+        accepted: bool,
+    ) -> Result<(), ContractError> {
+        Self::resolve_dispute(env, subject, reporter, delta_index, accepted)
+    }
+
+    fn set_decay_rate(
+        env: Env,
+        admin: Address,
+        rate_bps: u32,
+        mode: DecayMode,
+    ) -> Result<(), ContractError> {
+        Self::set_decay_rate(env, admin, rate_bps, mode)
+    }
+
+    fn get_decay_rate(env: Env) -> DecayConfig {
+        Self::get_decay_rate(env)
+    }
+
+    fn set_reporter_decay_rate(
+        env: Env,
+        admin: Address,
+        reporter: Address,
+        rate_bps: u32,
+        mode: DecayMode,
+    ) -> Result<(), ContractError> {
+        Self::set_reporter_decay_rate(env, admin, reporter, rate_bps, mode)
+    }
+
+    fn clear_reporter_decay_rate(
+        env: Env,
+        admin: Address,
+        reporter: Address,
+    ) -> Result<(), ContractError> {
+        Self::clear_reporter_decay_rate(env, admin, reporter)
+    }
+
+    fn get_reporter_decay_rate(env: Env, reporter: Address) -> DecayConfig {
+        Self::get_reporter_decay_rate(env, reporter)
+    }
+
+    fn set_decay_algorithm(
+        env: Env,
+        admin: Address,
+        subject: Address,
+        params: DecayParameters,
+    ) -> Result<(), ContractError> {
+        Self::set_decay_algorithm(env, admin, subject, params)
+    }
+
+    fn set_subject_decay(
+        env: Env,
+        admin: Address,
+        subject: Address,
+        params: DecayParameters,
+    ) -> Result<(), ContractError> {
+        Self::set_subject_decay(env, admin, subject, params)
+    }
+
+    fn get_decay_algorithm(env: Env, subject: Address) -> Option<DecayParameters> {
+        Self::get_decay_algorithm(env, subject)
+    }
+
+    fn get_subject_decay(env: Env, subject: Address) -> Option<DecayParameters> {
+        Self::get_subject_decay(env, subject)
+    }
+
+    fn preview_reputation(env: Env, subject: Address, future_timestamp: u64) -> ReputationRecord {
+        Self::preview_reputation(env, subject, future_timestamp)
+    }
+
+    fn get_last_calculation_time(env: Env, subject: Address) -> u64 {
+        Self::get_last_calculation_time(env, subject)
+    }
+
+    fn deposit_stake(env: Env, holder: Address, amount: i128) -> Result<(), ContractError> {
+        Self::deposit_stake(env, holder, amount)
+    }
+
+    fn request_unstake(env: Env, holder: Address, amount: i128) -> Result<(), ContractError> {
+        Self::request_unstake(env, holder, amount)
+    }
+
+    fn withdraw_stake(env: Env, holder: Address) -> Result<i128, ContractError> {
+        Self::withdraw_stake(env, holder)
+    }
+
+    fn slash_stake(
+        env: Env,
+        admin: Address,
+        holder: Address,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        Self::slash_stake(env, admin, holder, amount)
+    }
+
+    fn distribute_rewards(
+        env: Env,
+        admin: Address,
+        total_reward: i128,
+    ) -> Result<(), ContractError> {
+        Self::distribute_rewards(env, admin, total_reward)
+    }
+
+    fn delegate_stake(
+        env: Env,
+        delegator: Address,
+        delegatee: Address,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        Self::delegate_stake(env, delegator, delegatee, amount)
+    }
+
+    fn revoke_delegation(
+        env: Env,
+        delegator: Address,
+        delegatee: Address,
+    ) -> Result<(), ContractError> {
+        Self::revoke_delegation(env, delegator, delegatee)
+    }
+
+    fn get_stake(env: Env, holder: Address) -> i128 {
+        Self::get_stake(env, holder)
+    }
+
+    fn get_staking_history(
+        env: Env,
+        holder: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<ScoreEntry>, ContractError> {
+        Self::get_staking_history(env, holder, offset, limit)
+    }
+}

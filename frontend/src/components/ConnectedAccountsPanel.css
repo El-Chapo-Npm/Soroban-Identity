@@ -1,0 +1,145 @@
+.connected-accounts {
+  max-width: 880px;
+  margin: 1.5rem auto;
+  padding: clamp(1rem, 3vw, 2rem);
+  color: var(--text-primary, #172033);
+}
+.connected-accounts header {
+  margin-bottom: 1.5rem;
+}
+.connected-accounts h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.65rem;
+}
+.connected-accounts header p,
+.account-card p {
+  color: var(--text-secondary, #596579);
+}
+.account-list {
+  display: grid;
+  gap: 1rem;
+}
+.account-card,
+.accounts-message,
+.accounts-confirm {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.25rem;
+  padding: 1.25rem;
+  border: 1px solid var(--border-color, #d8dee8);
+  border-radius: 12px;
+  background: var(--surface-color, #fff);
+}
+.account-card h3 {
+  margin: 0 0 0.5rem;
+}
+.account-card p {
+  margin: 0.25rem 0;
+}
+.connected-accounts button {
+  min-height: 42px;
+  padding: 0.6rem 0.95rem;
+  border: 1px solid #3b5ccc;
+  border-radius: 8px;
+  background: #3b5ccc;
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.connected-accounts button:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+.connected-accounts button.secondary {
+  background: transparent;
+  color: inherit;
+  border-color: var(--border-color, #aab4c3);
+}
+.account-linked {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+.account-linked img {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+}
+.verified {
+  color: #18794e;
+  font-size: 0.9rem;
+}
+.account-card form {
+  margin-top: 0.8rem;
+}
+.account-card label {
+  display: block;
+  margin-bottom: 0.35rem;
+}
+.email-form {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.email-form input {
+  min-width: 200px;
+  flex: 1;
+  min-height: 40px;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--border-color, #aab4c3);
+  border-radius: 7px;
+  font: inherit;
+}
+.accounts-message {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+.accounts-message p {
+  flex-basis: 100%;
+  margin: 0;
+}
+.accounts-confirm {
+  margin-top: 1rem;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  border-color: #e2b84b;
+}
+.accounts-confirm p {
+  flex-basis: 100%;
+  margin: 0;
+}
+.accounts-error,
+.accounts-success,
+.accounts-hint {
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+}
+.accounts-error {
+  color: #8a1c1c;
+  background: #fff0f0;
+}
+.accounts-success {
+  color: #17613e;
+  background: #edf9f2;
+}
+.accounts-hint {
+  color: var(--text-secondary, #596579);
+  font-size: 0.9rem;
+}
+.connected-accounts button:focus-visible,
+.connected-accounts input:focus-visible {
+  outline: 3px solid #8aa7ff;
+  outline-offset: 2px;
+}
+@media (max-width: 600px) {
+  .account-card {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .connected-accounts {
+    margin: 0.75rem auto;
+    padding: 1rem;
+  }
+}

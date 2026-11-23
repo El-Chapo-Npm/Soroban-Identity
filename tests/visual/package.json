@@ -1,0 +1,15 @@
+{
+  "name": "soroban-identity-visual-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "test:percy": "percy exec -- playwright test",
+    "install:browsers": "playwright install --with-deps chromium firefox webkit"
+  },
+  "devDependencies": {
+    "@percy/cli": "^1.29.0",
+    "@percy/playwright": "^1.0.6",
+    "@playwright/test": "^1.47.0"
+  }
+}

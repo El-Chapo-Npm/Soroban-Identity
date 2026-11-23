@@ -1,83 +1,212 @@
-export * as v1 from './v1';
+// ── Core clients ──────────────────────────────────────────────────────────────
 export { IdentityClient } from './identity';
-export { health, healthCheck } from './health';
-export type { HealthResult, HealthCheckResult } from './health';
 export { CredentialClient } from './credentials';
 export type { CredentialInput, BatchOptions, BatchResult } from './credentials';
 export { ReputationClient } from './reputation';
+export type { ReputationRecord, ScoreHistoryEntry } from './reputation';
+
+// ── Base client (multi-sig pipeline, closes #564) ─────────────────────────────
+//
+// All SDK clients extend BaseClient which exposes:
+//   buildUnsignedTransaction(operation, accountInfo, options?) → { xdr, hash }
+//   submitSignedTransaction(signedXdr) → { hash }
+//
+// Multi-sig workflow:
+//   1. Fetch account once while online:
+//        const account = await server.getAccount(signerA);
+//        const accountInfo = { publicKey: signerA, sequence: account.sequence };
+//   2. Build the unsigned transaction (no RPC needed):
+//        const { xdr } = client.buildUnsignedTransaction(operation, accountInfo);
+//   3. Route the XDR to each required signer (hardware wallet, air-gap device, etc.):
+//        const signed1 = await walletA.sign(xdr);
+//        const signed2 = await walletB.sign(signed1); // attach second signature
+//   4. Submit the fully-signed transaction:
+//        const { hash } = await client.submitSignedTransaction(signed2);
+export { BaseClient, getOrCreateServer, clearServerCache, SDK_VERSION } from './base-client';
+export type { AccountInfo, RevocationRecord } from './types';
+
+// ── Presentation ──────────────────────────────────────────────────────────────
 export { PresentationClient } from './presentation';
+
+// ── DID resolver (universal resolver, closes #1120) ───────────────────────────
+//
+// Supports did:stellar, did:ethr and did:web out of the box, with a fallback
+// chain, resolved-DID caching and custom resolver plugins.
+//
+// Usage:
+//   const resolver = new DidResolver({ cache: { ttlMs: 60_000 } });
+//   resolver.registerPlugin(myCustomResolver);
+//   const doc = await resolver.resolve('did:stellar:G...');
+export {
+  DidResolver,
+  StellarDidResolver,
+  EthrDidResolver,
+  WebDidResolver,
+  DidResolverError,
+  DidDocumentValidationError,
+  validateDidDocument,
+  parseDid,
+  createDefaultResolver,
+} from './did-resolver';
 export type {
-  VerifiablePresentation,
-  VerifiableCredentialSubset,
-  PresentationProof,
-  PresentationVerifyResult,
-  PresentationVerifyFailReason,
-} from './presentation';
-export { SorobanEventListener, getEvents } from './events';
-export { SorobanTransactionBuilder } from './transaction-builder';
-export { RequestQueue } from './request-queue';
+  ParsedDid,
+  DidResolverPlugin,
+  DidResolverOptions,
+  DidCacheOptions,
+  DidCacheEntry,
+  DidResolutionResult,
+  DidResolutionMetadata,
+  DidDocumentMetadata,
+  DidResolverErrorCode,
+} from './did-resolver';
+
+// ── Revocation list (bitmap CRL, closes #1121) ────────────────────────────────
+//
+// Bitmap-backed revocation storage with batch revocation, reason codes,
+// merkle proofs and statistics queries.
+//
+// Usage:
+//   const crl = new RevocationListClient(client);
+//   await crl.revokeBatch([id1, id2], RevocationReason.Fraud);
+//   const proof = await crl.generateProof(id1);
 export {
-  retryWithBackoff,
-  checkConnection,
-  validateStellarAddress,
-  computeCredentialId,
-  runConcurrent,
-} from './utils';
+  RevocationListClient,
+  RevocationBitmap,
+  buildRevokeBatchWithReasonsArgs,
+  buildGetRevocationStatsArgs,
+  buildGenerateRevocationProofArgs,
+  buildVerifyRevocationProofArgs,
+} from './revocation-list';
+export type {
+  RevocationEntry,
+  RevocationProof,
+  RevocationStats,
+  RevocationBatchOptions,
+  RevocationBatchResult,
+  RevocationListOptions,
+} from './revocation-list';
+
+// ── Reputation staking (closes #1122) ─────────────────────────────────────────
+//
+// Stake tokens to boost reputation, with cooldown-based unstaking, slashing,
+// rewards and stake delegation.
+//
+// Usage:
+//   const staking = new StakingClient(client);
+//   await staking.deposit(amount);
+//   const multiplier = await staking.getReputationMultiplier(holder);
 export {
-  ContractError,
+  StakingClient,
+  calculateStakeMultiplier,
+  buildDepositStakeArgs,
+  buildWithdrawStakeArgs,
+  buildSlashStakeArgs,
+  buildClaimStakingRewardsArgs,
+  buildDelegateStakeArgs,
+  buildGetStakeInfoArgs,
+  buildGetStakingHistoryArgs,
+} from './staking';
+export type {
+  StakeInfo,
+  StakingHistoryEntry,
+  StakingRewards,
+  StakingOptions,
+  SlashReason,
+  DelegationInfo,
+} from './staking';
+
+// ── Merkle proofs (batch credential verification, closes #1056) ───────────────
+//
+// Merkle tree structure:
+//   - Leaves are credential IDs (or hashed credential payloads) ordered as
+//     inserted into the batch.
+//   - Each internal node is the hash of its two children; odd nodes are
+//     promoted unchanged to the next level.
+//   - The root is stored on-chain and used to verify inclusion proofs without
+//     revealing the full batch.
+//
+// Usage:
+//   const tree = buildMerkleTree(credentialIds);
+//   const proof = generateMerkleProof(tree, credentialId);
+//   const valid = verifyMerkleProof(proof, tree.root);
+export {
+  buildMerkleTree,
+  generateMerkleProof,
+  verifyMerkleProof,
+  updateMerkleTree,
+  hashLeaf,
+  hashNodes,
+} from './merkle';
+export type {
+  MerkleProof,
+  MerkleBatchRoot,
+  MerkleTree,
+  MerkleProofStep,
+} from './merkle';
+
+// ── Errors ────────────────────────────────────────────────────────────────────
+export {
   SorobanIdentityError,
+  ContractError,
   RateLimitError,
+  ClientDisposedError,
+  ClaimsValidationError,
   classifyError,
   wrapError,
+  parseContractError,
 } from './errors';
-export type {
-  SorobanErrorCode,
-  SorobanIdentityErrorInit,
-} from './errors';
-// #249 / #252 / #253 / #254 — server-layer helpers.
-export * from './server';
+export type { SorobanErrorCode, SorobanIdentityErrorInit } from './errors';
+
+// ── Error codes ───────────────────────────────────────────────────────────────
 export {
   SorobanErrorCodes,
   IDENTITY_REGISTRY_ERRORS,
   CREDENTIAL_MANAGER_ERRORS,
   REPUTATION_ERRORS,
 } from './error-codes';
-export { clearServerCache, SDK_VERSION } from './base-client';
-export { toW3CDidDocument, exportDidDocumentAsJsonLd } from './serializers';
+
+// ── Types ─────────────────────────────────────────────────────────────────────
 export {
-  buildCreateDidArgs,
-  buildUpdateDidArgs,
-  buildResolveDidArgs,
-  buildHasActiveDidArgs,
-  buildDeactivateDidArgs,
-  buildIssueCredentialArgs,
-  buildRevokeCredentialArgs,
-  buildVerifyCredentialArgs,
-  buildGetCredentialArgs,
-  buildGetSubjectCredentialsArgs,
-  buildIsIssuerArgs,
-  buildGetCredentialCountArgs,
-  buildListSubjectCredentialsArgs,
-  buildListIssuersArgs,
-  buildGetReputationArgs,
-  buildGetHistoryArgs,
-  buildPassesSybilCheckDefaultArgs,
-  buildPassesSybilCheckArgs,
-  buildSubmitScoreArgs,
-  buildListReportersArgs,
-  buildListHistoryArgs,
-  buildGetIssuerCredentialsArgs,
-  buildListIssuerCredentialsArgs,
-} from './contract-args';
+  UnknownCredentialTypeError,
+  assertCredentialType,
+  SimulationError,
+  validateConfig,
+  RevocationReason,
+} from './types';
+export {
+  EXPORT_FORMATS,
+  EXPORT_MIME_TYPES,
+  EXPORT_SCHEMA_VERSION,
+  credentialStatus,
+  credentialToJson,
+  credentialToPdf,
+  credentialToXml,
+  escapeXml,
+  exportCredential,
+  exportLines,
+  toExportModel,
+} from './export';
+export type {
+  ExportedCredential,
+  ExportedFile,
+  ExportFormat,
+  CredentialStatus,
+} from './export';
 export type {
   DidDocument,
   ServiceEndpoint,
   Credential,
   RevokedCredential,
+  RevokeOptions,
   CredentialType,
   CredentialListOptions,
   VerifyResult,
   VerifyFailReason,
+  SorobanIdentityConfig,
+} from "./types";
+export { REVOCATION_REASONS } from "./types";
+export type {
+  SorobanIdentityLogger,
   CallOptions,
   IdentityStorageStats,
   CredentialStorageStats,
@@ -87,13 +216,112 @@ export type {
   SorobanIdentityContractIdField,
   ValidateConfigOptions,
   SorobanResponse,
+  WriteResult,
+  FeeEstimate,
 } from './types';
-export { validateConfig } from './types';
-export type { ReputationRecord, ScoreHistoryEntry } from './reputation';
-export type { EventFilter, ContractEvent, GetEventsOptions } from './events';
-export type { SorobanIdentityConfig, SorobanIdentityLogger, WriteResult } from './types';
 
-// Testnet defaults — fill contract IDs after deployment
+// ── Transaction helpers ───────────────────────────────────────────────────────
+export { executeTransaction } from './transaction';
+export type { TxOptions } from './transaction';
+
+// ── Events ────────────────────────────────────────────────────────────────────
+export { SorobanEventListener, getEvents, subscribeToEvents } from './events';
+export type {
+  SubscribeOptions,
+  EventFilter,
+  ContractEvent,
+  GetEventsOptions,
+} from './events';
+
+// ── Presentation ──────────────────────────────────────────────────────────────
+export type {
+  VerifiablePresentation,
+  VerifiableCredentialSubset,
+  PresentationProof,
+  PresentationVerifyResult,
+  PresentationVerifyFailReason,
+  PresentationChallenge,
+  PresentationTemplate,
+  PresentationProofFormat,
+  SelectiveDisclosureOptions,
+} from './presentation';
+
+// ── Health ────────────────────────────────────────────────────────────────────
+export { health, healthCheck } from './health';
+export type { HealthResult, HealthCheckResult } from './health';
+
+// ── Server info ───────────────────────────────────────────────────────────────
+export { getServerInfo, UnsupportedEndpointError } from './server-info';
+export type { ServerInfo } from './server-info';
+
+// ── Transaction helpers ───────────────────────────────────────────────────────
+export { SorobanTransactionBuilder } from './transaction-builder';
+
+// ── Utils ─────────────────────────────────────────────────────────────────────
+export {
+  retryWithBackoff,
+  checkConnection,
+  validateStellarAddress,
+  computeCredentialId,
+  runConcurrent,
+  pollTransactionStatus,
+} from './utils';
+export { RequestQueue } from './request-queue';
+
+// ── Serializers ───────────────────────────────────────────────────────────────
+export {
+  toW3CDidDocument,
+  exportDidDocumentAsJsonLd,
+  flattenSubject,
+  serializeClaimValue,
+  hashSubjectClaims,
+} from './serializers';
+
+// ── Contract arg builders ─────────────────────────────────────────────────────
+export {
+  encodeRevocationReason,
+  buildCreateDidArgs,
+  buildUpdateDidArgs,
+  buildResolveDidArgs,
+  buildHasActiveDidArgs,
+  buildDeactivateDidArgs,
+  buildDidExistsArgs,
+  buildIssueCredentialArgs,
+  buildRevokeCredentialArgs,
+  buildRevokeBatchArgs,
+  buildRenewCredentialArgs,
+  buildVerifyCredentialArgs,
+  buildGetCredentialArgs,
+  buildGetSubjectCredentialsArgs,
+  buildIsIssuerArgs,
+  buildGetCredentialCountArgs,
+  buildListSubjectCredentialsArgs,
+  buildListIssuersArgs,
+  buildGetIssuerCredentialsArgs,
+  buildListIssuerCredentialsArgs,
+  buildGetReputationArgs,
+  buildGetHistoryArgs,
+  buildPassesSybilCheckDefaultArgs,
+  buildPassesSybilCheckArgs,
+  buildSubmitScoreArgs,
+  buildListReportersArgs,
+  buildListHistoryArgs,
+  buildGetRevocationsArgs,
+  buildCancelActivationArgs,
+  buildGetPendingActivationsArgs,
+  buildRevokeCredentialWithReasonArgs,
+  buildGetRevocationRecordArgs,
+  buildGetRevokedByReasonArgs,
+} from './contract-args';
+
+// ── OpenAPI / v1 ──────────────────────────────────────────────────────────────
+export * as v1 from './v1';
+export * from './server';
+
+// ── Network configs ───────────────────────────────────────────────────────────
+import type { SorobanIdentityConfig } from './types';
+
+/** Testnet defaults — fill contract IDs after deployment. */
 export const TESTNET_CONFIG: SorobanIdentityConfig = {
   rpcUrl: ['https://soroban-testnet.stellar.org', 'https://soroban-testnet-backup.stellar.org'],
   networkPassphrase: 'Test SDF Network ; September 2015',
@@ -102,7 +330,7 @@ export const TESTNET_CONFIG: SorobanIdentityConfig = {
   reputationId: '',
 };
 
-// Mainnet defaults — fill contract IDs after deployment
+/** Mainnet defaults — fill contract IDs after deployment. */
 export const MAINNET_CONFIG: SorobanIdentityConfig = {
   rpcUrl: ['https://soroban-mainnet.stellar.org', 'https://soroban-mainnet-backup.stellar.org'],
   networkPassphrase: 'Public Global Stellar Network ; September 2015',

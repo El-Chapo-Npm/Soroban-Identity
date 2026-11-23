@@ -1,0 +1,40 @@
+{
+  "name": "Soroban Identity",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": { "version": "22" },
+    "ghcr.io/devcontainers/features/rust:1": { "version": "1.85" },
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  "remoteEnv": {
+    "SOROBAN_RPC_URL": "${localEnv:SOROBAN_RPC_URL,https://soroban-testnet.stellar.org}",
+    "SOROBAN_NETWORK_PASSPHRASE": "${localEnv:SOROBAN_NETWORK_PASSPHRASE,Test SDF Network ; September 2015}"
+  },
+  "forwardPorts": [3000, 3001, 8787],
+  "portsAttributes": {
+    "3000": { "label": "Frontend", "onAutoForward": "notify" },
+    "3001": { "label": "API server", "onAutoForward": "notify" },
+    "8787": { "label": "Docs", "onAutoForward": "notify" }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "tamasfe.even-better-toml",
+        "streetsidesoftware.code-spell-checker"
+      ],
+      "settings": {
+        "editor.formatOnSave": true,
+        "[rust]": { "editor.defaultFormatter": "rust-lang.rust-analyzer" },
+        "[typescript]": { "editor.defaultFormatter": "esbenp.prettier-vscode" }
+      }
+    }
+  },
+  "mounts": [
+    "source=${localWorkspaceFolder}/.devcontainer/data,target=/workspace/.devcontainer/data,type=bind,consistency=cached"
+  ],
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "remoteUser": "vscode"
+}

@@ -81,6 +81,9 @@ if [[ "$NETWORK" == "mainnet" ]]; then
 fi
 
 SOURCE_ACCOUNT="$STELLAR_SECRET_KEY"
+# Soroban uses deployer-derived deterministic IDs (salt), rather than Ethereum CREATE2.
+# Keep salts stable so retries do not create duplicate contract instances.
+SALT_PREFIX="${SOROBAN_DEPLOY_SALT_PREFIX:-soroban-identity}"
 
 # Retry configuration with exponential backoff
 MAX_RETRIES="${MAX_RETRIES:-3}"
@@ -93,17 +96,17 @@ retry_command() {
   local attempt=1
 
   while [ "$attempt" -le "$max_attempts" ]; do
-    echo "Attempt $attempt/$max_attempts..."
+    echo "Attempt $attempt/$max_attempts..." >&2
     if "$@"; then
       return 0
     fi
-    echo "Failed. Retrying in ${delay}s..."
+    echo "Failed. Retrying in ${delay}s..." >&2
     sleep "$delay"
     delay=$((delay * 2))
     attempt=$((attempt + 1))
   done
 
-  echo "All attempts failed."
+  echo "All attempts failed." >&2
   return 1
 }
 
@@ -115,11 +118,12 @@ echo "  Network:  $STELLAR_NETWORK"
 echo "  RPC URL:  $STELLAR_RPC_URL"
 echo "  Max Retries:  $MAX_RETRIES"
 echo "  Initial Retry Delay:  ${RETRY_DELAY}s"
+echo "  Deterministic salt:    ${SALT_PREFIX}:<contract>"
 echo "========================================"
 echo ""
 
 # Check for existing deployment
-DEPLOYED_ENV="$(dirname "$0")/../deployed.env"
+DEPLOYED_ENV="$(dirname "$0")/../.env.deployed"
 if [[ -f "$DEPLOYED_ENV" ]]; then
   echo "==> Found existing deployment configuration"
   source "$DEPLOYED_ENV"
@@ -143,7 +147,7 @@ if [[ -f "$DEPLOYED_ENV" ]]; then
       echo "  credential-manager: $CREDENTIAL_MANAGER_ID"
       echo "  reputation:         $REPUTATION_ID"
       echo "==> Skipping deployment (contracts already exist)"
-      echo "==> To force re-deployment, delete deployed.env and run again"
+      echo "==> To force re-deployment, delete .env.deployed and run again"
       exit 0
     else
       echo "==> Existing contracts not accessible, proceeding with fresh deployment"
@@ -174,7 +178,8 @@ if ! REGISTRY_ID=$(retry_command stellar contract deploy \
   --wasm "$REGISTRY_WASM" \
   --source "$SOURCE_ACCOUNT" \
   --network "$STELLAR_NETWORK" \
-  --rpc-url "$STELLAR_RPC_URL"); then
+  --rpc-url "$STELLAR_RPC_URL" \
+  --salt "$(printf '%s' "${SALT_PREFIX}:identity-registry" | sha256sum | cut -c1-64)"); then
   echo "Error: Failed to deploy identity-registry contract"
   exit 1
 fi
@@ -185,7 +190,8 @@ if ! CREDENTIAL_ID=$(retry_command stellar contract deploy \
   --wasm "$CREDENTIAL_WASM" \
   --source "$SOURCE_ACCOUNT" \
   --network "$STELLAR_NETWORK" \
-  --rpc-url "$STELLAR_RPC_URL"); then
+  --rpc-url "$STELLAR_RPC_URL" \
+  --salt "$(printf '%s' "${SALT_PREFIX}:credential-manager" | sha256sum | cut -c1-64)"); then
   echo "Error: Failed to deploy credential-manager contract"
   exit 1
 fi
@@ -196,53 +202,84 @@ if ! REPUTATION_ID=$(retry_command stellar contract deploy \
   --wasm "$REPUTATION_WASM" \
   --source "$SOURCE_ACCOUNT" \
   --network "$STELLAR_NETWORK" \
-  --rpc-url "$STELLAR_RPC_URL"); then
+  --rpc-url "$STELLAR_RPC_URL" \
+  --salt "$(printf '%s' "${SALT_PREFIX}:reputation" | sha256sum | cut -c1-64)"); then
   echo "Error: Failed to deploy reputation contract"
   exit 1
 fi
 echo "reputation: $REPUTATION_ID"
 
-echo "==> Initializing contracts..."
 if ! ADMIN_ADDRESS=$(stellar keys address "$SOURCE_ACCOUNT" --network "$STELLAR_NETWORK"); then
   echo "Error: Failed to get admin address from source account"
   exit 1
 fi
 
-if ! retry_command stellar contract invoke \
-  --id "$REGISTRY_ID" \
-  --source "$SOURCE_ACCOUNT" \
-  --network "$STELLAR_NETWORK" \
-  --rpc-url "$STELLAR_RPC_URL" \
-  -- initialize --admin "$ADMIN_ADDRESS"; then
-  echo "Error: Failed to initialize identity-registry contract"
-  exit 1
-fi
+# deploy_one <name> <wasm> <id-var> <fresh-var>
+# Sets <fresh-var> to 1 for a newly created contract, 0 when the contract
+# already exists at its deterministic address (upload and deploy skipped).
+deploy_one() {
+  local name="$1" wasm="$2" hash id fresh=1
+  echo "==> Deploying $name..."
+  if id=$(existing_contract_id "$name"); then
+    echo "    $name already deployed at $id, skipping"
+    fresh=0
+  else
+    wasm=$(optimize_wasm "$wasm")
+    if ! hash=$(install_wasm "$wasm"); then
+      echo "Error: Failed to upload $name WASM"
+      exit 1
+    fi
+    if ! id=$(deploy_contract "$name" "$hash"); then
+      echo "Error: Failed to deploy $name contract"
+      exit 1
+    fi
+  fi
+  echo "$name: $id"
+  printf -v "$3" '%s' "$id"
+  printf -v "$4" '%s' "$fresh"
+}
 
-if ! retry_command stellar contract invoke \
-  --id "$CREDENTIAL_ID" \
-  --source "$SOURCE_ACCOUNT" \
-  --network "$STELLAR_NETWORK" \
-  --rpc-url "$STELLAR_RPC_URL" \
-  -- initialize --admin "$ADMIN_ADDRESS"; then
-  echo "Error: Failed to initialize credential-manager contract"
-  exit 1
-fi
+deploy_one identity-registry "$REGISTRY_WASM" REGISTRY_ID REGISTRY_FRESH
+deploy_one credential-manager "$CREDENTIAL_WASM" CREDENTIAL_ID CREDENTIAL_FRESH
+deploy_one reputation "$REPUTATION_WASM" REPUTATION_ID REPUTATION_FRESH
 
-if ! retry_command stellar contract invoke \
-  --id "$REPUTATION_ID" \
-  --source "$SOURCE_ACCOUNT" \
-  --network "$STELLAR_NETWORK" \
-  --rpc-url "$STELLAR_RPC_URL" \
-  -- initialize --admin "$ADMIN_ADDRESS"; then
-  echo "Error: Failed to initialize reputation contract"
-  exit 1
-fi
+echo "==> Initializing contracts..."
+# Only freshly created contracts are initialized; reused deterministic
+# deployments were initialized on the run that created them.
+# init_one <name> <id> <fresh> <args...>
+init_one() {
+  local name="$1" id="$2" fresh="$3"
+  shift 3
+  if [[ "$fresh" != "1" ]]; then
+    echo "    $name already initialized, skipping"
+    return 0
+  fi
+  if ! retry_command stellar contract invoke \
+    --id "$id" \
+    --source "$SOURCE_ACCOUNT" \
+    --network "$STELLAR_NETWORK" \
+    --rpc-url "$STELLAR_RPC_URL" \
+    -- initialize "$@"; then
+    echo "Error: Failed to initialize $name contract"
+    exit 1
+  fi
+}
 
-DEPLOYED_ENV="$(dirname "$0")/../deployed.env"
+init_one identity-registry "$REGISTRY_ID" "$REGISTRY_FRESH" --admin "$ADMIN_ADDRESS"
+init_one credential-manager "$CREDENTIAL_ID" "$CREDENTIAL_FRESH" \
+  --admin "$ADMIN_ADDRESS" --identity_registry_id "$REGISTRY_ID"
+init_one reputation "$REPUTATION_ID" "$REPUTATION_FRESH" --admin "$ADMIN_ADDRESS"
+
+DEPLOYED_ENV="$(dirname "$0")/../.env.deployed"
+DEPLOYED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 cat > "$DEPLOYED_ENV" <<EOF
-IDENTITY_REGISTRY_ID=$REGISTRY_ID
-CREDENTIAL_MANAGER_ID=$CREDENTIAL_ID
-REPUTATION_ID=$REPUTATION_ID
+# Soroban Identity Deployed Contract IDs
+# Generated by scripts/deploy.sh on $DEPLOYED_AT
+IDENTITY_REGISTRY_ID="$REGISTRY_ID"
+CREDENTIAL_MANAGER_ID="$CREDENTIAL_ID"
+REPUTATION_ID="$REPUTATION_ID"
+NETWORK="$STELLAR_NETWORK"
+DEPLOYED_AT="$DEPLOYED_AT"
 EOF
 
 echo ""
@@ -254,7 +291,14 @@ echo "  RPC URL:            $STELLAR_RPC_URL"
 echo "  identity-registry:  $REGISTRY_ID"
 echo "  credential-manager: $CREDENTIAL_ID"
 echo "  reputation:         $REPUTATION_ID"
+echo "  Deployed at:        $DEPLOYED_AT"
 echo "========================================"
 echo ""
-echo "Contract IDs written to deployed.env"
+echo "Contract IDs written to: $DEPLOYED_ENV"
 echo "Update sdk/src/index.ts with the IDs above."
+
+POST_DEPLOY_HEALTH_CHECK="$(dirname "$0")/post_deploy_health_check.sh"
+if [ -f "$POST_DEPLOY_HEALTH_CHECK" ]; then
+  echo "==> Running post-deploy health check..."
+  bash "$POST_DEPLOY_HEALTH_CHECK"
+fi

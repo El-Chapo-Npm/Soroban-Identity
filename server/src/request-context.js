@@ -2,30 +2,33 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 
 export const requestContextStore = new AsyncLocalStorage();
 
-const originalLog = console.log;
-const originalError = console.error;
-const originalWarn = console.warn;
-
-function formatArgs(args) {
-  const store = requestContextStore.getStore();
-  if (store && store.requestId) {
-    if (typeof args[0] === 'string') {
-      return [`[${store.requestId}] ${args[0]}`, ...args.slice(1)];
-    } else {
-      return [`[${store.requestId}]`, ...args];
-    }
+/**
+ * Store the resolved DID in the current request context.
+ * @param {object} store - The request context store (from AsyncLocalStorage).
+ * @param {string} did - The resolved DID for the request.
+ */
+export function setRequestDid(store, did) {
+  if (store && typeof store === 'object') {
+    store.did = did;
   }
-  return args;
 }
 
-console.log = function (...args) {
-  originalLog.apply(console, formatArgs(args));
-};
-
-console.error = function (...args) {
-  originalError.apply(console, formatArgs(args));
-};
-
-console.warn = function (...args) {
-  originalWarn.apply(console, formatArgs(args));
-};
+/**
+ * Compute the latency (in milliseconds) since the request started.
+ * @param {object} store - The request context store (from AsyncLocalStorage).
+ * @returns {number|undefined} Latency in ms, or undefined if no start time is available.
+ */
+export function getRequestLatency(store) {
+  if (!store || typeof store !== 'object') {
+    return undefined;
+  }
+  const startTime = store.startTime ?? store.startTimeMs;
+  if (startTime === undefined || startTime === null) {
+    return undefined;
+  }
+  const startMs = startTime instanceof Date ? startTime.getTime() : Number(startTime);
+  if (Number.isNaN(startMs)) {
+    return undefined;
+  }
+  return Date.now() - startMs;
+}

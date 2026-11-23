@@ -9,7 +9,10 @@
   },
   "tabs": {
     "identity": "Identidad (DID)",
-    "credentials": "Credenciales"
+    "credentials": "Credenciales",
+    "issuerAnalytics": "Analíticas del Emisor",
+    "label": "Secciones",
+    "connectedAccounts": "Cuentas conectadas"
   },
   "wallet": {
     "connect": "Conectar Billetera",
@@ -72,6 +75,122 @@
     "expiresInHours": "Expira en {{count}} hora",
     "expiresInHours_plural": "Expira en {{count}} horas",
     "expiresInMins": "Expira en {{count}} min",
-    "expiresInMins_plural": "Expira en {{count}} mins"
+    "expiresInMins_plural": "Expira en {{count}} mins",
+    "exportCredential": "Exportar credencial",
+    "exportJson": "JSON",
+    "exportXml": "XML",
+    "exportPdf": "PDF",
+    "exportedAs": "Exportado {{filename}}",
+    "exportFailed": "La exportación falló — no se descargó nada"
+  },
+  "a11y": {
+    "skipToContent": "Saltar al contenido principal",
+    "switchLanguage": "Cambiar idioma",
+    "dismissNotification": "Descartar notificación"
+  },
+  "biometric": {
+    "title": "Autenticación Biométrica",
+    "description": "Usa tu huella digital, Face ID o Touch ID para iniciar sesión de forma segura.",
+    "registerDevice": "Registrar Dispositivo",
+    "registering": "Registrando…",
+    "removeDevice": "Eliminar Dispositivo",
+    "removing": "Eliminando…",
+    "deviceName": "Nombre del Dispositivo",
+    "deviceNamePlaceholder": "p. ej., iPhone de María",
+    "registeredDevices": "Dispositivos Registrados",
+    "noDevices": "Aún no hay dispositivos registrados.",
+    "registeredOn": "Registrado el {{date}}",
+    "lastUsed": "Último uso {{date}}",
+    "prompt": "Confirma tu identidad para continuar",
+    "authenticating": "Autenticando…",
+    "authenticated": "Autenticación exitosa",
+    "authenticationFailed": "La autenticación falló. Inténtalo de nuevo.",
+    "usePassword": "Usar contraseña en su lugar",
+    "fallbackToPassword": "¿Problemas con la biometría? Inicia sesión con tu contraseña.",
+    "unsupportedBrowser": "Tu navegador no admite autenticación biométrica. Usa la autenticación con contraseña.",
+    "notAvailable": "La autenticación biométrica no está disponible en este dispositivo.",
+    "deviceRemoved": "Dispositivo eliminado correctamente",
+    "deviceRegistered": "Dispositivo registrado correctamente",
+    "removeConfirm": "¿Seguro que deseas eliminar este dispositivo?"
+  },
+  "voice": {
+    "title": "Comandos de Voz",
+    "startListening": "Iniciar escucha",
+    "stopListening": "Detener escucha",
+    "listening": "Escuchando…",
+    "processing": "Procesando…",
+    "commandNotRecognized": "Comando no reconocido. Inténtalo de nuevo.",
+    "feedbackConfirmed": "Entendido",
+    "commands": {
+      "search": "Buscar",
+      "navigate": "Navegar",
+      "verify": "Verificar",
+      "help": "Ayuda"
+    },
+    "permission": {
+      "title": "Permiso de Micrófono",
+      "request": "Permitir Micrófono",
+      "granted": "Acceso al micrófono concedido",
+      "denied": "Acceso al micrófono denegado. Habilítalo en la configuración de tu navegador.",
+      "prompt": "Se requiere acceso al micrófono para usar comandos de voz.",
+      "unsupported": "Tu navegador no admite el reconocimiento de voz."
+    }
+  },
+  "shortcuts": {
+    "title": "Atajos de Teclado",
+    "description": "Usa atajos de teclado para navegar e interactuar con la aplicación de manera más eficiente.",
+    "close": "Cerrar ayuda de atajos",
+    "enableShortcuts": "Habilitar atajos de teclado",
+    "hint": "Presiona ? para ver los atajos en cualquier momento. {{key}}+/ también funciona.",
+    "category": {
+      "navigation": "Navegación",
+      "actions": "Acciones",
+      "ui": "Interfaz de Usuario"
+    },
+    "table": {
+      "shortcut": "Atajo",
+      "description": "Descripción"
+    },
+    "search": "Abrir búsqueda",
+    "createCredential": "Crear nueva credencial",
+    "goToDIDs": "Ir a pestaña DIDs",
+    "goToCredentials": "Ir a pestaña Credenciales",
+    "toggleTheme": "Cambiar tema",
+    "showHelp": "Mostrar atajos de teclado",
+    "closeDialog": "Cerrar diálogo o modal"
+  },
+  "accounts": {
+    "title": "Cuentas conectadas",
+    "description": "Vincula y administra tus identidades de GitHub y correo verificado.",
+    "connectWallet": "Conecta una billetera para administrar las cuentas vinculadas.",
+    "authenticateDescription": "Verifica la propiedad de la billetera para administrar las cuentas. La billetera te pedirá firmar un desafío de un solo uso.",
+    "authenticate": "Verificar billetera",
+    "authenticating": "Verificando billetera…",
+    "loading": "Cargando cuentas vinculadas…",
+    "error": "Ocurrió un error. Inténtalo de nuevo.",
+    "github": "GitHub",
+    "email": "Correo electrónico",
+    "notLinked": "No vinculado",
+    "linkedAs": "Conectado como {{account}}",
+    "verified": "Verificado",
+    "unlink": "Desvincular",
+    "unlinkConfirm": "¿Desvincular tu cuenta de {{provider}}? Esta acción no se puede deshacer.",
+    "unlinked": "Cuenta desvinculada.",
+    "linkGithub": "Vincular GitHub",
+    "openingGithub": "Abriendo GitHub…",
+    "githubLinked": "Cuenta de GitHub vinculada.",
+    "popupBlocked": "El navegador bloqueó la ventana de autorización. Permite las ventanas emergentes e inténtalo de nuevo.",
+    "emailLabel": "Correo electrónico",
+    "sendVerification": "Enviar correo de verificación",
+    "sending": "Enviando…",
+    "emailSent": "Si se puede vincular la dirección, se ha enviado un correo de verificación.",
+    "emailConfirmed": "Correo verificado y vinculado.",
+    "confirmEmail": "Confirmar vínculo de correo",
+    "confirmDescription": "Este enlace contiene un token de verificación. Confirma antes de enviarlo para vincular tu correo.",
+    "confirming": "Confirmando…",
+    "dismiss": "Ahora no",
+    "sessionExpiry": "La sesión de billetera vence {{expiry}}.",
+    "walletChanged": "La billetera conectada cambió durante la verificación. Inicia el proceso de nuevo.",
+    "networkMismatch": "El desafío corresponde a otra red de Stellar. Cambia de red e inténtalo de nuevo."
   }
 }

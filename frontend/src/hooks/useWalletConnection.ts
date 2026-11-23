@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import SignClient from "@walletconnect/sign-client";
 import type { FrontendNetworkConfig } from "../network";
 import { getNetworkConfig, getActiveNetwork } from "../network";
-import type { WalletState } from "./useWalletState";
+import type { WalletState, WalletConnectionError } from "./useWalletState";
 import { DISCONNECTED_STATE } from "./useWalletState";
 import type { WalletType } from "./useWallet";
 
@@ -12,174 +12,387 @@ const WC_PROJECT_ID =
 interface UseWalletConnectionOptions {
   networkConfig: FrontendNetworkConfig;
   setState: React.Dispatch<React.SetStateAction<WalletState>>;
+  maxRetries?: number;
+  retryDelayMs?: number;
+}
+
+interface UseWalletConnectionReturn {
+  connect: (walletType?: WalletType) => Promise<void>;
+  disconnect: (currentWalletType: WalletType | null) => Promise<void>;
+  wcClientRef: React.MutableRefObject<Awaited<
+    ReturnType<typeof SignClient.init>
+  > | null>;
+  wcTopicRef: React.MutableRefObject<string | null>;
+  retry: () => Promise<void>;
+  isConnecting: boolean;
+  error: WalletConnectionError | string | null;
+  retryCount: number;
+}
+
+// Cap the exponential backoff so a flaky connection doesn't leave the user
+// waiting minutes between attempts.
+const MAX_RETRY_DELAY_MS = 8000;
+
+/** delay before attempt N (1-indexed): retryDelayMs * 2^(N-1), capped. */
+function backoffDelay(baseDelayMs: number, attempt: number): number {
+  return Math.min(baseDelayMs * 2 ** (attempt - 1), MAX_RETRY_DELAY_MS);
 }
 
 /**
  * Handles wallet connection and disconnection for both Freighter and
- * WalletConnect. Single responsibility: establish / tear down sessions.
+ * WalletConnect. Retries on timeout with configurable limits.
  *
- * Returns `connect`, `disconnect`, and the WalletConnect refs so the signing
- * hook can access the live session.
+ * Features:
+ * - Retries connection with exponential backoff, configurable maxRetries (default: 3)
+ * - Exposes { isConnecting, error, retryCount, retry } for UI feedback
+ * - Logs each failed attempt with attempt number and elapsed time
+ * - Stops retrying after maxRetries consecutive failures, surfacing a manual retry
  */
 export function useWalletConnection({
   networkConfig,
   setState,
-}: UseWalletConnectionOptions) {
-  const wcClientRef =
-    useRef<Awaited<ReturnType<typeof SignClient.init>> | null>(null);
+  maxRetries = 3,
+  retryDelayMs = 1500,
+}: UseWalletConnectionOptions): UseWalletConnectionReturn {
+  const wcClientRef = useRef<Awaited<
+    ReturnType<typeof SignClient.init>
+  > | null>(null);
   const wcTopicRef = useRef<string | null>(null);
+  const retryCountRef = useRef<number>(0);
+  const currentWalletTypeRef = useRef<WalletType | null>(null);
+  const startTimeRef = useRef<number>(0);
+  const freighterTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const walletConnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [error, setError] = useState<WalletConnectionError | string | null>(
+    null,
+  );
+  const [retryCount, setRetryCount] = useState(0);
 
   // ── Freighter ─────────────────────────────────────────────────────────────
 
-  const connectFreighter = useCallback(async () => {
-    if (!window.freighter) {
-      setState((s) => ({
-        ...s,
-        connecting: false,
-        error: "Freighter not found. Install it from freighter.app",
-      }));
-      return;
-    }
+  const connectFreighter = useCallback(
+    async (isRetry = false) => {
+      if (!isRetry) {
+        retryCountRef.current = 0;
+        startTimeRef.current = Date.now();
+      }
 
-    try {
-      const isConnected = await window.freighter.isConnected();
-      if (!isConnected) {
+      if (!window.freighter) {
+        const errorMsg = "Freighter wallet extension not found. Install it from freighter.app";
         setState((s) => ({
           ...s,
           connecting: false,
-          error: "Please unlock Freighter and try again.",
+          error: errorMsg,
         }));
+        setError(errorMsg);
+        setIsConnecting(false);
         return;
       }
 
-      const [publicKey, { networkPassphrase }] = await Promise.all([
-        window.freighter.getPublicKey(),
-        window.freighter.getNetwork(),
-      ]);
+      try {
+        const isConnected = await window.freighter.isConnected();
+        if (!isConnected) {
+          const errorMsg = "Please unlock Freighter and try again.";
+          setState((s) => ({
+            ...s,
+            connecting: false,
+            error: errorMsg,
+          }));
+          setError(errorMsg);
+          setIsConnecting(false);
+          return;
+        }
 
-      const activeNetworkConfig = getNetworkConfig();
-      if (networkPassphrase !== activeNetworkConfig.networkPassphrase) {
-        setState((s) => ({
-          ...s,
+        const [publicKey, { networkPassphrase }] = await Promise.all([
+          window.freighter.getPublicKey(),
+          window.freighter.getNetwork(),
+        ]);
+
+        const activeNetworkConfig = getNetworkConfig();
+        if (networkPassphrase !== activeNetworkConfig.networkPassphrase) {
+          const errorMsg = `Freighter is on the wrong network. Expected ${getActiveNetwork()}.`;
+          setState((s) => ({
+            ...s,
+            connecting: false,
+            error: errorMsg,
+          }));
+          setError(errorMsg);
+          setIsConnecting(false);
+          return;
+        }
+
+        localStorage.setItem("soroban-wallet-connected", "freighter");
+
+        setState({
+          publicKey,
+          networkPassphrase,
+          connected: true,
           connecting: false,
-          error: `Freighter is on the wrong network. Expected ${getActiveNetwork()}.`,
-        }));
-        return;
+          reconnecting: false,
+          txLoading: false,
+          walletType: "freighter",
+          error: null,
+          retryCount: 0,
+        });
+        setError(null);
+        setRetryCount(0);
+        retryCountRef.current = 0;
+        setIsConnecting(false);
+      } catch (e: unknown) {
+        const elapsed = Date.now() - startTimeRef.current;
+        retryCountRef.current++;
+        const attempt = retryCountRef.current;
+
+        const errorMessage =
+          e instanceof Error ? e.message : "Freighter connection failed";
+        console.warn(
+          `[useWalletConnection] Freighter attempt ${attempt} failed (${elapsed}ms): ${errorMessage}`,
+        );
+
+        if (attempt >= maxRetries) {
+          const error: WalletConnectionError = {
+            code: "WALLET_TIMEOUT",
+            message: `Could not connect to Freighter after ${maxRetries} attempts.`,
+          };
+          setState((s) => ({
+            ...s,
+            connecting: false,
+            error: error.message,
+            retryCount: attempt,
+          }));
+          setError(error);
+          setRetryCount(attempt);
+          setIsConnecting(false);
+        } else {
+          // Retry after delay
+          setState((s) => ({
+            ...s,
+            connecting: true,
+            error: null,
+            retryCount: attempt,
+          }));
+          setRetryCount(attempt);
+          const delay = backoffDelay(retryDelayMs, attempt);
+          console.warn(
+            `[useWalletConnection] Retrying Freighter connection in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`,
+          );
+          freighterTimeoutRef.current = setTimeout(async () => {
+            await connectFreighter(true);
+          }, delay);
+        }
       }
-
-      localStorage.setItem("soroban-wallet-connected", "freighter");
-
-      setState({
-        publicKey,
-        networkPassphrase,
-        connected: true,
-        connecting: false,
-        txLoading: false,
-        walletType: "freighter",
-        error: null,
-      });
-    } catch (e: unknown) {
-      setState((s) => ({
-        ...s,
-        connecting: false,
-        error: e instanceof Error ? e.message : "Freighter connection failed",
-      }));
-    }
-  }, [setState]);
+    },
+    [networkConfig, setState, maxRetries, retryDelayMs],
+  );
 
   // ── WalletConnect ──────────────────────────────────────────────────────────
 
-  const connectWalletConnect = useCallback(async () => {
-    try {
-      const client = await SignClient.init({
-        projectId: WC_PROJECT_ID,
-        metadata: {
-          name: "Soroban Identity",
-          description: "Decentralized Identity for a Trustless World",
-          url: window.location.origin,
-          icons: [`${window.location.origin}/favicon.ico`],
-        },
-      });
-
-      wcClientRef.current = client;
-
-      const { uri, approval } = await client.connect({
-        requiredNamespaces: {
-          stellar: {
-            methods: ["stellar_signXDR"],
-            chains: [networkConfig.walletConnectChain],
-            events: ["accountsChanged"],
-          },
-        },
-      });
-
-      if (uri) {
-        window.open(
-          `https://walletconnect.com/wc?uri=${encodeURIComponent(uri)}`,
-          "_blank"
-        );
+  const connectWalletConnect = useCallback(
+    async (isRetry = false) => {
+      if (!isRetry) {
+        retryCountRef.current = 0;
+        startTimeRef.current = Date.now();
       }
 
-      const session = await approval();
-      wcTopicRef.current = session.topic;
+      try {
+        const client = await SignClient.init({
+          projectId: WC_PROJECT_ID,
+          metadata: {
+            name: "Soroban Identity",
+            description: "Decentralized Identity for a Trustless World",
+            url: window.location.origin,
+            icons: [`${window.location.origin}/favicon.ico`],
+          },
+        });
 
-      const accounts = session.namespaces.stellar?.accounts ?? [];
-      const publicKey = accounts[0]?.split(":")[2] ?? null;
+        wcClientRef.current = client;
 
-      localStorage.setItem("soroban-wallet-connected", "walletconnect");
+        const { uri, approval } = await client.connect({
+          requiredNamespaces: {
+            stellar: {
+              methods: ["stellar_signXDR"],
+              chains: [networkConfig.walletConnectChain],
+              events: ["accountsChanged"],
+            },
+          },
+        });
 
-      setState({
-        publicKey,
-        networkPassphrase: networkConfig.networkPassphrase,
-        connected: true,
-        connecting: false,
-        txLoading: false,
-        walletType: "walletconnect",
-        error: null,
-      });
+        if (uri) {
+          window.open(
+            `https://walletconnect.com/wc?uri=${encodeURIComponent(uri)}`,
+            "_blank",
+          );
+        }
 
-      client.on("session_delete", () => {
-        wcTopicRef.current = null;
-        localStorage.removeItem("soroban-wallet-connected");
-        setState(DISCONNECTED_STATE);
-      });
-    } catch (e: unknown) {
-      setState((s) => ({
-        ...s,
-        connecting: false,
-        error:
-          e instanceof Error ? e.message : "WalletConnect connection failed",
-      }));
-    }
-  }, [networkConfig.networkPassphrase, networkConfig.walletConnectChain, setState]);
+        const session = await approval();
+        wcTopicRef.current = session.topic;
+
+        const accounts = session.namespaces.stellar?.accounts ?? [];
+        const publicKey = accounts[0]?.split(":")[2] ?? null;
+
+        localStorage.setItem("soroban-wallet-connected", "walletconnect");
+
+        setState({
+          publicKey,
+          networkPassphrase: networkConfig.networkPassphrase,
+          connected: true,
+          connecting: false,
+          reconnecting: false,
+          txLoading: false,
+          walletType: "walletconnect",
+          error: null,
+          retryCount: 0,
+        });
+        setError(null);
+        setRetryCount(0);
+        retryCountRef.current = 0;
+        setIsConnecting(false);
+
+        client.on("session_delete", () => {
+          wcTopicRef.current = null;
+          localStorage.removeItem("soroban-wallet-connected");
+          setState(DISCONNECTED_STATE);
+        });
+      } catch (e: unknown) {
+        const elapsed = Date.now() - startTimeRef.current;
+        retryCountRef.current++;
+        const attempt = retryCountRef.current;
+
+        const errorMessage =
+          e instanceof Error ? e.message : "WalletConnect connection failed";
+        console.warn(
+          `[useWalletConnection] WalletConnect attempt ${attempt} failed (${elapsed}ms): ${errorMessage}`,
+        );
+
+        if (attempt >= maxRetries) {
+          const error: WalletConnectionError = {
+            code: "WALLET_TIMEOUT",
+            message: `Could not connect to WalletConnect after ${maxRetries} attempts.`,
+          };
+          setState((s) => ({
+            ...s,
+            connecting: false,
+            error: error.message,
+            retryCount: attempt,
+          }));
+          setError(error);
+          setRetryCount(attempt);
+          setIsConnecting(false);
+        } else {
+          // Retry after delay
+          setState((s) => ({
+            ...s,
+            connecting: true,
+            error: null,
+            retryCount: attempt,
+          }));
+          setRetryCount(attempt);
+          const delay = backoffDelay(retryDelayMs, attempt);
+          console.warn(
+            `[useWalletConnection] Retrying WalletConnect connection in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`,
+          );
+          walletConnectTimeoutRef.current = setTimeout(async () => {
+            await connectWalletConnect(true);
+          }, delay);
+        }
+      }
+    },
+    [
+      networkConfig.networkPassphrase,
+      networkConfig.walletConnectChain,
+      setState,
+      maxRetries,
+      retryDelayMs,
+    ],
+  );
 
   // ── Auto-reconnect on mount ────────────────────────────────────────────────
 
   useEffect(() => {
     const saved = localStorage.getItem("soroban-wallet-connected");
+    if (!saved) return;
+
+    // Signal the UI that an automatic reconnect is in progress so the button
+    // can show a "Reconnecting…" state instead of the misleading "Connect" label.
+    setState((s) => ({ ...s, reconnecting: true }));
+
+    const finish = () =>
+      setState((s) => ({ ...s, reconnecting: false }));
+
     if (saved === "freighter") {
-      connectFreighter();
+      connectFreighter().finally(finish);
     } else if (saved === "walletconnect") {
-      connectWalletConnect();
+      connectWalletConnect().finally(finish);
+    } else {
+      finish();
     }
-  }, [connectFreighter, connectWalletConnect]);
+  }, [connectFreighter, connectWalletConnect, setState]);
+
+  // ── Cleanup ────────────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    return () => {
+      if (freighterTimeoutRef.current) {
+        clearTimeout(freighterTimeoutRef.current);
+      }
+      if (walletConnectTimeoutRef.current) {
+        clearTimeout(walletConnectTimeoutRef.current);
+      }
+    };
+  }, []);
 
   // ── Public API ─────────────────────────────────────────────────────────────
 
   const connect = useCallback(
     async (walletType: WalletType = "freighter") => {
-      setState((s) => ({ ...s, connecting: true, error: null }));
+      // Cancel any pending retry timer from a previously abandoned flow so
+      // it can't fire later and clobber the state this call is about to set.
+      if (freighterTimeoutRef.current) {
+        clearTimeout(freighterTimeoutRef.current);
+        freighterTimeoutRef.current = null;
+      }
+      if (walletConnectTimeoutRef.current) {
+        clearTimeout(walletConnectTimeoutRef.current);
+        walletConnectTimeoutRef.current = null;
+      }
+
+      setIsConnecting(true);
+      setError(null);
+      setRetryCount(0);
+      retryCountRef.current = 0;
+      currentWalletTypeRef.current = walletType;
+
+      setState((s) => ({ ...s, connecting: true, error: null, retryCount: 0 }));
+
       if (walletType === "walletconnect") {
         await connectWalletConnect();
       } else {
         await connectFreighter();
       }
     },
-    [connectFreighter, connectWalletConnect, setState]
+    [connectFreighter, connectWalletConnect, setState],
   );
+
+  const retry = useCallback(async () => {
+    if (!currentWalletTypeRef.current) return;
+    await connect(currentWalletTypeRef.current);
+  }, [connect]);
 
   const disconnect = useCallback(
     async (currentWalletType: WalletType | null) => {
+      // Cancel any in-flight retry timers immediately so they cannot fire
+      // after the disconnect and restore stale connected state (fixes #736).
+      if (freighterTimeoutRef.current) {
+        clearTimeout(freighterTimeoutRef.current);
+        freighterTimeoutRef.current = null;
+      }
+      if (walletConnectTimeoutRef.current) {
+        clearTimeout(walletConnectTimeoutRef.current);
+        walletConnectTimeoutRef.current = null;
+      }
+
       if (
         currentWalletType === "walletconnect" &&
         wcClientRef.current &&
@@ -197,11 +410,34 @@ export function useWalletConnection({
         wcTopicRef.current = null;
       }
 
+      // Clear persisted session so auto-reconnect does not restore a
+      // disconnected session on next page load (fixes #736).
       localStorage.removeItem("soroban-wallet-connected");
+
+      // Reset all local hook state synchronously before notifying consumers
+      // so any component that re-renders in response to DISCONNECTED_STATE
+      // sees a fully cleared wallet (fixes #736 — no stale publicKey flash).
+      retryCountRef.current = 0;
+      currentWalletTypeRef.current = null;
+      setError(null);
+      setRetryCount(0);
+      setIsConnecting(false);
+
+      // DISCONNECTED_STATE already has reconnecting: false; setting it last
+      // ensures a single React batch with all auth/data hooks clearing together.
       setState(DISCONNECTED_STATE);
     },
-    [setState]
+    [setState],
   );
 
-  return { connect, disconnect, wcClientRef, wcTopicRef };
+  return {
+    connect,
+    disconnect,
+    wcClientRef,
+    wcTopicRef,
+    retry,
+    isConnecting,
+    error,
+    retryCount,
+  };
 }

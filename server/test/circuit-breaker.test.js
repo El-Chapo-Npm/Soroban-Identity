@@ -78,4 +78,66 @@ test('toHealthInfo returns state, failures and lastStateChange', () => {
   assert.equal(typeof info.state, 'string');
   assert.equal(typeof info.failures, 'number');
   assert.equal(typeof info.lastStateChange, 'string');
+  assert.equal(info.enabled, true);
+  assert.equal(typeof info.timeoutMs, 'number');
 });
+
+test('operation timeout triggers failure in CircuitBreaker', async () => {
+  const cb = new CircuitBreaker({ failureThreshold: 1, timeoutMs: 50 });
+  const slowFn = () => new Promise((resolve) => setTimeout(resolve, 200));
+
+  await assert.rejects(
+    () => cb.call(slowFn),
+    (err) => {
+      assert.ok(err.message.includes('timed out after 50ms'));
+      return true;
+    }
+  );
+
+  assert.equal(cb.state, 'OPEN');
+});
+
+test('fallback function is executed when OPEN or on failure', async () => {
+  const cb = new CircuitBreaker({ failureThreshold: 1, openDurationMs: 60_000 });
+
+  // On call failure, fallbackFn handles the error and returns fallback value
+  const res1 = await cb.call(fail, { fallbackFn: (err) => `fallback-for-${err.message}` });
+  assert.equal(res1, 'fallback-for-rpc error');
+  assert.equal(cb.state, 'OPEN');
+  assert.equal(cb.fallbacks, 1);
+
+  // In OPEN state, fallbackFn handles SorobanUnavailableError fast
+  const res2 = await cb.call(ok, { fallbackFn: (err) => `fallback-fast-${err.name}` });
+  assert.equal(res2, 'fallback-fast-SorobanUnavailableError');
+  assert.equal(cb.rejects, 1);
+  assert.equal(cb.fallbacks, 2);
+});
+
+test('events stateChange, break, reject, and fallback are emitted', async () => {
+  const cb = new CircuitBreaker({ failureThreshold: 1, openDurationMs: 60_000 });
+  const events = [];
+
+  cb.on('stateChange', (payload) => events.push({ type: 'stateChange', ...payload }));
+  cb.on('break', (payload) => events.push({ type: 'break', ...payload }));
+  cb.on('reject', () => events.push({ type: 'reject' }));
+  cb.on('fallback', (payload) => events.push({ type: 'fallback', ...payload }));
+
+  await assert.rejects(() => cb.call(fail));
+  assert.equal(events.some((e) => e.type === 'stateChange' && e.to === 'OPEN'), true);
+  assert.equal(events.some((e) => e.type === 'break'), true);
+
+  await assert.rejects(() => cb.call(ok));
+  assert.equal(events.some((e) => e.type === 'reject'), true);
+});
+
+test('disabled circuit breaker executes fn without state tracking', async () => {
+  const cb = new CircuitBreaker({ failureThreshold: 1, enabled: false });
+
+  await assert.rejects(() => cb.call(fail));
+  assert.equal(cb.state, 'CLOSED');
+  assert.equal(cb.failures, 0);
+
+  const res = await cb.call(ok);
+  assert.equal(res, 'ok');
+});
+

@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
 import { test, before, after } from 'node:test';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { createApp } from '../src/app.js';
 import { requestContextStore } from '../src/request-context.js';
+import { correlationHeaders } from '../src/middleware/tracing.js';
+import { getRequestLogFields } from '../src/logger.js';
 
 const testDir = path.join(process.cwd(), 'data', 'test-request-id');
 const config = {
@@ -28,8 +31,9 @@ const metrics = {
   renderPrometheus: () => 'metrics',
 };
 
-class MockResponse {
+class MockResponse extends EventEmitter {
   constructor() {
+    super();
     this.headers = {};
     this.statusCode = null;
     this.body = null;
@@ -53,6 +57,7 @@ class MockResponse {
 
   end(body) {
     this.body = body;
+    this.emit('finish');
     this._resolve();
   }
 }
@@ -99,39 +104,37 @@ test('should echo back the provided X-Request-ID', async () => {
   assert.equal(res.headers['x-request-id'], customId);
 });
 
-test('should prepend request ID to console logs during request', async () => {
-  let stderrLogs = [];
-  const originalErrWrite = process.stderr.write;
-  process.stderr.write = (chunk, encoding, callback) => {
-    stderrLogs.push(chunk.toString());
-    return originalErrWrite.call(process.stderr, chunk, encoding, callback);
+test('uses one validated correlation ID for both response headers and trace context', async () => {
+  const app = createApp({ config, soroban, metrics });
+  const correlationId = 'gateway-correlation-123';
+  const req = {
+    method: 'GET',
+    url: '/health',
+    headers: { host: 'localhost', 'x-correlation-id': correlationId, 'x-request-id': 'different-request-id' },
   };
+  const res = new MockResponse();
+  await app(req, res);
+  await res.finished;
 
-  try {
-    const customSoroban = {
-      ...soroban,
-      pingAllContracts: async () => {
-        console.error('Inside request execution log');
-        return { contract1: true };
-      },
-    };
-    const app = createApp({ config, soroban: customSoroban, metrics });
-    const customId = 'log-test-id-999';
-    const req = {
-      method: 'GET',
-      url: '/health',
-      headers: { host: 'localhost', 'x-request-id': customId },
-    };
-    const res = new MockResponse();
-    await app(req, res);
-    await res.finished;
+  assert.equal(res.headers['x-correlation-id'], correlationId);
+  assert.equal(res.headers['x-request-id'], correlationId);
+  assert.equal(req.correlationId, correlationId);
+  assert.equal(req.requestId, correlationId);
+});
 
-    const matchingLog = stderrLogs.find((log) => log.includes('Inside request execution log'));
-    assert.ok(matchingLog, 'Log should be captured');
-    assert.ok(matchingLog.includes(`[${customId}] Inside request execution log`), `Log should contain prefix, got: ${matchingLog}`);
-  } finally {
-    process.stderr.write = originalErrWrite;
-  }
+test('forwards the ambient correlation ID to downstream HTTP services', async () => {
+  const headers = await requestContextStore.run(
+    { correlationId: 'service-chain-correlation-123' },
+    async () => correlationHeaders(),
+  );
+  assert.deepEqual(headers, { 'x-correlation-id': 'service-chain-correlation-123' });
+});
+
+test('adds requestId and correlationId to structured log fields', () => {
+  assert.deepEqual(
+    getRequestLogFields({ requestId: 'log-test-id-999', correlationId: 'log-test-id-999', traceId: 'trace-123' }),
+    { requestId: 'log-test-id-999', correlationId: 'log-test-id-999', traceId: 'trace-123' },
+  );
 });
 
 test('should include requestId in audit logs generated during request', async () => {
@@ -144,6 +147,7 @@ test('should include requestId in audit logs generated during request', async ()
     url: '/admin/issuers',
     headers: {
       host: 'localhost',
+      'content-type': 'application/json',
       'x-api-key': 'test-api-key',
       'x-request-id': customId,
     },
@@ -157,10 +161,12 @@ test('should include requestId in audit logs generated during request', async ()
 
   assert.equal(res.statusCode, 201);
 
-  const logContent = await fs.readFile(config.auditLogPath, 'utf8');
+  const datedAuditLogPath = `${config.auditLogPath}-${new Date().toISOString().split('T')[0]}.ndjson`;
+  const logContent = await fs.readFile(datedAuditLogPath, 'utf8');
   const lines = logContent.trim().split('\n');
   assert.equal(lines.length, 1);
   const entry = JSON.parse(lines[0]);
   assert.equal(entry.requestId, customId);
+  assert.equal(entry.correlationId, customId);
   assert.equal(entry.action, 'add_issuer');
 });

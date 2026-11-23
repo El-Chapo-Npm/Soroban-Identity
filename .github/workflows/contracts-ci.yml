@@ -1,31 +1,28 @@
 name: Contracts CI
 
 on:
-  workflow_dispatch:
-  push:
-    branches: [main]
   pull_request:
-    branches: [main]
-
-env:
-  CARGO_TERM_COLOR: always
+    branches:
+      - main
+  push:
+    branches:
+      - main
 
 jobs:
-  lint:
-    name: Clippy Lint
+  contract-tests:
+    name: Soroban Contract Tests
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Rust stable with clippy
+      - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-          components: clippy
 
-      - name: Cache Rust toolchain and Cargo registry
+      - name: Cache cargo registry and build artifacts
         uses: actions/cache@v4
         with:
           path: |
@@ -33,10 +30,13 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            contracts/target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('contracts/**/Cargo.lock') }}
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
+
+      - name: Run contract tests
+        run: cargo test --workspace
 
       - name: Run clippy
         working-directory: contracts
@@ -107,6 +107,10 @@ jobs:
         working-directory: contracts/identity-registry
         run: cargo test
 
+      - name: Test governance
+        working-directory: contracts/governance
+        run: cargo test
+
       - name: Test credential-manager
         working-directory: contracts/credential-manager
         run: cargo test
@@ -114,6 +118,15 @@ jobs:
       - name: Test reputation
         working-directory: contracts/reputation
         run: cargo test
+
+      - name: Check WASM size budgets
+        run: |
+          chmod +x scripts/check_wasm_size.sh
+          scripts/check_wasm_size.sh
+        env:
+          IDENTITY_REGISTRY_SIZE_BUDGET: ${{ env.IDENTITY_REGISTRY_SIZE_BUDGET }}
+          CREDENTIAL_MANAGER_SIZE_BUDGET: ${{ env.CREDENTIAL_MANAGER_SIZE_BUDGET }}
+          REPUTATION_SIZE_BUDGET: ${{ env.REPUTATION_SIZE_BUDGET }}
 
   post-deployment-health-check:
     name: Post-deployment Health Check

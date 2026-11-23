@@ -21,11 +21,593 @@ The server configuration can be customized using the following environment varia
 | Variable | Purpose | Default |
 | --- | --- | --- |
 | `PORT` | HTTP port the server listens on. | `3001` |
-| `ADMIN_API_KEY` | Key for authenticating request calls on `/admin/*` endpoints. | unset |
+| `LOG_LEVEL` | Logging verbosity (trace, debug, info, warn, error, fatal). All logs are structured JSON. | `info` |
+| `ADMIN_API_KEY` | Key for authenticating request calls on `/admin/*` endpoints. Supports scoped access (see API Key Scopes below). | unset |
+| `ADMIN_IP_ALLOWLIST` | Comma-separated IPv4/IPv6 addresses or CIDR ranges permitted to reach admin endpoints. | unset |
+| `ADMIN_IP_ALLOWLIST_REQUIRED` | Fail closed when the allowlist is empty. Defaults to `true` in production and `false` elsewhere. | environment-dependent |
 | `DATA_DIR` | Directory path for local file storage. | `./data` |
 | `AUDIT_LOG_PATH` | Base file path prefix used for daily rotated audit logs. | `[DATA_DIR]/audit` |
 | `AUDIT_LOG_RETENTION_DAYS` | Number of days to retain rotated audit logs. | `30` |
 | `CREDENTIAL_STORE_PATH` | Storage location for credential records. | `[DATA_DIR]/credentials.json` |
+| `EXPIRY_CONCURRENCY` | Maximum concurrent credential expiry notifications. Controls parallelism to prevent event loop blocking. | `8` |
+| `RATE_LIMIT_WHITELIST` | Comma-separated IPs or CIDR ranges exempt from rate limiting. | unset |
+| `RATE_LIMIT_MAX_BUCKETS` | Bucket count that triggers eviction of expired windows. | `10000` |
+| `RATE_LIMIT_IP_PER_MINUTE` | Sustained per-IP request rate (token refill). | `300` |
+| `RATE_LIMIT_IP_BURST` | Extra per-IP requests allowed in a spike. | `60` |
+| `RATE_LIMIT_USER_PER_MINUTE` | Sustained per-API-key/user request rate. | `600` |
+| `RATE_LIMIT_USER_BURST` | Extra per-user requests allowed in a spike. | `120` |
+| `RATE_LIMIT_PREMIUM_TIERS` | Tiers that bypass all rate limits. | `premium,enterprise` |
+| `RATE_LIMIT_PREMIUM_KEYS` | Comma-separated API key ids that bypass all rate limits. | unset |
+| `TRUST_PROXY` | Trust `X-Forwarded-For` when resolving the client IP. | `false` |
+| `JWT_SECRET` / `JWT_PUBLIC_KEY` | Secret or public key used to verify signed bearer JWTs. | unset |
+| `JWT_ALGORITHMS` | Allowed JWT algorithms (`HS256`, `RS256`, `ES256`, or `EdDSA`). | `HS256` |
+| `JWT_ISSUER` / `JWT_AUDIENCE` | Optional issuer and audience checks for JWTs. | unset |
+| `WEB3_STORAGE_TOKEN` | Token used to pin DID JSON documents to web3.storage. | unset |
+
+Admin requests are checked against `ADMIN_IP_ALLOWLIST` before API key or OAuth
+authentication. For example, `ADMIN_IP_ALLOWLIST=203.0.113.8,198.51.100.0/24,2001:db8::/32`
+allows one IPv4 address, an IPv4 subnet and an IPv6 subnet. In production, an
+empty list returns `503` and disables admin access until a range is configured.
+When `TRUST_PROXY=true`, the first `X-Forwarded-For` address is used; only enable
+this when direct access to the server is restricted to the trusted proxy.
+
+## W3C DID resolver
+
+`GET /did/:did` resolves a `did:stellar:G...` identifier (or a bare Stellar account id) to a
+DID Core document. The response is `application/did+ld+json` by default; send
+`Accept: application/did+json` for the plain-JSON representation.
+
+The document contains an `Ed25519VerificationKey2020` `verificationMethod` derived from the
+account key (`publicKeyMultibase`), `authentication`/`assertionMethod`/`capabilityInvocation`
+references to it, and any stored `service` endpoints. Only `https` endpoints without embedded
+credentials are emitted.
+
+| Status | Meaning |
+|---|---|
+| 200 | Document returned |
+| 400 `invalidDid` | Identifier is not a valid Stellar DID |
+| 404 `notFound` | No such DID |
+| 406 `representationNotSupported` | `Accept` allows no DID representation |
+| 410 | DID is deactivated; a minimal document is returned |
+| 501 `methodNotSupported` | Non-`stellar` DID method |
+
+## Indexer event replay
+
+With `INDEXER_ENABLED=true`, the server checks `contract_events` at startup. If it is empty,
+it replays historical events for `INDEXER_CONTRACT_IDS` from `INDEXER_REPLAY_START_LEDGER`
+(default `0`) through Soroban RPC to rebuild state. Replay runs in the background, writes each
+page and its cursor in one transaction (so an interrupted replay resumes), and is idempotent.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `INDEXER_REPLAY_ON_EMPTY` | `true` | Set `false` to disable replay |
+| `INDEXER_REPLAY_START_LEDGER` | `0` | First ledger to replay |
+| `INDEXER_REPLAY_PAGE_SIZE` | `200` | Events per RPC request |
+
+Soroban RPC only retains a limited window of ledgers. If the start ledger is older than that
+window, replay begins at the oldest ledger the node still serves and logs a warning. Full
+history beyond that window needs an archive source.
+
+## Connected Accounts
+
+GitHub and verified-email linking are optional and require wallet-bound account sessions. See [CONNECTED_ACCOUNTS.md](CONNECTED_ACCOUNTS.md) for provider setup, required environment variables, API routes, and storage/security constraints.
+
+## Credential payload encryption
+
+Set `PAYLOAD_ENCRYPTION_ENABLED=true` to require application-layer encryption
+for credential routes. This is an additional layer; it does not replace HTTPS.
+Terminate TLS only at a trusted proxy and use TLS between that proxy and this
+server as well.
+
+The client generates an ephemeral X25519 key pair and sends its SPKI public key
+to `POST /encryption/sessions` as `{"clientPublicKey":"<base64-DER>"}` with its
+normal API authentication. The response contains a random `sessionId`, an
+independent server X25519 public key, a random salt, `keyId`, generation,
+algorithm (`A256GCM`) and expiry. Client and server compute the X25519 shared
+secret and derive the same 256-bit AES key using HKDF-SHA-256 with the returned
+salt and the context `soroban-identity/payload-encryption/v1\n<sessionId>\n<keyId>`.
+Session IDs are bound to the authenticating API key or OAuth client and expire
+after `PAYLOAD_ENCRYPTION_SESSION_TTL_SECONDS`.
+
+Supply `X-Encryption-Session: <sessionId>` on credential reads and writes.
+JSON mutation bodies use this envelope shape:
+
+```json
+{
+  "algorithm": "A256GCM",
+  "keyId": "key-1-...",
+  "iv": "<base64 12-byte nonce>",
+  "ciphertext": "<base64 encrypted JSON bytes>",
+  "tag": "<base64 16-byte GCM tag>"
+}
+```
+
+The request AAD is UTF-8 `request\n<METHOD>\n<exact request target>\n<sessionId>\n<keyId>`.
+Responses keep the normal JSON shape but replace configured sensitive fields
+with objects containing `algorithm`, `keyId`, `iv`, `ciphertext`, and `tag`.
+For each field, its AAD is UTF-8
+`response\n<METHOD>\n<exact request target>\n<status>\n<sessionId>\n<keyId>\n<JSON pointer>`.
+Fields are selected case-insensitively by `PAYLOAD_ENCRYPTION_SENSITIVE_FIELDS`
+(default: `credentialSubject,claims,subject`). Encrypted responses set
+`Cache-Control: no-store`. Rotating requires authenticated
+`POST /encryption/sessions/:sessionId/rotate` with a new client public key;
+the prior key remains valid for inbound requests for the configured grace
+period (`PAYLOAD_ENCRYPTION_ROTATION_GRACE_SECONDS`). Close a session with
+authenticated `DELETE /encryption/sessions/:sessionId`.
+
+Keep the client private key and derived AES key in memory only. Never log
+plaintext bodies or keys. HMAC request signing, when enabled, signs the exact
+encrypted envelope bytes. This protocol is opt-in because it changes credential
+routes to require a session and encrypted request envelopes.
+
+## Container image and health checks
+
+Build the image from the repository root with `docker build -f server/Dockerfile -t soroban-identity .`. The image reports its health through `HEALTHCHECK` using `scripts/healthcheck.mjs` against `/live`. `/ready` and `/health` are available for readiness and detailed status. See [docs/container-health-checks.md](../docs/container-health-checks.md) for probe semantics, the Docker, compose, Kubernetes and ECS settings, and how to verify restarts.
+
+## Rate Limiting
+
+Two budgets apply to every non-exempt request, and both must be satisfied.
+`/info`, `/health`, and `/metrics` are exempt.
+
+Public requests are limited to 100 requests per minute per IP. A verified JWT
+whose `sub` is a Stellar public key is treated as an issuer and receives a
+separate 1000 requests per minute per-issuer budget. The IP budget still
+applies to authenticated traffic to prevent shared-address abuse.
+
+### Indexed events and DID metadata
+
+Run Flyway with `server/flyway.conf` and `DATABASE_URL` to apply the versioned
+schema in `server/migrations`. The first migration creates `identities`,
+`attestations`, and `events` with JSONB payloads and indexes for ledger and
+issuer queries. When `WEB3_STORAGE_TOKEN` is configured, DID writes pin the DID
+JSON and add the returned `cid`/`ipfs_cid` to the identity contract metadata.
+The contract keeps that CID immutable on later metadata updates.
+
+### Per-endpoint limits
+
+Evaluated first, since they are the tighter constraint on the expensive routes.
+The first matching rule wins.
+
+| Rule | Match | Limit |
+| --- | --- | --- |
+| `credential_issuance` | `POST /credentials`, `POST /credentials/issue` | 10 per 15 min |
+| `credential_revocation` | `POST /credentials/:id/revoke` | 20 per 15 min |
+| `general` | everything else | 100 per 15 min |
+| `CORS_ORIGIN` | Allowed browser origins. A single origin, a comma-separated list, or `*`. | `*` in development, none in production |
+| `CORS_CREDENTIALS` | Whether to send `Access-Control-Allow-Credentials`. Cannot be combined with `CORS_ORIGIN=*`. | `false` |
+| `CORS_METHODS` | Comma-separated methods advertised on a preflight. | `GET,POST,PUT,PATCH,DELETE,OPTIONS` |
+| `CORS_ALLOWED_HEADERS` | Comma-separated request headers a browser may send. | `Content-Type,Authorization,X-API-Key,X-Request-ID,X-Actor,X-User-Tier,X-API-Version` |
+| `CORS_EXPOSED_HEADERS` | Comma-separated response headers readable by browser JavaScript. | `X-Request-ID,Content-Type,X-RateLimit-Limit,X-RateLimit-Remaining,X-RateLimit-Reset,X-API-Version` |
+| `CORS_MAX_AGE` | Seconds a browser may cache a preflight result. `0` disables caching. | `86400` |
+| `ACCESS_LOG_ENABLED` | Emit one structured record per completed request. | `true` |
+| `ACCESS_LOG_PATH` | Also write access records to this file, with rotation. Unset means stdout only. | unset |
+| `ACCESS_LOG_MAX_BYTES` | Size at which the access log file rotates. | `10485760` |
+| `ACCESS_LOG_MAX_FILES` | Rotated files to retain. | `5` |
+| `LOG_PAYLOADS` | Include redacted request and response bodies in access records. | `false` |
+| `LOG_HEADERS` | Include redacted request headers in access records. | `false` |
+| `LOG_PAYLOAD_MAX_BYTES` | Size at which a logged payload is truncated. | `2048` |
+| `TRUST_PROXY` | Trust `X-Forwarded-For` / `X-Real-IP` for the client IP. | `false` |
+
+## API Request Logging
+
+Cross-origin access is configured entirely through environment variables, so a
+single build serves local development, staging and production.
+
+### Origins
+
+`CORS_ORIGIN` takes one origin, a comma-separated list, or `*`:
+
+```bash
+# Local development — the default in NODE_ENV=development
+CORS_ORIGIN=*
+
+# One origin
+CORS_ORIGIN=https://app.example.com
+
+# Several origins
+CORS_ORIGIN=https://app.example.com,https://admin.example.com,http://localhost:5173
+```
+
+An origin is matched exactly, so `https://app.example.com.evil.com` never
+matches `https://app.example.com`. When `CORS_ORIGIN` is unset the server
+allows all origins in development and none in production — a production
+deployment must name its origins rather than inherit a permissive default.
+
+`CORS_ALLOWED_ORIGINS` is still read as an alias for existing deployments;
+`CORS_ORIGIN` wins when both are set.
+
+Each value must be a bare origin (`scheme://host[:port]`). A value with a path,
+query or fragment is rejected at startup, because an `Origin` header never
+carries one and such a value could never match a real request.
+
+### Credentials
+
+```bash
+CORS_ORIGIN=https://app.example.com
+CORS_CREDENTIALS=true
+```
+
+`CORS_CREDENTIALS` accepts `true/false`, `1/0`, `yes/no` and `on/off`. It is
+`false` by default.
+
+The CORS spec forbids credentials with a wildcard origin — a browser rejects
+such a response outright — so enabling credentials while `CORS_ORIGIN` is `*`
+(including by relying on the development default) fails validation at startup
+rather than at the browser. When credentials are enabled and the origin list is
+a wildcard by other means, the server reflects the request's own origin instead
+of sending `*`.
+
+### Methods and headers
+
+```bash
+CORS_METHODS=GET,POST
+CORS_ALLOWED_HEADERS=Content-Type,X-API-Key
+CORS_EXPOSED_HEADERS=X-Request-ID,X-RateLimit-Remaining
+```
+
+`CORS_METHODS` and `CORS_ALLOWED_HEADERS` populate the preflight response.
+`CORS_EXPOSED_HEADERS` lists the response headers browser JavaScript may read;
+it defaults to `X-Request-ID`, `Content-Type`, the rate-limit headers and
+`X-API-Version`.
+
+### Preflight caching
+
+```bash
+CORS_MAX_AGE=600
+```
+
+`CORS_MAX_AGE` is the `Access-Control-Max-Age` value in seconds, defaulting to
+`86400` (24 hours). Browsers apply their own upper bound. Setting it to `0`
+disables preflight caching, which is useful while iterating on the header
+configuration.
+
+### Vary
+
+Whenever the allowed origin depends on the request — a specific origin list, or
+a wildcard with credentials enabled — the server sends `Vary: Origin` so a
+shared cache cannot serve one origin's response to another.
+
+### Example deployments
+
+```bash
+# Development
+NODE_ENV=development npm start
+
+# Staging with a credentialed dashboard
+NODE_ENV=production CORS_ORIGIN=https://staging.example.com CORS_CREDENTIALS=true npm start
+
+# Production, read-only public API, short preflight cache
+NODE_ENV=production CORS_ORIGIN=https://app.example.com,https://docs.example.com CORS_METHODS=GET,OPTIONS CORS_MAX_AGE=300 npm start
+```
+
+These are per client, and independent of each other: exhausting the issuance
+budget does not block reads. A `GET /credentials` is a read and falls under
+`general`, not `credential_issuance`.
+
+### Per-tier limits
+
+The existing subscription tiers still apply on top, with separate read and
+write budgets:
+
+| Tier | Reads | Writes |
+| --- | --- | --- |
+| free | 60/min | 20/min |
+| pro | 300/min | 100/min |
+| enterprise | 1200/min | 500/min |
+
+### Response headers
+
+| Header | Meaning |
+| --- | --- |
+| `X-RateLimit-Limit` | Limit of whichever budget is closest to exhaustion |
+| `X-RateLimit-Remaining` | Requests left in that budget |
+| `X-RateLimit-Reset` | Unix seconds at which it resets |
+| `X-RateLimit-Tier` | Resolved subscription tier |
+| `X-RateLimit-Scope` | `endpoint` or `tier` |
+| `X-RateLimit-Bypass` | `whitelist` when the caller is exempt |
+| `Retry-After` | Seconds to wait, sent with every 429 |
+
+The reported budget is whichever will stop the client first, so the headers are
+not misleading when the endpoint limit is nearly spent but the tier limit is
+not.
+
+### 429 responses
+
+```json
+{
+  "error": "rate_limit_exceeded",
+  "code": "RATE_LIMIT_EXCEEDED",
+  "scope": "endpoint",
+  "rule": "credential_issuance",
+  "message": "Rate limit exceeded for 'credential_issuance' (10 requests per window). Retry in 840s.",
+  "limit": 10,
+  "windowMinutes": 14,
+  "retryAfter": 840
+| Section | Notes |
+| --- | --- |
+| Body | JSON bodies are validated against a strict schema — unknown keys are rejected. |
+| Query parameters | Values are parsed and range-checked (for example `limit` must be 1-200). |
+| Path parameters | Credential identifiers are pattern-checked before any lookup. |
+| Headers | `x-request-id`, `x-user-tier`, `x-api-version` and `x-actor` are validated on every request. |
+
+### Sanitization
+| `WS_ENABLED` | Enable the WebSocket endpoint. Set to `false` to disable it. | `true` |
+| `WS_PATH` | Path clients connect to for real-time updates. | `/ws` |
+| `WS_MESSAGE_LIMIT` | Inbound messages allowed per connection per window. | `60` |
+| `WS_MESSAGE_WINDOW_MS` | Length of the inbound message rate-limit window. | `60000` |
+| `WS_HEARTBEAT_INTERVAL_MS` | Ping interval used to detect dead connections. `0` disables heartbeats. | `30000` |
+
+## WebSocket API
+
+Real-time credential status changes and DID updates are pushed over a
+WebSocket at `WS_PATH` (default `/ws`).
+
+### Connecting
+
+Authentication happens during the HTTP upgrade, so an unauthenticated client
+never becomes a WebSocket — it receives a plain `401` (or `403` when the key
+lacks `credentials:read`) and the socket is closed.
+
+The API key may be supplied three ways:
+
+```bash
+# Query parameter — the only option available to a browser, which cannot set
+# headers on a WebSocket handshake
+wscat -c "ws://localhost:3001/ws?token=$API_KEY"
+
+# Header, for server-to-server clients
+wscat -c ws://localhost:3001/ws -H "X-API-Key: $API_KEY"
+wscat -c ws://localhost:3001/ws -H "Authorization: Bearer $API_KEY"
+```
+
+A `did` query parameter subscribes on connect, so a reconnecting client can
+restore its subscriptions in the handshake rather than waiting for a round
+trip. It may be repeated:
+
+```
+ws://localhost:3001/ws?token=KEY&did=GABC...&did=GDEF...
+```
+
+On success the server sends:
+Every completed request emits one structured JSON record through pino, at a
+level derived from the status: `info` below 400, `warn` for 4xx, `error` for
+5xx.
+
+```json
+{
+  "level": "info",
+  "time": "2026-01-01T00:00:00.000Z",
+  "type": "http_access",
+  "requestId": "8f14e45f-ceea-467a-9f2c-9d4c1a5f0f21",
+  "method": "POST",
+  "path": "/credentials",
+  "status": 201,
+  "durationMs": 42,
+  "ip": "10.0.0.5",
+  "userAgent": "curl/8.4.0",
+  "contentLength": "128",
+  "apiKeyId": "key_01",
+  "userTier": "pro",
+  "msg": "http request completed"
+}
+```
+
+### Correlation IDs
+
+An inbound `X-Request-ID` is honoured; otherwise one is generated. The value is
+echoed on the response, carried in AsyncLocalStorage, and mixed into every log
+line emitted while handling that request — so an application log and its access
+record share one id.
+
+### Client IP
+
+`X-Forwarded-For` and `X-Real-IP` are only consulted when `TRUST_PROXY=true`.
+Without it the socket address is used, because any client can set those headers
+and would otherwise be able to forge the logged IP. Behind a proxy the first
+hop in the chain is taken.
+
+### Payloads and redaction
+
+`LOG_PAYLOADS=true` adds the request and response bodies; `LOG_HEADERS=true`
+adds the request headers. Both are redacted before they reach the log:
+
+- Headers: `authorization`, `x-api-key`, `cookie`, `set-cookie`,
+  `proxy-authorization`, `x-auth-token`
+- Body fields at any depth: `password`, `secret`, `token`, `apiKey`,
+  `privateKey`, `secretKey`, `seed`, `mnemonic`, `signature`, `credential`, and
+  their snake_case and kebab-case spellings
+
+Recursion is depth-bounded, and a body over `LOG_PAYLOAD_MAX_BYTES` is
+truncated to a preview plus its real size, so one large upload cannot flood the
+log.
+
+### Rotation
+
+Setting `ACCESS_LOG_PATH` additionally writes each record to a file that
+rotates at `ACCESS_LOG_MAX_BYTES`, keeping `ACCESS_LOG_MAX_FILES` generations
+(`access.log.1` … `access.log.N`) and dropping the rest. Rotation is checked on
+write rather than on a timer, so an idle process does not accumulate empty
+rotations and a burst cannot overshoot the limit while waiting for a tick.
+
+An endpoint denial is reported as such and does **not** carry the upgrade
+prompt, because upgrading a subscription does not raise a per-endpoint limit.
+Tier denials keep the existing upgrade payload.
+
+### Whitelisting
+
+`RATE_LIMIT_WHITELIST` accepts exact addresses and IPv4 CIDR ranges
+(`10.0.0.5,10.0.0.0/24`). Whitelisted callers skip both budgets and are
+answered with `X-RateLimit-Bypass: whitelist`.
+
+Whitelist matching uses the socket address unless `TRUST_PROXY=true`. Without
+that, a caller could whitelist itself simply by sending an `X-Forwarded-For`
+header.
+
+### Multi-strategy limits (#956)
+
+`src/middleware/ratelimit.js` (types in `ratelimit.d.ts`) runs four budgets in
+order; a request must pass every one:
+
+1. **Premium bypass**: callers whose authenticated tier is in
+   `RATE_LIMIT_PREMIUM_TIERS`, or whose API key id is in
+   `RATE_LIMIT_PREMIUM_KEYS`, skip every check and get
+   `X-RateLimit-Bypass: premium`. The client-supplied `X-User-Tier` header
+   never grants a bypass.
+2. **Per-IP**: a token bucket per client address.
+3. **Per-user**: a token bucket per API key / user id, so rotating hosts does
+   not multiply an account's budget.
+4. **Endpoint and tier**: the rules described above.
+
+Per-IP and per-user buckets refill at `*_PER_MINUTE` and hold `*_PER_MINUTE +
+*_BURST` tokens, so an idle client can absorb a short spike. A denial from
+either returns `429` with `scope: "ip"` or `scope: "user"` and no upgrade
+prompt. `X-RateLimit-*` headers always describe the budget closest to
+exhaustion.
+
+### Metrics dashboard
+
+Every decision increments `rate_limit_decisions_total{outcome, scope}`
+(`outcome` is `allowed`, `denied` or `bypass`). Import
+`infra/monitoring/grafana/soroban-identity-rate-limits.json` into Grafana for
+decision rate, denials by scope, denial percentage, bypasses and 429s by route.
+`GET /admin/rate-limits` (`admin:read`) returns the live picture: bucket
+counts, decision totals, violations by scope and the 200 most recent
+violations.
+
+### Violations and memory
+
+Every denial is logged at `warn` with `type: "rate_limit_violation"`, the rule,
+scope, IP, method, path, API key id, and user agent. Expired buckets are
+evicted once the map reaches `RATE_LIMIT_MAX_BUCKETS`, so a stream of distinct
+client addresses cannot grow it without bound. Eviction runs on write, not on a
+timer, so an idle process does no work.
+The client is implemented directly against `node:net`/`node:tls` in
+`src/redis-client.js`, because this server ships with pino as its only runtime
+dependency. It speaks RESP, supports `redis://` and `rediss://` with optional
+auth and database selection, and covers GET, SET with TTL, DEL, SCAN, and PING
+with connection retry and per-command timeouts.
+A file-sink failure is logged and swallowed: it never breaks the response, and
+a log file that cannot be opened at startup falls back to stdout-only logging
+rather than preventing the server from booting.
+
+## API Key Scopes
+
+The server supports granular access control through API key scopes. Instead of granting full access, you can issue scoped keys for specific operations.
+
+### Scope Format
+
+```
+<api-key>:<scope1>,<scope2>,<scope3>
+```
+
+### Available Scopes
+
+- **`credentials:read`** - Verify and read credentials
+- **`credentials:write`** - Issue new credentials
+- **`admin:read`** - View administrative data (issuers, expiry reports)
+- **`admin:write`** - Modify administrative settings (add/remove issuers)
+- **`*`** - Wildcard grants all permissions
+
+### Examples
+
+```bash
+# Read-only dashboard access
+X-API-Key: my-key:credentials:read,admin:read
+
+# Issuer integration (write-only)
+X-API-Key: my-key:credentials:write
+
+# Full admin access
+X-API-Key: my-key:admin:read,admin:write
+
+# Full access (wildcard)
+X-API-Key: my-key:*
+
+# Legacy format (no scopes = full access)
+X-API-Key: my-key
+```
+
+For detailed documentation, see [API Key Scopes](../docs/api-key-scopes.md).
+
+## Request Signing
+
+An API key authenticates the caller but does not prove the request arrived
+unmodified, nor stop a captured request from being replayed. Optional
+HMAC-SHA256 request signing covers both: each signed request carries a digest
+over its method, path, timestamp, nonce and body.
+
+```http
+X-Signature:           v1=<hex hmac-sha256>
+X-Signature-Timestamp: 1700000000
+X-Signature-Nonce:     3f0a1c...
+```
+
+Disabled by default — enabling it rejects unsigned requests, so clients need
+their signing secrets first.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `REQUEST_SIGNING_ENABLED` | `false` | Master switch |
+| `REQUEST_SIGNING_ENFORCE` | `mutations` | `mutations` (writes only) or `all` |
+| `REQUEST_SIGNING_MAX_AGE_SECONDS` | `300` | Clock-skew allowance |
+
+For the canonical string, client examples and rollout steps, see
+[Request Signing](../docs/request-signing.md).
+
+## Verifiable Credentials (JSON-LD)
+
+Credentials can be served in W3C Verifiable Credentials form so any conforming
+wallet or verifier can consume them. It is opt-in, so existing clients keep the
+compact internal shape:
+
+```console
+$ curl -H 'Accept: application/ld+json' /credentials/cred-123
+$ curl '/credentials/cred-123?format=jsonld'
+```
+
+Every credential carries a `credentialStatus` entry backed by a public
+`GET /credentials/:id/status` endpoint reporting `active`, `expired` or
+`revoked`.
+
+Proofs use `DataIntegrityProof` with the `eddsa-jcs-2022` cryptosuite, which
+canonicalizes with JCS (RFC 8785) rather than requiring a JSON-LD processor.
+Credentials are signed only when `VC_PROOF_PRIVATE_KEY` is set; without it they
+are emitted unsigned rather than carrying a fabricated proof.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `VC_BASE_CONTEXT` | VC v1.1 | Set to the v2 URI to emit v2 credentials |
+| `VC_EXTRA_CONTEXTS` | — | Extra contexts, comma-separated |
+| `VC_BASE_URL` | — | Makes credential ids resolvable URLs |
+| `VC_PROOF_PRIVATE_KEY` | — | 32-byte Ed25519 seed, hex or base64 |
+| `VC_PROOF_VERIFICATION_METHOD` | `<issuer DID>#key-1` | Where the key is published |
+
+See [Verifiable Credentials (JSON-LD)](../docs/verifiable-credentials-jsonld.md).
+
+## Content Security Policy
+
+Every response carries a CSP header plus the usual companion security headers
+(`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`,
+`Permissions-Policy`, and HSTS in production). The policy uses a fresh
+per-response nonce rather than `'unsafe-inline'`, so the GraphQL playground's
+inline `<style>` and `<script>` run under a policy strict enough to be worth
+enforcing.
+
+Violation reports are collected at `POST /csp-report` — unauthenticated and
+exempt from request signing, because the browser posts them with no
+credentials — and counted as `csp_violations_total{directive="..."}`.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CSP_ENABLED` | `true` | Master switch |
+| `CSP_REPORT_ONLY` | `true` | Report violations without blocking them |
+| `CSP_REPORT_URI` | `/csp-report` | Where the browser posts reports |
+| `CSP_SCRIPT_SRC` etc. | — | Extra trusted origins, comma-separated |
+
+Defaults to report-only: an enforced policy that is even slightly too tight
+breaks the page for everyone at once. See
+[Content Security Policy](../docs/content-security-policy.md) for the rollout
+and the frontend's half of the setup.
 
 ## Audit Log Naming & Rotation
 

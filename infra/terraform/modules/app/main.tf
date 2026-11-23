@@ -1,0 +1,87 @@
+variable "name" { type = string }
+variable "subnet_ids" { type = list(string) }
+variable "security_group_id" { type = string }
+variable "image" { type = string }
+variable "desired_count" { type = number }
+variable "redis_endpoint" { type = string }
+variable "read_replica_endpoints" {
+  type        = map(string)
+  description = "Map of region name to read replica endpoint for geo-distributed read replicas"
+  default     = {}
+}
+variable "primary_region" {
+  type        = string
+  description = "Primary region name used for read/write splitting and failover"
+  default     = "us"
+}
+
+data "aws_region" "current" {}
+resource "aws_ecs_cluster" "this" { name = var.name }
+resource "aws_iam_role" "task" {
+  name = "${var.name}-task"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = { Service = "ecs-tasks.amazonaws.com" }
+      Action = "sts:AssumeRole"
+    }]
+  })
+}
+resource "aws_cloudwatch_log_group" "this" {
+  name = "/ecs/${var.name}"
+  retention_in_days = 30
+}
+resource "aws_ecs_task_definition" "this" {
+  family = var.name
+  requires_compatibilities = ["FARGATE"]
+  network_mode = "awsvpc"
+  cpu = 512
+  memory = 1024
+  execution_role_arn = aws_iam_role.task.arn
+  container_definitions = jsonencode([{
+    name = "server"
+    image = var.image
+    essential = true
+    portMappings = [{ containerPort = 3001 }]
+    environment = concat([
+      { name = "NODE_ENV", value = var.name },
+      { name = "REDIS_URL", value = "rediss://${var.redis_endpoint}:6379" },
+      # Read/write splitting (#1051): writes go to the primary, reads are
+      # routed to the nearest healthy replica with failover to the primary.
+      { name = "REDIS_PRIMARY_REGION", value = var.primary_region },
+      { name = "REDIS_READ_REPLICAS", value = jsonencode(var.read_replica_endpoints) },
+      { name = "REDIS_REPLICA_LAG_THRESHOLD_MS", value = "5000" },
+      { name = "REDIS_READ_PREFERENCE", value = "nearest" }
+      ], [
+      for region, endpoint in var.read_replica_endpoints : {
+        name  = "REDIS_REPLICA_${upper(region)}_URL"
+        value = "rediss://${endpoint}:6379"
+      }
+    ])
+    # Liveness only (#883): the image has no curl, and /health fails on a
+    # dependency outage, which would make ECS replace healthy tasks.
+    healthCheck = { command = ["CMD", "node", "scripts/healthcheck.mjs", "/live"], interval = 30, timeout = 5, retries = 3, startPeriod = 30 }
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group" = aws_cloudwatch_log_group.this.name
+        "awslogs-region" = data.aws_region.current.name
+        "awslogs-stream-prefix" = "server"
+      }
+    }
+  }])
+}
+resource "aws_ecs_service" "this" {
+  name = var.name
+  cluster = aws_ecs_cluster.this.id
+  task_definition = aws_ecs_task_definition.this.arn
+  desired_count = var.desired_count
+  launch_type = "FARGATE"
+  network_configuration {
+    subnets = var.subnet_ids
+    security_groups = [var.security_group_id]
+    assign_public_ip = false
+  }
+}
+output "cluster_name" { value = aws_ecs_cluster.this.name }
