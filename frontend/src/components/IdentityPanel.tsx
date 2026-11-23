@@ -1,4 +1,6 @@
 import { useState } from 'react';
+import { QRCodeSVG } from 'qrcode.react';
+import ConfirmDialog from './ConfirmDialog';
 import type { WalletState } from '../hooks/useWallet';
 import type { ReputationRecord } from '../../../sdk/src/reputation';
 
@@ -18,6 +20,8 @@ export default function IdentityPanel({ wallet }: Props) {
 
   const [createResult, setCreateResult] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const [minScore, setMinScore] = useState("50");
   const [minReporters, setMinReporters] = useState("2");
@@ -84,6 +88,22 @@ export default function IdentityPanel({ wallet }: Props) {
       setCreateResult(`Error: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setCreating(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    setConfirmDelete(false);
+    if (!wallet.connected || !wallet.publicKey) return;
+    setDeleting(true);
+    setCreateResult(null);
+    try {
+      // TODO: build deactivate tx via IdentityClient, sign via wallet.signTransaction(), submit
+      await new Promise((r) => setTimeout(r, 1000));
+      setCreateResult(`DID deactivated: did:stellar:${wallet.publicKey}`);
+    } catch (e: unknown) {
+      setCreateResult(`Error: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -225,9 +245,22 @@ export default function IdentityPanel({ wallet }: Props) {
                 {wallet.publicKey.slice(0, 6)}…{wallet.publicKey.slice(-4)}
               </span>
             </p>
-            <button onClick={handleCreate} disabled={creating}>
-              {creating ? 'Creating…' : 'Create DID'}
-            </button>
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <button onClick={handleCreate} disabled={creating || deleting}>
+                {creating ? 'Creating…' : 'Create DID'}
+              </button>
+              <button className="btn-danger" onClick={() => setConfirmDelete(true)} disabled={creating || deleting}>
+                {deleting ? 'Deleting…' : 'Delete DID'}
+              </button>
+            </div>
+            <div>
+              <div className="qr-wrapper" aria-label="QR code for your DID">
+                <QRCodeSVG value={`did:stellar:${wallet.publicKey}`} size={160} />
+              </div>
+              <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', marginTop: '0.5rem', wordBreak: 'break-all' }}>
+                Scan to share did:stellar:{wallet.publicKey}
+              </p>
+            </div>
           </>
         ) : (
           <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
@@ -236,6 +269,15 @@ export default function IdentityPanel({ wallet }: Props) {
         )}
         {createResult && <pre className="result">{createResult}</pre>}
       </div>
+
+      <ConfirmDialog
+        open={confirmDelete}
+        title="Delete identity?"
+        message="This will deactivate your on-chain DID. This action cannot be undone."
+        confirmLabel="Delete DID"
+        onConfirm={handleDelete}
+        onCancel={() => setConfirmDelete(false)}
+      />
     </>
   );
 }

@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import ConfirmDialog from "./ConfirmDialog";
 import type { CredentialType } from "../../../sdk/src/types";
 import type { WalletState } from "../hooks/useWallet";
 
@@ -19,14 +20,35 @@ type VerifyState =
 
 type FilterType = "All" | CredentialType;
 
-// Mock credentials for demonstration — replace with SDK data when wired
-const MOCK_CREDENTIALS = [
-  { id: "abc001", credentialType: "Kyc" as CredentialType, subject: "GABC…" },
-  { id: "abc002", credentialType: "Kyc" as CredentialType, subject: "GABC…" },
-  { id: "abc003", credentialType: "Reputation" as CredentialType, subject: "GABC…" },
-  { id: "abc004", credentialType: "Achievement" as CredentialType, subject: "GABC…" },
-  { id: "abc005", credentialType: "Custom" as CredentialType, subject: "GABC…" },
-];
+interface Attestation {
+  id: string;
+  credentialType: CredentialType;
+  subject: string;
+}
+
+interface Page<T> {
+  items: T[];
+  total: number;
+}
+
+const PAGE_SIZE = 5;
+const TYPES: CredentialType[] = ["Kyc", "Reputation", "Achievement", "Custom"];
+
+// Mock dataset — replace with SDK data when wired
+const MOCK_CREDENTIALS: Attestation[] = Array.from({ length: 23 }, (_, i) => ({
+  id: `abc${String(i + 1).padStart(3, "0")}`,
+  credentialType: TYPES[i % TYPES.length],
+  subject: "GABC…",
+}));
+
+// Simulates a server-side paginated query: the server filters and slices, the client only holds one page.
+async function fetchAttestations(type: FilterType, page: number, pageSize: number): Promise<Page<Attestation>> {
+  // TODO: wire CredentialClient paginated query from SDK
+  await new Promise((r) => setTimeout(r, 300));
+  const all = type === "All" ? MOCK_CREDENTIALS : MOCK_CREDENTIALS.filter((c) => c.credentialType === type);
+  const start = (page - 1) * pageSize;
+  return { items: all.slice(start, start + pageSize), total: all.length };
+}
 
 const FILTER_OPTIONS: FilterType[] = ["All", "Kyc", "Reputation", "Achievement", "Custom"];
 
@@ -45,11 +67,37 @@ export default function CredentialsPanel({ wallet }: Props) {
   const [issuing, setIssuing] = useState(false);
 
   const [activeFilter, setActiveFilter] = useState<FilterType>("All");
+  const [page, setPage] = useState(1);
+  const [pageData, setPageData] = useState<Page<Attestation>>({ items: [], total: 0 });
+  const [loadingPage, setLoadingPage] = useState(false);
+  const [revokeTarget, setRevokeTarget] = useState<string | null>(null);
 
-  const filteredCredentials =
-    activeFilter === "All"
-      ? MOCK_CREDENTIALS
-      : MOCK_CREDENTIALS.filter((c) => c.credentialType === activeFilter);
+  const totalPages = Math.max(1, Math.ceil(pageData.total / PAGE_SIZE));
+
+  const loadPage = useCallback(async () => {
+    setLoadingPage(true);
+    try {
+      setPageData(await fetchAttestations(activeFilter, page, PAGE_SIZE));
+    } finally {
+      setLoadingPage(false);
+    }
+  }, [activeFilter, page]);
+
+  useEffect(() => {
+    loadPage();
+  }, [loadPage]);
+
+  const handleRevoke = async () => {
+    const id = revokeTarget;
+    setRevokeTarget(null);
+    if (!id) return;
+    // TODO: build revoke tx via CredentialClient, sign via wallet.signTransaction(), submit
+    await new Promise((r) => setTimeout(r, 500));
+    const idx = MOCK_CREDENTIALS.findIndex((c) => c.id === id);
+    if (idx !== -1) MOCK_CREDENTIALS.splice(idx, 1);
+    if (pageData.items.length === 1 && page > 1) setPage(page - 1);
+    else loadPage();
+  };
 
   const handleVerify = async () => {
     if (!credId.trim()) return;
@@ -103,7 +151,10 @@ export default function CredentialsPanel({ wallet }: Props) {
             return (
               <button
                 key={type}
-                onClick={() => setActiveFilter(type)}
+                onClick={() => {
+                  setActiveFilter(type);
+                  setPage(1);
+                }}
                 style={{
                   padding: "0.3rem 0.75rem",
                   borderRadius: "999px",
@@ -134,13 +185,15 @@ export default function CredentialsPanel({ wallet }: Props) {
           })}
         </div>
 
-        {filteredCredentials.length === 0 ? (
+        {loadingPage && pageData.items.length === 0 ? (
+          <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>Loading…</p>
+        ) : pageData.items.length === 0 ? (
           <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>
             No {activeFilter} credentials found.
           </p>
         ) : (
           <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-            {filteredCredentials.map((cred) => (
+            {pageData.items.map((cred) => (
               <li
                 key={cred.id}
                 style={{
@@ -155,10 +208,35 @@ export default function CredentialsPanel({ wallet }: Props) {
                 }}
               >
                 <span style={{ fontFamily: "monospace", color: "var(--text-muted)" }}>{cred.id}</span>
-                <span className="badge badge-green">{cred.credentialType}</span>
+                <span style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                  <span className="badge badge-green">{cred.credentialType}</span>
+                  {wallet.connected && (
+                    <button
+                      className="btn-danger"
+                      style={{ padding: "0.2rem 0.6rem", fontSize: "0.75rem" }}
+                      onClick={() => setRevokeTarget(cred.id)}
+                    >
+                      Revoke
+                    </button>
+                  )}
+                </span>
               </li>
             ))}
           </ul>
+        )}
+
+        {pageData.total > PAGE_SIZE && (
+          <div className="pagination">
+            <button onClick={() => setPage((p) => p - 1)} disabled={page <= 1 || loadingPage}>
+              ← Prev
+            </button>
+            <span>
+              Page {page} of {totalPages} · {pageData.total} total
+            </span>
+            <button onClick={() => setPage((p) => p + 1)} disabled={page >= totalPages || loadingPage}>
+              Next →
+            </button>
+          </div>
         )}
       </div>
 
@@ -219,6 +297,15 @@ export default function CredentialsPanel({ wallet }: Props) {
         )}
         {issueResult && <pre className="result">{issueResult}</pre>}
       </div>
+
+      <ConfirmDialog
+        open={revokeTarget !== null}
+        title="Revoke attestation?"
+        message={`Attestation ${revokeTarget ?? ""} will be permanently revoked. This action cannot be undone.`}
+        confirmLabel="Revoke"
+        onConfirm={handleRevoke}
+        onCancel={() => setRevokeTarget(null)}
+      />
     </>
   );
 }

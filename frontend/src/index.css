@@ -265,3 +265,46 @@ button:disabled { background: var(--btn-disabled-bg); color: var(--btn-disabled-
   transition: background 0.2s, color 0.2s;
 }
 .theme-toggle:hover { background: var(--bg-subtle); color: var(--text); }
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  z-index: 100;
+}
+
+.modal {
+  max-width: 420px;
+  width: 100%;
+  margin: 0;
+}
+
+.btn-danger {
+  background: #dc2626;
+}
+
+.btn-danger:hover {
+  background: #b91c1c;
+}
+
+.qr-wrapper {
+  display: inline-block;
+  padding: 0.75rem;
+  background: #fff;
+  border-radius: 0.5rem;
+  margin-top: 1rem;
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
