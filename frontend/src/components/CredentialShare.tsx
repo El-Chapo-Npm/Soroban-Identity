@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 import type { Credential } from "../../../sdk/src/types";
 import {
   generateEncryptionKey,
@@ -14,6 +15,8 @@ interface CredentialShareProps {
 }
 
 export const CredentialShare: React.FC<CredentialShareProps> = ({ credential, onClose }) => {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(dialogRef, true, onClose);
   const toast = useToast();
   const [expiryHours, setExpiryHours] = useState<number>(24);
   const [shareUrl, setShareUrl] = useState<string>("");
@@ -69,6 +72,7 @@ export const CredentialShare: React.FC<CredentialShareProps> = ({ credential, on
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-labelledby="share-modal-title"

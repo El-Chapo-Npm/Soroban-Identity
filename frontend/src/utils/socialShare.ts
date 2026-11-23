@@ -68,6 +68,23 @@ export function buildVerificationUrl(credentialId: string, platform?: SocialPlat
   return url.toString();
 }
 
+/**
+ * Short shareable link (#1356) that third parties can open to check a DID's
+ * attestation status: `<origin>/verify/<did>`.
+ */
+export function buildDidVerificationUrl(didOrAddress: string, origin = window.location.origin): string {
+  const did = didOrAddress.startsWith('did:') ? didOrAddress : `did:stellar:${didOrAddress}`;
+  return `${origin.replace(/\/$/, '')}/verify/${encodeURIComponent(did)}`;
+}
+
+/** Parse a `/verify/:did` pathname, returning the Stellar address or null. */
+export function parseDidVerificationPath(pathname: string): string | null {
+  const match = /^\/verify\/([^/]+)\/?$/.exec(pathname);
+  if (!match) return null;
+  const did = decodeURIComponent(match[1]);
+  return did.startsWith('did:stellar:') ? did.slice('did:stellar:'.length) : did;
+}
+
 /** Human-readable share text, limited to what the privacy options allow. */
 export function buildShareText(credential: Pick<Credential, 'credentialType' | 'issuer'>, privacy: SharePrivacyOptions): string {
   const kind = privacy.includeType ? `${TYPE_LABELS[credential.credentialType] ?? 'verifiable'} credential` : 'credential';

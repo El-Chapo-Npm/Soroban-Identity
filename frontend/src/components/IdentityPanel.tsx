@@ -17,6 +17,9 @@ import { exportDidDocumentAsJsonLd } from '../../../sdk/src/serializers';
 import { SorobanRpc, TransactionBuilder, BASE_FEE, nativeToScVal, Contract } from '@stellar/stellar-sdk';
 import { IdentityClient, ReputationClient } from '../../../sdk/src';
 import { getNetworkConfig } from '../network';
+import ClaimVerificationBadge, { getClaimStatus } from './ClaimVerificationBadge';
+import AuditLogViewer from './AuditLogViewer';
+import { buildDidVerificationUrl } from '../utils/socialShare';
 
 type IdentityState =
   | { status: 'idle' }
@@ -82,7 +85,7 @@ function validateMetadataFields(
   };
 }
 
-export default function IdentityPanel() {
+export default function IdentityPanel({ initialAddress }: { initialAddress?: string } = {}) {
   const wallet = useWalletContext();
   const toast = useToast();
   const [identityState, dispatch] = useReducer(identityReducer, { status: 'idle' });
@@ -138,6 +141,25 @@ export default function IdentityPanel() {
 
   const [showQr, setShowQr] = useState(false);
   const [copied, setCopied] = useState(false);
+
+  // Shareable /verify/:did link (#1356): resolve the DID passed in the URL.
+  useEffect(() => {
+    if (initialAddress) {
+      setResolveAddress(initialAddress);
+      void handleResolve(initialAddress);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialAddress]);
+
+  const handleCopyVerifyLink = async () => {
+    if (!resolvedAddress) return;
+    try {
+      await navigator.clipboard.writeText(buildDidVerificationUrl(resolvedAddress));
+      toast.success('Verification link copied.');
+    } catch {
+      toast.error('Failed to copy verification link.');
+    }
+  };
 
   const handleResolve = async (addressOverride?: string) => {
     if (resolving) return; // guard against duplicate submissions
@@ -766,6 +788,13 @@ export default function IdentityPanel() {
             >
               Export JSON-LD
             </button>
+            <button
+              onClick={handleCopyVerifyLink}
+              disabled={!resolvedAddress}
+              style={{ marginLeft: '0.5rem' }}
+            >
+              Copy Verify Link
+            </button>
             {!isEditingMetadata && resolvedDoc?.metadata && Object.keys(resolvedDoc.metadata).length > 0 && (
               <button
                 onClick={handleEditMetadata}
@@ -783,6 +812,8 @@ export default function IdentityPanel() {
             )}
           </div>
         )}
+
+        {resolvedDoc && <AuditLogViewer did={resolvedDoc.id} />}
 
         {reputationLoading && (
           <div style={{ marginTop: '1rem' }} aria-label="Loading reputation">
@@ -829,7 +860,10 @@ export default function IdentityPanel() {
                 {Object.entries(resolvedDoc.metadata).map(([key, value]) => (
                   <div key={key} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem', fontSize: '0.9rem' }}>
                     <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>{key}:</span>
-                    <span>{String(value)}</span>
+                    <span>
+                      {String(value)}
+                      <ClaimVerificationBadge status={getClaimStatus(resolvedDoc)} />
+                    </span>
                   </div>
                 ))}
               </>

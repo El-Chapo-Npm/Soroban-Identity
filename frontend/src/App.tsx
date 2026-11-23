@@ -45,7 +45,7 @@ import {
 import { checkConnection, IdentityClient, CredentialClient, ReputationClient } from "../../sdk/src/index";
 import { setLocale } from "./i18n";
 import { useOpenGraphMeta } from "./hooks/useOpenGraphMeta";
-import { SHARE_DESCRIPTION, SHARE_TITLE, buildVerificationUrl } from "./utils/socialShare";
+import { SHARE_DESCRIPTION, SHARE_TITLE, buildVerificationUrl, parseDidVerificationPath } from "./utils/socialShare";
 import type { Credential } from "../../sdk/src/types";
 
 const SUPPORTED_LOCALES: { code: string; label: string }[] = [
@@ -69,6 +69,7 @@ function AppContent() {
   const tabRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({});
   const [activeNetwork, setActiveNetwork] = useState<NetworkName>(DEFAULT_NETWORK);
   const [verifyId, setVerifyId] = useState<string | null>(null);
+  const [verifyDid] = useState<string | null>(() => parseDidVerificationPath(window.location.pathname));
   const [scanning, setScanning] = useState(false);
   const [deepLinkEncrypted, setDeepLinkEncrypted] = useState<{ c: string; k: string } | null>(null);
   const networkConfig = NETWORK_CONFIGS[activeNetwork];
@@ -615,7 +616,7 @@ function AppContent() {
             data-tour="panel-identity"
             hidden={tab !== Tab.Identity}
           >
-            {tab === Tab.Identity && <IdentityPanel />}
+            {tab === Tab.Identity && <IdentityPanel initialAddress={verifyDid ?? undefined} />}
           </div>
           <div
             id={`panel-${Tab.Credentials}`}
