@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { useModalKeyboard } from "../hooks/useModalKeyboard";
 import type { Credential } from "../../../sdk/src/types";
 import {
   generateEncryptionKey,
@@ -14,6 +15,7 @@ interface CredentialShareProps {
 }
 
 export const CredentialShare: React.FC<CredentialShareProps> = ({ credential, onClose }) => {
+  const modalRef = useModalKeyboard(onClose);
   const toast = useToast();
   const [expiryHours, setExpiryHours] = useState<number>(24);
   const [shareUrl, setShareUrl] = useState<string>("");
@@ -69,6 +71,7 @@ export const CredentialShare: React.FC<CredentialShareProps> = ({ credential, on
 
   return (
     <div
+      ref={modalRef}
       role="dialog"
       aria-modal="true"
       aria-labelledby="share-modal-title"

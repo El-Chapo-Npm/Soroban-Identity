@@ -16,6 +16,7 @@ const CredentialsPanel = lazy(() => import("./components/CredentialsPanel"));
 const IssuerDashboard = lazy(() => import("./pages/IssuerDashboard"));
 const CredentialRecipientVerify = lazy(() => import("./components/CredentialRecipientVerify"));
 const NetworkStatistics = lazy(() => import("./pages/NetworkStatistics"));
+const IdentityVerifyPage = lazy(() => import("./components/IdentityVerifyPage"));
 
 const preloadCredentialsPanel = () => {
   void import("./components/CredentialsPanel");
@@ -46,6 +47,7 @@ import { checkConnection, IdentityClient, CredentialClient, ReputationClient } f
 import { setLocale } from "./i18n";
 import { useOpenGraphMeta } from "./hooks/useOpenGraphMeta";
 import { SHARE_DESCRIPTION, SHARE_TITLE, buildVerificationUrl } from "./utils/socialShare";
+import { parseVerifyPath } from "./utils/identityApi";
 import type { Credential } from "../../sdk/src/types";
 
 const SUPPORTED_LOCALES: { code: string; label: string }[] = [
@@ -668,6 +670,15 @@ function AppContent() {
 }
 
 export default function App() {
+  // #1356: public `/verify/:did` link for third parties.
+  const verifyDid = parseVerifyPath(window.location.pathname);
+  if (verifyDid) {
+    return (
+      <Suspense fallback={<LoadingFallback />}>
+        <IdentityVerifyPage did={verifyDid} />
+      </Suspense>
+    );
+  }
   return (
     <TourProvider>
       <AppContent />
