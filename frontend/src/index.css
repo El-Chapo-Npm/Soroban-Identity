@@ -265,3 +265,46 @@ button:disabled { background: var(--btn-disabled-bg); color: var(--btn-disabled-
   transition: background 0.2s, color 0.2s;
 }
 .theme-toggle:hover { background: var(--bg-subtle); color: var(--text); }
+
+/* ── Navbar ──────────────────────────────────────────────────────────────────── */
+
+.navbar {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
+  gap: 0.5rem; padding: 0.75rem 1rem;
+  background: var(--card-bg); border-bottom: 1px solid var(--header-border);
+}
+.navbar-brand { font-weight: 700; color: var(--accent); }
+.navbar-menu { display: flex; align-items: center; gap: 0.5rem; }
+.navbar-toggle {
+  display: none; background: transparent; color: var(--text);
+  border: 1px solid var(--border-input); padding: 0.3rem 0.7rem; font-size: 1.1rem;
+}
+.navbar-toggle:hover { background: var(--bg-subtle); }
+
+@media (max-width: 640px) {
+  .navbar-toggle { display: block; }
+  .navbar-menu { display: none; width: 100%; flex-direction: column; align-items: stretch; }
+  .navbar-menu.open { display: flex; }
+  header { padding: 1.5rem 0 1rem; }
+}
+
+/* ── Wizard ──────────────────────────────────────────────────────────────────── */
+
+.wizard-steps { display: flex; gap: 0.5rem; list-style: none; margin-bottom: 1rem; flex-wrap: wrap; }
+.wizard-steps li {
+  flex: 1; text-align: center; padding: 0.4rem; font-size: 0.8rem; border-radius: 8px;
+  border: 1px solid var(--tab-border); color: var(--tab-color);
+}
+.wizard-steps li.active { border-color: var(--accent); color: var(--accent-light); font-weight: 600; }
+.wizard-steps li.done { background: var(--card-bg-accent); color: var(--accent-light); }
+
+/* ── Skeleton ────────────────────────────────────────────────────────────────── */
+
+.skeleton {
+  background: linear-gradient(90deg, var(--bg-subtle) 25%, var(--card-border) 50%, var(--bg-subtle) 75%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.2s ease-in-out infinite;
+}
+@keyframes skeleton-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }

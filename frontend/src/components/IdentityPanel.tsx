@@ -1,5 +1,7 @@
 import { useState } from 'react';
 import type { WalletState } from '../hooks/useWallet';
+import CreateIdentityWizard from './CreateIdentityWizard';
+import { Skeleton, SkeletonLines } from './Skeleton';
 import type { ReputationRecord } from '../../../sdk/src/reputation';
 
 interface Props {
@@ -15,9 +17,6 @@ export default function IdentityPanel({ wallet }: Props) {
   const [resolving, setResolving] = useState(false);
   const [reputation, setReputation] = useState<ReputationRecord | null>(null);
   const [reputationLoading, setReputationLoading] = useState(false);
-
-  const [createResult, setCreateResult] = useState<string | null>(null);
-  const [creating, setCreating] = useState(false);
 
   const [minScore, setMinScore] = useState("50");
   const [minReporters, setMinReporters] = useState("2");
@@ -72,21 +71,6 @@ export default function IdentityPanel({ wallet }: Props) {
     }
   };
 
-  const handleCreate = async () => {
-    if (!wallet.connected || !wallet.publicKey) return;
-    setCreating(true);
-    setCreateResult(null);
-    try {
-      // TODO: build tx via IdentityClient, sign via wallet.signTransaction(), submit
-      await new Promise((r) => setTimeout(r, 1000));
-      setCreateResult(`DID created: did:stellar:${wallet.publicKey}`);
-    } catch (e: unknown) {
-      setCreateResult(`Error: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setCreating(false);
-    }
-  };
-
   const handleSybilCheck = async () => {
     if (!resolvedAddress) return;
     setCheckingSybil(true);
@@ -116,12 +100,16 @@ export default function IdentityPanel({ wallet }: Props) {
         <button onClick={handleResolve} disabled={resolving || !resolveAddress}>
           {resolving ? 'Resolving…' : 'Resolve'}
         </button>
+        {resolving && !resolveResult && <SkeletonLines lines={5} />}
         {resolveResult && <pre className="result">{resolveResult}</pre>}
 
         {reputationLoading && (
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: '1rem' }}>
-            Loading reputation…
-          </p>
+          <div className="card" style={{ marginTop: '1rem' }} role="status" aria-label="Loading reputation">
+            <Skeleton width="40%" height="1.2rem" style={{ marginBottom: '0.75rem' }} />
+            <Skeleton width="30%" style={{ marginBottom: '0.5rem' }} />
+            <Skeleton width="35%" style={{ marginBottom: '0.5rem' }} />
+            <Skeleton width="50%" />
+          </div>
         )}
 
         {!reputationLoading && reputation && (
@@ -217,24 +205,7 @@ export default function IdentityPanel({ wallet }: Props) {
 
       <div className="card">
         <h2>Create DID</h2>
-        {wallet.connected && wallet.publicKey ? (
-          <>
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '1rem' }}>
-              Connected as{' '}
-              <span style={{ color: 'var(--accent-light)' }}>
-                {wallet.publicKey.slice(0, 6)}…{wallet.publicKey.slice(-4)}
-              </span>
-            </p>
-            <button onClick={handleCreate} disabled={creating}>
-              {creating ? 'Creating…' : 'Create DID'}
-            </button>
-          </>
-        ) : (
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-            Connect your Freighter wallet to create a new on-chain DID.
-          </p>
-        )}
-        {createResult && <pre className="result">{createResult}</pre>}
+        <CreateIdentityWizard wallet={wallet} />
       </div>
     </>
   );
