@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useModalKeyboard } from "../hooks/useModalKeyboard";
 import {
   DEFAULT_SHORTCUTS,
   getModifierLabel,
@@ -30,14 +30,7 @@ export function ShortcutHelpModal({
   onClose,
   shortcuts = DEFAULT_SHORTCUTS,
 }: ShortcutHelpModalProps) {
-  useEffect(() => {
-    if (!open) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [open, onClose]);
+  const modalRef = useModalKeyboard(onClose, open);
 
   if (!open) return null;
 
@@ -54,6 +47,7 @@ export function ShortcutHelpModal({
 
   return (
     <div
+      ref={modalRef}
       role="dialog"
       aria-modal="true"
       aria-label="Keyboard shortcuts"

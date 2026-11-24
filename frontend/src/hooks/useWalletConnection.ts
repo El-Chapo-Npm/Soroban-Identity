@@ -5,6 +5,7 @@ import { getNetworkConfig, getActiveNetwork } from "../network";
 import type { WalletState, WalletConnectionError } from "./useWalletState";
 import { DISCONNECTED_STATE } from "./useWalletState";
 import type { WalletType } from "./useWallet";
+import { isKitWallet, kitGetAddress, type KitWalletType } from "../utils/kitWallets";
 
 const WC_PROJECT_ID =
   import.meta.env.VITE_WALLETCONNECT_PROJECT_ID ?? "YOUR_PROJECT_ID";
@@ -308,6 +309,39 @@ export function useWalletConnection({
     ],
   );
 
+  // ── Albedo / xBull (via stellar-wallets-kit) ───────────────────────────────
+
+  const connectKitWallet = useCallback(
+    async (type: KitWalletType) => {
+      const label = type === "albedo" ? "Albedo" : "xBull";
+      try {
+        const passphrase = getNetworkConfig().networkPassphrase;
+        const publicKey = await kitGetAddress(type, passphrase);
+        localStorage.setItem("soroban-wallet-connected", type);
+        setState({
+          publicKey,
+          networkPassphrase: passphrase,
+          connected: true,
+          connecting: false,
+          reconnecting: false,
+          txLoading: false,
+          walletType: type,
+          error: null,
+          retryCount: 0,
+        });
+        setError(null);
+        setIsConnecting(false);
+      } catch (e: unknown) {
+        const errorMsg =
+          e instanceof Error && e.message ? e.message : `${label} connection failed`;
+        setState((s) => ({ ...s, connecting: false, error: errorMsg }));
+        setError(errorMsg);
+        setIsConnecting(false);
+      }
+    },
+    [setState],
+  );
+
   // ── Auto-reconnect on mount ────────────────────────────────────────────────
 
   useEffect(() => {
@@ -325,10 +359,12 @@ export function useWalletConnection({
       connectFreighter().finally(finish);
     } else if (saved === "walletconnect") {
       connectWalletConnect().finally(finish);
+    } else if (isKitWallet(saved)) {
+      connectKitWallet(saved).finally(finish);
     } else {
       finish();
     }
-  }, [connectFreighter, connectWalletConnect, setState]);
+  }, [connectFreighter, connectWalletConnect, connectKitWallet, setState]);
 
   // ── Cleanup ────────────────────────────────────────────────────────────────
 
@@ -368,11 +404,13 @@ export function useWalletConnection({
 
       if (walletType === "walletconnect") {
         await connectWalletConnect();
+      } else if (isKitWallet(walletType)) {
+        await connectKitWallet(walletType);
       } else {
         await connectFreighter();
       }
     },
-    [connectFreighter, connectWalletConnect, setState],
+    [connectFreighter, connectWalletConnect, connectKitWallet, setState],
   );
 
   const retry = useCallback(async () => {
