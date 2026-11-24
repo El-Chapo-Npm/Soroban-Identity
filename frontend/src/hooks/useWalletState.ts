@@ -17,7 +17,10 @@ export function loadWalletSession(): PersistedWalletSession | null {
       return null;
     }
     const walletType =
-      parsed.walletType === "freighter" || parsed.walletType === "walletconnect"
+      parsed.walletType === "freighter" ||
+      parsed.walletType === "walletconnect" ||
+      parsed.walletType === "albedo" ||
+      parsed.walletType === "xbull"
         ? parsed.walletType
         : null;
     return { publicKey: parsed.publicKey, walletType };

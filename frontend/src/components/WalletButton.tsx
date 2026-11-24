@@ -104,6 +104,16 @@ function DeviceManagementPanel({
   );
 }
 
+const WALLET_OPTIONS: { type: WalletType; label: string; icon: string }[] = [
+  { type: "freighter", label: "Freighter", icon: "🪐" },
+  { type: "albedo", label: "Albedo", icon: "🌅" },
+  { type: "xbull", label: "xBull", icon: "🐂" },
+  { type: "walletconnect", label: "WalletConnect", icon: "🔗" },
+];
+
+const walletLabel = (type: WalletType | null) =>
+  WALLET_OPTIONS.find((w) => w.type === type)?.label ?? "Freighter";
+
 export default function WalletButton({ wallet: propWallet }: { wallet?: any } = {}) {
   const { t } = useTranslation();
   const {
@@ -218,10 +228,10 @@ export default function WalletButton({ wallet: propWallet }: { wallet?: any } = 
         // Disconnect and reconnect to trigger account picker
         disconnect();
         setTimeout(() => connect("freighter"), 100);
-      } else if (walletType === "walletconnect") {
-        // For WalletConnect, disconnect and reconnect
+      } else if (walletType) {
+        // For other wallets, disconnect and reconnect
         disconnect();
-        setTimeout(() => connect("walletconnect"), 100);
+        setTimeout(() => connect(walletType), 100);
       }
       setShowDropdown(false);
     } catch (err) {
@@ -274,7 +284,7 @@ export default function WalletButton({ wallet: propWallet }: { wallet?: any } = 
       {connected && publicKey ? (
         <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", position: "relative" }}>
           <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
-            via {walletType === "walletconnect" ? "WalletConnect" : "Freighter"}
+            via {walletLabel(walletType)}
           </span>
           <button
             ref={triggerRef}
@@ -454,50 +464,70 @@ export default function WalletButton({ wallet: propWallet }: { wallet?: any } = 
           <button
             onClick={() => setShowPicker((v) => !v)}
             disabled={connecting}
-            aria-label="Connect Freighter wallet"
+            aria-label="Connect wallet"
           >
             {connecting ? "Connecting…" : "Connect Wallet"}
           </button>
 
           {showPicker && (
             <div
+              role="presentation"
+              onClick={() => setShowPicker(false)}
               style={{
-                position: "absolute",
-                top: "calc(100% + 0.5rem)",
-                right: 0,
-                background: "var(--dropdown-bg)",
-                border: "1px solid var(--border-input)",
-                borderRadius: "0.5rem",
-                padding: "0.5rem",
+                position: "fixed",
+                inset: 0,
+                background: "rgba(0, 0, 0, 0.5)",
                 display: "flex",
-                flexDirection: "column",
-                gap: "0.4rem",
-                minWidth: "180px",
-                zIndex: 10,
+                alignItems: "center",
+                justifyContent: "center",
+                zIndex: 1000,
               }}
             >
-              <button
-                onClick={() => handleSelect("freighter")}
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="wallet-picker-title"
+                onClick={(e) => e.stopPropagation()}
+                onKeyDown={(e) => e.key === "Escape" && setShowPicker(false)}
                 style={{
-                  justifyContent: "flex-start",
-                  gap: "0.5rem",
+                  background: "var(--dropdown-bg)",
+                  border: "1px solid var(--border-input)",
+                  borderRadius: "0.75rem",
+                  padding: "1rem",
                   display: "flex",
-                  alignItems: "center",
+                  flexDirection: "column",
+                  gap: "0.5rem",
+                  width: "min(320px, calc(100vw - 2rem))",
                 }}
               >
-                🪐 Freighter
-              </button>
-              <button
-                onClick={() => handleSelect("walletconnect")}
-                style={{
-                  justifyContent: "flex-start",
-                  gap: "0.5rem",
-                  display: "flex",
-                  alignItems: "center",
-                }}
-              >
-                🔗 WalletConnect
-              </button>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <strong id="wallet-picker-title">Choose a wallet</strong>
+                  <button
+                    type="button"
+                    aria-label="Close wallet picker"
+                    onClick={() => setShowPicker(false)}
+                    style={{ background: "none", border: "none", color: "var(--text)", cursor: "pointer" }}
+                  >
+                    ✕
+                  </button>
+                </div>
+                {WALLET_OPTIONS.map((w, i) => (
+                  <button
+                    key={w.type}
+                    type="button"
+                    autoFocus={i === 0}
+                    onClick={() => handleSelect(w.type)}
+                    style={{
+                      justifyContent: "flex-start",
+                      gap: "0.5rem",
+                      display: "flex",
+                      alignItems: "center",
+                    }}
+                  >
+                    {w.icon} {w.label}
+                  </button>
+                ))}
+              </div>
             </div>
           )}
         </>

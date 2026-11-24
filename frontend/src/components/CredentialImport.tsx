@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback } from "react";
+import { useModalKeyboard } from "../hooks/useModalKeyboard";
 import type { Credential } from "../../../sdk/src/types";
 import "./CredentialImport.module.css";
 
@@ -379,10 +380,17 @@ export default function CredentialImport({
     }
   }, []);
 
+  const modalRef = useModalKeyboard(onClose);
   const hasErrors = importResults ? importResults.errors.length > 0 : false;
 
   return (
-    <div className="credential-import-modal">
+    <div
+      ref={modalRef}
+      className="credential-import-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Import Credentials"
+    >
       <div className="credential-import-container">
         <div className="credential-import-header">
           <h2>Import Credentials</h2>

@@ -1,3 +1,28 @@
+import { useState } from "react";
+import IdentityPanel from "./components/IdentityPanel";
+import CredentialsPanel from "./components/CredentialsPanel";
+import Navbar, { type Tab } from "./components/Navbar";
+import { useWallet } from "./hooks/useWallet";
+import { useTheme } from "./hooks/useTheme";
+
+export default function App() {
+  const [tab, setTab] = useState<Tab>("identity");
+  const wallet = useWallet();
+  const { isDark, toggle } = useTheme();
+
+  return (
+    <>
+      <Navbar tab={tab} onTab={setTab} isDark={isDark} onToggleTheme={toggle} wallet={wallet} />
+      <div className="container">
+        <header>
+          <h1>Soroban Identity</h1>
+          <p>Decentralized Identity for a Trustless World</p>
+        </header>
+
+        {tab === "identity" && <IdentityPanel wallet={wallet} />}
+        {tab === "credentials" && <CredentialsPanel wallet={wallet} />}
+      </div>
+    </>
 import { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { SorobanRpc } from "@stellar/stellar-sdk";
@@ -20,6 +45,8 @@ const IdentityPanel = lazy(() => import("./components/IdentityPanel"));
 const CredentialsPanel = lazy(() => import("./components/CredentialsPanel"));
 const IssuerDashboard = lazy(() => import("./pages/IssuerDashboard"));
 const CredentialRecipientVerify = lazy(() => import("./components/CredentialRecipientVerify"));
+const NetworkStatistics = lazy(() => import("./pages/NetworkStatistics"));
+const IdentityVerifyPage = lazy(() => import("./components/IdentityVerifyPage"));
 const NetworkStatistics = lazy(() => import("./components/NetworkStatistics"));
 const ActivityFeed = lazy(() => import("./components/ActivityFeed"));
 const CustomizableDashboard = lazy(() => import("./components/CustomizableDashboard"));
@@ -54,6 +81,7 @@ import QRScanner from "./components/QRScanner";
 import { TourProvider, useTour } from "./context/TourContext";
 import TourOverlay from "./components/TourOverlay";
 import ErrorBoundary from "./components/ErrorBoundary";
+import DashboardOverview from "./components/DashboardOverview";
 import Toast from "./components/Toast";
 import { ToastProvider } from "./context/ToastContext";
 import { useWallet } from "./hooks/useWallet";
@@ -74,6 +102,7 @@ import { checkConnection, IdentityClient, CredentialClient, ReputationClient } f
 import { setLocale } from "./i18n";
 import { useOpenGraphMeta } from "./hooks/useOpenGraphMeta";
 import { SHARE_DESCRIPTION, SHARE_TITLE, buildVerificationUrl } from "./utils/socialShare";
+import { parseVerifyPath } from "./utils/identityApi";
 import type { Credential } from "../../sdk/src/types";
 
 const SUPPORTED_LOCALES: { code: string; label: string }[] = [
@@ -84,6 +113,7 @@ const SUPPORTED_LOCALES: { code: string; label: string }[] = [
 ];
 
 export enum Tab {
+  Dashboard = "dashboard",
   Identity = "identity",
   Credentials = "credentials",
   IssuerAnalytics = "issuerAnalytics",
@@ -826,6 +856,39 @@ function AppContent() {
           >
             {t(`tabs.${name}`)}
           </button>
+        </div>
+      )}
+
+      <div className="tabs">
+        <button
+          className={`tab ${tab === Tab.Dashboard ? "active" : ""}`}
+          onClick={() => setTab(Tab.Dashboard)}
+        >
+          Dashboard
+        </button>
+        <button
+          className={`tab ${tab === Tab.Identity ? "active" : ""}`}
+          onClick={() => setTab(Tab.Identity)}
+        >
+          {t("tabs.identity")}
+        </button>
+        <button
+          className={`tab ${tab === Tab.Credentials ? "active" : ""}`}
+          onClick={() => setTab(Tab.Credentials)}
+        >
+          {t("tabs.credentials")}
+        </button>
+      </div>
+
+      <ErrorBoundary>
+        {tab === Tab.Dashboard && (
+          <DashboardOverview address={wallet.publicKey} config={networkConfig} />
+        )}
+        {tab === Tab.Identity && <IdentityPanel />}
+        {tab === Tab.Credentials && (
+          <CredentialsPanel verifyId={verifyId} />
+        )}
+      </ErrorBoundary>
         ))}
       </div>
 
@@ -1012,6 +1075,16 @@ function AppContent() {
   );
 }
 
+export default function App() {
+  // #1356: public `/verify/:did` link for third parties.
+  const verifyDid = parseVerifyPath(window.location.pathname);
+  if (verifyDid) {
+    return (
+      <Suspense fallback={<LoadingFallback />}>
+        <IdentityVerifyPage did={verifyDid} />
+      </Suspense>
+    );
+  }
 function TourOverlayWrapper() {
   const { status, path, skip, complete } = useTour();
   return (
