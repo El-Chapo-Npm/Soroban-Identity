@@ -24,6 +24,9 @@ import { RecoveryPhraseBackup } from './RecoveryPhraseBackup';
 import { ProfilePictureUpload } from './ProfilePictureUpload';
 import { IdentityClient, ReputationClient } from '../../../sdk/src';
 import { getNetworkConfig } from '../network';
+import ClaimVerificationBadge from './ClaimVerificationBadge';
+import AuditLogViewer from './AuditLogViewer';
+import { buildIdentityVerifyLink, fetchClaimStatuses, type ClaimStatus } from '../utils/identityApi';
 import { copyToClipboard } from '../utils/clipboard';
 
 type IdentityState =
@@ -109,6 +112,29 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
   const [resolveAddress, setResolveAddress] = useState('');
   const [showHistory, setShowHistory] = useState(false);
   const { history, addAddress, clearHistory } = useAddressHistory();
+
+  // ── Claim verification status (#1353) ─────────────────────────────────
+  const [claimStatuses, setClaimStatuses] = useState<Record<string, ClaimStatus>>({});
+  useEffect(() => {
+    if (!resolvedAddress) { setClaimStatuses({}); return; }
+    const ctrl = new AbortController();
+    fetchClaimStatuses(resolvedAddress, ctrl.signal)
+      .then(setClaimStatuses)
+      .catch(() => { if (!ctrl.signal.aborted) setClaimStatuses({}); });
+    return () => ctrl.abort();
+  }, [resolvedAddress]);
+
+  // ── Shareable verification link (#1356) ───────────────────────────────
+  const handleCopyVerifyLink = async () => {
+    if (!resolvedAddress) return;
+    const link = buildIdentityVerifyLink(resolvedAddress);
+    try {
+      await navigator.clipboard.writeText(link);
+      toast.success('Verification link copied.');
+    } catch {
+      toast.error(`Copy failed. Link: ${link}`);
+    }
+  };
 
   // ── Recent DID search/filter (#641) ────────────────────────────────────
   const [historyQuery, setHistoryQuery] = useState('');
@@ -751,6 +777,8 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
             >
               Export JSON-LD
             </button>
+            <button onClick={handleCopyVerifyLink} style={{ marginLeft: '0.5rem' }}>
+              Copy verification link
             <button
               onClick={handleExportIdentityData}
               disabled={!resolvedDoc || !resolvedAddress}
@@ -811,6 +839,8 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
           </div>
         )}
 
+        {resolvedAddress && <AuditLogViewer did={`did:stellar:${resolvedAddress}`} />}
+
         {resolvedDoc?.metadata && Object.keys(resolvedDoc.metadata).length > 0 && (
           <div
             className="card"
@@ -822,7 +852,10 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
                 {Object.entries(resolvedDoc.metadata).map(([key, value]) => (
                   <div key={key} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem', fontSize: '0.9rem' }}>
                     <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>{key}:</span>
-                    <span>{String(value)}</span>
+                    <span>
+                      {String(value)}
+                      <ClaimVerificationBadge status={claimStatuses[key] ?? 'pending'} />
+                    </span>
                   </div>
                 ))}
               </>
