@@ -1,3 +1,7 @@
+import { useCallback, useEffect, useState } from "react";
+import ConfirmDialog from "./ConfirmDialog";
+import type { CredentialType } from "../../../sdk/src/types";
+import type { WalletState } from "../hooks/useWallet";
 import { useState, useEffect, useReducer, useRef, lazy, Suspense } from "react";
 import { StrKey, nativeToScVal, scValToNative } from '@stellar/stellar-sdk';
 import { useSorobanInvoke } from '../hooks/useSorobanInvoke';
@@ -161,6 +165,35 @@ function getExpiryStyle(expiresAt: number | bigint): React.CSSProperties {
   const sec = normalizeExpiryTimestamp(expiresAt);
   if (sec === 0) return { color: "var(--text-muted)" };
 
+interface Attestation {
+  id: string;
+  credentialType: CredentialType;
+  subject: string;
+}
+
+interface Page<T> {
+  items: T[];
+  total: number;
+}
+
+const PAGE_SIZE = 5;
+const TYPES: CredentialType[] = ["Kyc", "Reputation", "Achievement", "Custom"];
+
+// Mock dataset — replace with SDK data when wired
+const MOCK_CREDENTIALS: Attestation[] = Array.from({ length: 23 }, (_, i) => ({
+  id: `abc${String(i + 1).padStart(3, "0")}`,
+  credentialType: TYPES[i % TYPES.length],
+  subject: "GABC…",
+}));
+
+// Simulates a server-side paginated query: the server filters and slices, the client only holds one page.
+async function fetchAttestations(type: FilterType, page: number, pageSize: number): Promise<Page<Attestation>> {
+  // TODO: wire CredentialClient paginated query from SDK
+  await new Promise((r) => setTimeout(r, 300));
+  const all = type === "All" ? MOCK_CREDENTIALS : MOCK_CREDENTIALS.filter((c) => c.credentialType === type);
+  const start = (page - 1) * pageSize;
+  return { items: all.slice(start, start + pageSize), total: all.length };
+}
   const nowSec = Math.floor(Date.now() / 1000);
   const diffSec = sec - nowSec;
   const diffDays = Math.floor(Math.abs(diffSec) / (60 * 60 * 24));
@@ -361,6 +394,36 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
   const [issueErrors, setIssueErrors] = useState<Record<string, string>>({});
 
   const [activeFilter, setActiveFilter] = useState<FilterType>("All");
+  const [page, setPage] = useState(1);
+  const [pageData, setPageData] = useState<Page<Attestation>>({ items: [], total: 0 });
+  const [loadingPage, setLoadingPage] = useState(false);
+  const [revokeTarget, setRevokeTarget] = useState<string | null>(null);
+
+  const totalPages = Math.max(1, Math.ceil(pageData.total / PAGE_SIZE));
+
+  const loadPage = useCallback(async () => {
+    setLoadingPage(true);
+    try {
+      setPageData(await fetchAttestations(activeFilter, page, PAGE_SIZE));
+    } finally {
+      setLoadingPage(false);
+    }
+  }, [activeFilter, page]);
+
+  useEffect(() => {
+    loadPage();
+  }, [loadPage]);
+
+  const handleRevoke = async () => {
+    const id = revokeTarget;
+    setRevokeTarget(null);
+    if (!id) return;
+    // TODO: build revoke tx via CredentialClient, sign via wallet.signTransaction(), submit
+    await new Promise((r) => setTimeout(r, 500));
+    const idx = MOCK_CREDENTIALS.findIndex((c) => c.id === id);
+    if (idx !== -1) MOCK_CREDENTIALS.splice(idx, 1);
+    if (pageData.items.length === 1 && page > 1) setPage(page - 1);
+    else loadPage();
   const [activeExpiryFilter, setActiveExpiryFilter] = useState<ExpiryFilterType>("All");
   const [isIssuer, setIsIssuer] = useState(false);
   const [checkingIssuer, setCheckingIssuer] = useState(false);
@@ -1268,6 +1331,10 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
             return (
               <button
                 key={type}
+                onClick={() => {
+                  setActiveFilter(type);
+                  setPage(1);
+                }}
                 onClick={() => handleFilterChange(type)}
                 style={{
                   padding: "0.3rem 0.75rem",
@@ -1299,6 +1366,9 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
           })}
         </div>
 
+        {loadingPage && pageData.items.length === 0 ? (
+          <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>Loading…</p>
+        ) : pageData.items.length === 0 ? (
         {lastCheckedAt && !fetching && (
           <p style={{ color: "var(--text-muted)", fontSize: "0.75rem", marginBottom: "0.5rem" }}>
             Last checked: {formatCheckedAt(lastCheckedAt)} (auto-refreshes every 30s)
@@ -1453,6 +1523,7 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
         ) : (
           <>
           <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+            {pageData.items.map((cred) => (
             {(pagedCredentials ?? []).map((cred) => {
               const status = getCredentialStatus(cred);
               return (
@@ -1464,6 +1535,19 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
                   overflow: "hidden",
                 }}
               >
+                <span style={{ fontFamily: "monospace", color: "var(--text-muted)" }}>{cred.id}</span>
+                <span style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                  <span className="badge badge-green">{cred.credentialType}</span>
+                  {wallet.connected && (
+                    <button
+                      className="btn-danger"
+                      style={{ padding: "0.2rem 0.6rem", fontSize: "0.75rem" }}
+                      onClick={() => setRevokeTarget(cred.id)}
+                    >
+                      Revoke
+                    </button>
+                  )}
+                </span>
                 <button
                   type="button"
                   aria-expanded={expandedCredId === cred.id}
@@ -1712,6 +1796,20 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
             </div>
           </div>
           </>
+        )}
+
+        {pageData.total > PAGE_SIZE && (
+          <div className="pagination">
+            <button onClick={() => setPage((p) => p - 1)} disabled={page <= 1 || loadingPage}>
+              ← Prev
+            </button>
+            <span>
+              Page {page} of {totalPages} · {pageData.total} total
+            </span>
+            <button onClick={() => setPage((p) => p + 1)} disabled={page >= totalPages || loadingPage}>
+              Next →
+            </button>
+          </div>
         )}
       </div>
 
@@ -1985,6 +2083,15 @@ export default function CredentialsPanel({ verifyId, wallet: propWallet }: { ver
         )}
         {revokeResult && <pre className="result">{revokeResult}</pre>}
       </div>
+
+      <ConfirmDialog
+        open={revokeTarget !== null}
+        title="Revoke attestation?"
+        message={`Attestation ${revokeTarget ?? ""} will be permanently revoked. This action cannot be undone.`}
+        confirmLabel="Revoke"
+        onConfirm={handleRevoke}
+        onCancel={() => setRevokeTarget(null)}
+      />
       {/* Import Modal */}
       {showImportModal && (
         <Suspense fallback={<LoadingFallback />}>
