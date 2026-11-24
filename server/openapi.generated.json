@@ -55,6 +55,14 @@
     {
       "name": "encryption",
       "description": "Session key exchange and end-to-end encryption of sensitive credential data in transit (AES-256-GCM)"
+    },
+    {
+      "name": "attestation",
+      "description": "attestation endpoints"
+    },
+    {
+      "name": "transactions",
+      "description": "transactions endpoints"
     }
   ],
   "paths": {
@@ -2360,6 +2368,627 @@
         }
       }
     },
+    "/identity/{did}": {
+      "get": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "Resolve DID document and attestations",
+        "description": "Returns the resolved DID document and on-chain attestations, supplemented with locally indexed metadata when available.",
+        "operationId": "getIdentity",
+        "security": [],
+        "parameters": [
+          {
+            "name": "did",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Decentralized identifier to resolve"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resolved DID document and attestations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "did": {
+                      "type": "string"
+                    },
+                    "document": {
+                      "type": "object",
+                      "description": "Resolved DID document",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "description": "The DID this document describes"
+                        },
+                        "controller": {
+                          "type": "string"
+                        },
+                        "verificationMethod": {
+                          "type": "array",
+                          "items": {
+                            "type": "object"
+                          }
+                        },
+                        "authentication": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "service": {
+                          "type": "array",
+                          "items": {
+                            "type": "object"
+                          }
+                        },
+                        "created": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "updated": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      },
+                      "required": [
+                        "id"
+                      ]
+                    },
+                    "attestations": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "description": "Attestation identifier"
+                          },
+                          "issuer": {
+                            "type": "string",
+                            "description": "DID of the issuing account"
+                          },
+                          "subject": {
+                            "type": "string",
+                            "description": "DID of the attested subject"
+                          },
+                          "claim": {
+                            "type": "string",
+                            "description": "Attestation claim type"
+                          },
+                          "data": {
+                            "type": "object",
+                            "additionalProperties": true
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "active",
+                              "revoked"
+                            ]
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "revokedAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "nullable": true
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "issuer",
+                          "subject",
+                          "status"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "did",
+                    "document",
+                    "attestations"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Forbidden: caller is not authorized for this operation"
+          },
+          "404": {
+            "description": "Resource not found"
+          },
+          "429": {
+            "description": "Too many requests"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        }
+      }
+    },
+    "/identity": {
+      "post": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "Submit a signed identity transaction",
+        "description": "Accepts a signed XDR, submits it to Soroban and returns the transaction result.",
+        "operationId": "postIdentity",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "BearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "signedXdr": {
+                    "type": "string",
+                    "description": "Base64-encoded signed Soroban transaction XDR"
+                  }
+                },
+                "required": [
+                  "signedXdr"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Transaction result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "hash": {
+                      "type": "string",
+                      "description": "Transaction hash"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "SUCCESS",
+                        "FAILED",
+                        "PENDING"
+                      ]
+                    },
+                    "ledger": {
+                      "type": "integer",
+                      "nullable": true
+                    },
+                    "resultXdr": {
+                      "type": "string",
+                      "description": "Base64-encoded transaction result XDR"
+                    },
+                    "error": {
+                      "type": "string",
+                      "nullable": true
+                    }
+                  },
+                  "required": [
+                    "hash",
+                    "status"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Forbidden: caller is not authorized for this operation"
+          },
+          "404": {
+            "description": "Resource not found"
+          },
+          "429": {
+            "description": "Too many requests"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        }
+      }
+    },
+    "/attestation": {
+      "post": {
+        "tags": [
+          "attestation"
+        ],
+        "summary": "Submit a signed attestation transaction",
+        "description": "Submits a signed issue_attestation invocation. The contract requires a registered issuer; JWT issuer identities must match the signed issuer address.",
+        "operationId": "postAttestation",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "BearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "signedXdr": {
+                    "type": "string",
+                    "description": "Base64-encoded signed Soroban transaction XDR"
+                  }
+                },
+                "required": [
+                  "signedXdr"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Attestation transaction accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "count": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 50
+                    },
+                    "transaction": {
+                      "type": "object",
+                      "properties": {
+                        "hash": {
+                          "type": "string",
+                          "description": "Transaction hash"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "SUCCESS",
+                            "FAILED",
+                            "PENDING"
+                          ]
+                        },
+                        "ledger": {
+                          "type": "integer",
+                          "nullable": true
+                        },
+                        "resultXdr": {
+                          "type": "string",
+                          "description": "Base64-encoded transaction result XDR"
+                        },
+                        "error": {
+                          "type": "string",
+                          "nullable": true
+                        }
+                      },
+                      "required": [
+                        "hash",
+                        "status"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "count",
+                    "transaction"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Forbidden: caller is not authorized for this operation"
+          },
+          "404": {
+            "description": "Resource not found"
+          },
+          "429": {
+            "description": "Too many requests"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        }
+      }
+    },
+    "/attestation/batch": {
+      "post": {
+        "tags": [
+          "attestation"
+        ],
+        "summary": "Issue up to 50 attestations atomically",
+        "description": "Submits a signed Soroban issue_attestations_batch invocation. The contract validates every entry before writing; any invalid or duplicate entry reverts the full batch.",
+        "operationId": "postAttestationBatch",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "BearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "signedXdr": {
+                    "type": "string",
+                    "description": "Base64-encoded signed Soroban transaction XDR"
+                  }
+                },
+                "required": [
+                  "signedXdr"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Batch transaction accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "count": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 50
+                    },
+                    "transaction": {
+                      "type": "object",
+                      "properties": {
+                        "hash": {
+                          "type": "string",
+                          "description": "Transaction hash"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "SUCCESS",
+                            "FAILED",
+                            "PENDING"
+                          ]
+                        },
+                        "ledger": {
+                          "type": "integer",
+                          "nullable": true
+                        },
+                        "resultXdr": {
+                          "type": "string",
+                          "description": "Base64-encoded transaction result XDR"
+                        },
+                        "error": {
+                          "type": "string",
+                          "nullable": true
+                        }
+                      },
+                      "required": [
+                        "hash",
+                        "status"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "count",
+                    "transaction"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Forbidden: caller is not authorized for this operation"
+          },
+          "404": {
+            "description": "Resource not found"
+          },
+          "429": {
+            "description": "Too many requests"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        }
+      }
+    },
+    "/transactions/fee-bump": {
+      "post": {
+        "tags": [
+          "transactions"
+        ],
+        "summary": "Construct a sponsored fee-bump envelope",
+        "description": "Validates a signed Soroban invocation for a configured contract, applies the sponsor fee ceiling, signs the outer envelope with the configured sponsor key, and returns XDR without submitting it.",
+        "operationId": "postFeeBumpTransaction",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "BearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "signedXdr": {
+                    "type": "string",
+                    "description": "Base64-encoded signed inner Soroban transaction XDR"
+                  },
+                  "maxFeeStroops": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional requested sponsor fee ceiling; cannot exceed server configuration"
+                  }
+                },
+                "required": [
+                  "signedXdr"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Fee-bump envelope constructed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "feeBumpXdr": {
+                      "type": "string"
+                    },
+                    "hash": {
+                      "type": "string"
+                    },
+                    "sponsor": {
+                      "type": "string"
+                    },
+                    "feeStroops": {
+                      "type": "string"
+                    },
+                    "maxFeeStroops": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "feeBumpXdr",
+                    "hash",
+                    "sponsor",
+                    "feeStroops",
+                    "maxFeeStroops"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Forbidden: caller is not authorized for this operation"
+          },
+          "404": {
+            "description": "Resource not found"
+          },
+          "429": {
+            "description": "Too many requests"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        }
+      }
+    },
+    "/attestation/{id}": {
+      "delete": {
+        "tags": [
+          "attestation"
+        ],
+        "summary": "Revoke an attestation",
+        "description": "Revokes an attestation. Only callable by the original issuer or the contract owner.",
+        "operationId": "deleteAttestation",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Attestation identifier to revoke"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Attestation revoked"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Forbidden: caller is not authorized for this operation"
+          },
+          "404": {
+            "description": "Resource not found"
+          },
+          "429": {
+            "description": "Too many requests"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        }
+      }
+    },
     "/credentials/{id}/status": {
       "get": {
         "tags": [
@@ -3604,6 +4233,16 @@
       "name": "batchOperations",
       "method": "post",
       "path": "/batch"
+    },
+    {
+      "name": "batchAttestations",
+      "method": "post",
+      "path": "/attestation/batch"
+    },
+    {
+      "name": "feeBump",
+      "method": "post",
+      "path": "/transactions/fee-bump"
     },
     {
       "name": "listIssuers",

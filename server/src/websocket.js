@@ -12,6 +12,7 @@
 
 import { WebSocketServer } from 'ws';
 import { URL } from 'node:url';
+import { scValToNative, xdr } from '@stellar/stellar-sdk';
 import { logger } from './logger.js';
 import { normalizeContractEvent } from './sse.js';
 import {
@@ -41,6 +42,9 @@ export const CLOSE_RATE_LIMITED = 4029;
 
 /** Close code sent when a client's credentials stop being valid. */
 export const CLOSE_UNAUTHORIZED = 4001;
+
+/** Maximum recently observed attestation IDs retained for subject routing. */
+const MAX_ATTESTATION_SUBJECTS = 10_000;
 
 /**
  * Room name for a DID subscription.
@@ -275,6 +279,7 @@ export class WebSocketHub {
     this._nextLedger = 0;
     this._closed = false;
     this._analyticsUnsubscribe = null;
+    this._attestationSubjects = new Map();
   }
 
   /**
@@ -537,6 +542,35 @@ export class WebSocketHub {
     return this.broadcast({ type: 'did.updated', action, did, ...details });
   }
 
+  /** Announce an attestation issue or revocation. */
+  emitAttestationEvent(action, attestation = {}, details = {}) {
+    const normalizedAction = normalizeAttestationAction(action);
+    const payload = attestation && typeof attestation === 'object' ? attestation : { id: attestation };
+    const subject = payload.subject ?? payload.did ?? details.subject ?? details.did;
+    if (payload.id && subject) this._rememberAttestationSubject(payload.id, subject);
+    return this.broadcast({
+      type: `attestation.${normalizedAction}`,
+      eventVersion: 1,
+      action: normalizedAction,
+      attestation: payload,
+      payload,
+      subject,
+      ...details,
+    });
+  }
+
+  _rememberAttestationSubject(id, subject) {
+    const key = stableEventKey(id);
+    const value = scalarString(subject);
+    if (!key || !value) return;
+    // Refresh insertion order and keep this best-effort cache bounded.
+    this._attestationSubjects.delete(key);
+    this._attestationSubjects.set(key, value);
+    while (this._attestationSubjects.size > MAX_ATTESTATION_SUBJECTS) {
+      this._attestationSubjects.delete(this._attestationSubjects.keys().next().value);
+    }
+  }
+
   /**
    * Push an analytics summary to clients subscribed to the analytics room.
    *
@@ -603,7 +637,12 @@ export class WebSocketHub {
         const event = normalizeContractEvent(raw);
         if (!event) continue;
         if (event.ledger >= this._nextLedger) this._nextLedger = event.ledger + 1;
-        this.broadcast({ type: 'contract.event', event, subject: subjectFromEvent(event) });
+        const subject = subjectFromEvent(event, this._attestationSubjects);
+        const typedEvent = typedEventFromContractEvent(event, subject);
+        // Retain the generic envelope for existing clients. Typed messages are
+        // additional, separately named views over the same normalized event.
+        this.broadcast({ type: 'contract.event', event, subject });
+        if (typedEvent) this.broadcast({ ...typedEvent, eventId: event.id, ledger: event.ledger, txHash: event.txHash });
         broadcastCount += 1;
       }
     } catch (error) {
@@ -641,10 +680,265 @@ export class WebSocketHub {
  * @param {object} event
  * @returns {string|undefined}
  */
-function subjectFromEvent(event) {
-  for (const candidate of [event?.value?.subject, event?.value?.did, event?.topic?.[2]]) {
-    if (typeof candidate === 'string' && /^(did:stellar:)?G[A-Z2-7]{55}$/.test(candidate)) {
-      return candidate;
+function subjectFromEvent(event, attestationSubjects = new Map()) {
+  const value = decodeSorobanValue(event?.value);
+  const topic = decodeEventTopic(event?.topic);
+  const action = contractEventAction(event);
+  if (topic[0] === 'CRED' && action === 'revoked') {
+    const id = Array.isArray(value)
+      ? (isVersionedTuple(value) ? value[1] : value[0])
+      : value?.id ?? value?.credentialId ?? value;
+    const key = stableEventKey(id);
+    // Legacy revoke tuples carry the issuer, not the subject. Never route that
+    // issuer as the DID subject when no matching issue event was observed.
+    return key ? attestationSubjects.get(key) : undefined;
+  }
+  const tupleSubject = Array.isArray(value)
+    ? (topic[0] === 'IDENTITY'
+      ? (['did_crtd', 'did_upd'].includes(topic[1])
+        ? (isVersionedTuple(value) ? value[2] : value[1])
+        : (isVersionedTuple(value) ? value[1] : value[0]))
+      : ((['ATTEST', 'ATISSUE', 'ATREVOKE'].includes(topic[0]) || (topic[0] === 'CRED' && topic[1] === 'issued')) && isVersionedTuple(value)
+        ? value[2]
+        : value[1]))
+    : undefined;
+  const candidates = [
+    value?.subject, value?.did, value?.controller, value?.address,
+    tupleSubject,
+    ...topic.slice(1),
+  ];
+  for (const candidate of candidates) {
+    const subject = stellarSubject(candidate);
+    if (subject) {
+      const action = contractEventAction(event);
+      const id = Array.isArray(value)
+        ? (isVersionedTuple(value) ? value[1] : value[0])
+        : value?.id ?? value?.attestationId;
+      if (action === 'issued' && id) rememberSubject(attestationSubjects, id, subject);
+      return subject;
+    }
+  }
+
+  // ATREVOKE currently carries only the attestation ID. If this hub observed
+  // its issue event earlier, use that association to route the revocation.
+  if (contractEventAction(event) === 'revoked') {
+    const id = Array.isArray(value)
+      ? (isVersionedTuple(value) ? value[1] : value[0])
+      : value?.id ?? value?.attestationId ?? value;
+    const key = stableEventKey(id);
+    if (key && attestationSubjects.has(key)) return attestationSubjects.get(key);
+  }
+  return undefined;
+}
+
+function typedEventFromContractEvent(event, subject) {
+  const [contract, topicAction] = decodeEventTopic(event?.topic);
+  const action = contractEventAction(event);
+  const value = decodeSorobanValue(event?.value);
+  if (contract === 'IDENTITY' && ['created', 'updated', 'deactivated'].includes(action)) {
+    const payload = identityPayload(action, value, topicAction);
+    return {
+      type: `identity.${action}`,
+      eventVersion: 1,
+      action,
+      did: subject,
+      subject,
+      payload,
+    };
+  }
+  if (['ATTEST', 'ATISSUE', 'ATREVOKE'].includes(contract) || ['ATISSUE', 'ATREVOKE'].includes(topicAction)) {
+    if (!['issued', 'revoked'].includes(action)) return null;
+    return {
+      type: `attestation.${action}`,
+      eventVersion: 1,
+      action,
+      subject,
+      payload: attestationPayload(action, value, subject),
+    };
+  }
+  return null;
+}
+
+function contractEventAction(event) {
+  const topic = decodeEventTopic(event?.topic);
+  const contract = topic[0];
+  const action = topic[1];
+  if (contract === 'IDENTITY') {
+    if (action === 'deact' || action === 'deactivated') return 'deactivated';
+    if (action === 'did_crtd') return 'created';
+    if (action === 'did_upd') return 'updated';
+    return ['created', 'updated'].includes(action) ? action : undefined;
+  }
+  if (['ATISSUE', 'issued'].includes(action) || contract === 'ATISSUE') return 'issued';
+  if (['ATREVOKE', 'revoked'].includes(action) || contract === 'ATREVOKE') return 'revoked';
+  if (contract === 'CRED' && ['issued', 'revoked'].includes(action)) return action;
+  return undefined;
+}
+
+function identityPayload(action, value, topicAction) {
+  if (Array.isArray(value)) {
+    if (['did_crtd', 'did_upd'].includes(topicAction)) {
+      const offset = isVersionedTuple(value) ? 1 : 0;
+      return {
+        controller: value[offset],
+        did: value[offset + 1],
+        metadataHash: value[offset + 2],
+        timestamp: value[offset + 3],
+      };
+    }
+    const offset = isVersionedTuple(value) ? 1 : 0;
+    return {
+      controller: value[offset],
+      ...(action !== 'updated' ? { timestamp: value[offset + 1] } : { metadataHash: value[offset + 1] }),
+    };
+  }
+  if (value && typeof value === 'object') return value;
+  return { controller: scalarString(value) };
+}
+
+function attestationPayload(action, value, subject) {
+  if (Array.isArray(value)) {
+    if (isVersionedTuple(value)) {
+      const [, id, tupleSubject, issuer, claims, expiresAt] = value;
+      if (action === 'issued') {
+        return {
+            id,
+            ...(stellarSubject(tupleSubject) ? { subject: stellarSubject(tupleSubject) } : {}),
+            issuer,
+            claims,
+            expiresAt,
+            issuedAtLedger: value[6],
+            revoked: value[7],
+        };
+      }
+      return {
+        id,
+        ...(stellarSubject(tupleSubject) ? { subject: stellarSubject(tupleSubject) } : subject ? { subject } : {}),
+        issuer,
+        claims,
+        expiresAt,
+        revoked: value[6],
+        revokedAtLedger: value[7],
+        revokedBy: value[8],
+      };
+    }
+    if (action === 'issued') {
+      const [id, tupleSubject, claim, issuer, expiresAt] = value;
+      return {
+        id,
+        ...(stellarSubject(tupleSubject) ? { subject: stellarSubject(tupleSubject) } : {}),
+        ...(claim !== undefined ? { claim } : {}),
+        ...(issuer !== undefined ? { issuer } : {}),
+        ...(expiresAt !== undefined ? { expiresAt } : {}),
+      };
+    }
+    return { id: value[0], ...(subject ? { subject } : {}) };
+  }
+  if (value && typeof value === 'object') return { ...value, ...(subject && !value.subject && !value.did ? { subject } : {}) };
+  return { id: value, ...(subject ? { subject } : {}) };
+}
+
+function isVersionedTuple(value) {
+  return Array.isArray(value) && value[0] === 1;
+}
+
+function decodeSorobanValue(value) {
+  if (Array.isArray(value)) return value.map(decodeSorobanValue);
+  if (value && typeof value === 'object') {
+    // Common decoded-XDR wrappers, in addition to the plain decoded form used
+    // by normalizeContractEvent. Unknown object fields are retained intact.
+    if (Array.isArray(value.vec)) return value.vec.map(decodeSorobanValue);
+    if (Array.isArray(value.tuple)) return value.tuple.map(decodeSorobanValue);
+    if (Object.keys(value).length === 1 && Object.hasOwn(value, 'value')) return decodeSorobanValue(value.value);
+    if (Object.hasOwn(value, 'address')) return decodeSorobanValue(value.address);
+    if (Object.hasOwn(value, 'str')) return decodeSorobanValue(value.str);
+    if (Object.hasOwn(value, 'symbol')) return decodeSorobanValue(value.symbol);
+    const result = {};
+    for (const [key, entry] of Object.entries(value)) result[key] = decodeSorobanValue(entry);
+    return result;
+  }
+  if (typeof value === 'string' && /^[\[{]/.test(value.trim())) {
+    try { return decodeSorobanValue(JSON.parse(value)); } catch { /* not JSON; keep the XDR string */ }
+  }
+  if (typeof value === 'string') {
+    const decoded = decodeSorobanScVal(value);
+    if (decoded !== undefined) return normalizeSorobanNative(decoded);
+  }
+  return value;
+}
+
+function decodeEventTopic(topic) {
+  return (Array.isArray(topic) ? topic : []).map((value) => {
+    const decoded = typeof value === 'string' ? decodeSorobanScVal(value) : undefined;
+    return scalarString(decoded === undefined ? value : normalizeSorobanNative(decoded));
+  });
+}
+
+function decodeSorobanScVal(encoded) {
+  try {
+    return scValToNative(xdr.ScVal.fromXDR(encoded, 'base64'));
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeSorobanNative(value) {
+  if (value instanceof Uint8Array) return Buffer.from(value).toString('hex');
+  if (typeof value === 'bigint') {
+    return value <= BigInt(Number.MAX_SAFE_INTEGER) && value >= BigInt(Number.MIN_SAFE_INTEGER)
+      ? Number(value)
+      : value.toString();
+  }
+  if (Array.isArray(value)) return value.map(normalizeSorobanNative);
+  if (value instanceof Map) {
+    return Object.fromEntries(
+      [...value.entries()].map(([key, entry]) => [String(key), normalizeSorobanNative(entry)]),
+    );
+  }
+  if (value && typeof value === 'object') {
+    const result = {};
+    for (const [key, entry] of Object.entries(value)) result[key] = normalizeSorobanNative(entry);
+    return result;
+  }
+  return value;
+}
+
+function normalizeAttestationAction(action) {
+  const value = String(action ?? '').toLowerCase();
+  return ['revoke', 'revoked', 'revoke_attestation'].includes(value) ? 'revoked' : 'issued';
+}
+
+function rememberSubject(subjects, id, subject) {
+  const key = stableEventKey(id);
+  if (!key) return;
+  subjects.delete(key);
+  subjects.set(key, subject);
+  while (subjects.size > MAX_ATTESTATION_SUBJECTS) subjects.delete(subjects.keys().next().value);
+}
+
+function stableEventKey(value) {
+  const scalar = scalarString(value);
+  if (scalar !== undefined) return scalar;
+  if (value && typeof value === 'object') {
+    try { return JSON.stringify(value); } catch { return undefined; }
+  }
+  return undefined;
+}
+
+function scalarString(value) {
+  if (value == null) return undefined;
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'bigint') return String(value);
+  return undefined;
+}
+
+function stellarSubject(value) {
+  const text = scalarString(value);
+  if (text && /^(did:stellar:)?G[A-Z2-7]{55}$/.test(text)) return text;
+  if (value && typeof value === 'object') {
+    for (const candidate of [value.address, value.value, value.did, value.subject]) {
+      const subject = stellarSubject(candidate);
+      if (subject) return subject;
     }
   }
   return undefined;

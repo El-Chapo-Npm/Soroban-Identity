@@ -59,11 +59,43 @@ test("generator records every generated route for traceability", () => {
   assert.ok(Array.isArray(spec["x-generated-routes"]));
   assert.ok(spec["x-generated-routes"].length > 0);
   assert.ok(spec["x-generated-routes"].some((route) => route.name === "listCredentials"));
-  assert.ok(Object.keys(V1_ROUTES).length > spec["x-generated-routes"].length);
+  assert.ok(V1_ROUTES.batchAttestations);
+  assert.ok(V1_ROUTES.feeBump);
+  assert.ok(spec["x-generated-routes"].some((route) => route.name === "batchAttestations"));
+  assert.ok(spec["x-generated-routes"].some((route) => route.name === "feeBump"));
 });
 
 test("generator marks write operations as authenticated", () => {
   const spec = generateOpenApiSpec(baseSpec());
   assert.ok(spec.paths["/credentials"].post.security);
   assert.ok(!spec.paths["/credentials"].get.security);
+});
+
+test("batch attestation 202 response documents runtime count and transaction fields", () => {
+  const spec = generateOpenApiSpec(baseSpec());
+  const schema = spec.paths["/attestation/batch"].post.responses["202"]
+    .content["application/json"].schema;
+
+  assert.deepEqual(schema.required, ["count", "transaction"]);
+  assert.equal(schema.properties.count.type, "integer");
+  assert.equal(schema.properties.transaction.type, "object");
+  assert.deepEqual(schema.properties.transaction.required, ["hash", "status"]);
+});
+
+test("explicit attestation and fee-bump operations retain runtime request and response schemas", () => {
+  const spec = generateOpenApiSpec(baseSpec());
+  const signedXdrSchema = { type: "object", properties: { signedXdr: { type: "string", description: "Base64-encoded signed Soroban transaction XDR" } }, required: ["signedXdr"] };
+  const single = spec.paths["/attestation"].post;
+  const batch = spec.paths["/attestation/batch"].post;
+  const feeBump = spec.paths["/transactions/fee-bump"].post;
+
+  assert.equal(single.operationId, "postAttestation");
+  assert.deepEqual(single.requestBody.content["application/json"].schema, signedXdrSchema);
+  assert.ok(single.responses["202"]);
+  assert.ok(!single.responses["201"]);
+  assert.equal(batch.operationId, "postAttestationBatch");
+  assert.deepEqual(batch.requestBody.content["application/json"].schema, signedXdrSchema);
+  assert.equal(feeBump.operationId, "postFeeBumpTransaction");
+  assert.ok(feeBump.requestBody);
+  assert.ok(feeBump.responses["200"]);
 });
