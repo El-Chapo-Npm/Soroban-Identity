@@ -25,7 +25,7 @@ declare global {
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
-export type WalletType = "freighter" | "walletconnect";
+export type WalletType = "freighter" | "walletconnect" | "albedo" | "xbull";
 
 export type { WalletState } from "./useWalletState";
 
