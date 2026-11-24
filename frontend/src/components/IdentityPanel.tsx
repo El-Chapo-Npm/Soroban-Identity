@@ -24,8 +24,9 @@ import { RecoveryPhraseBackup } from './RecoveryPhraseBackup';
 import { ProfilePictureUpload } from './ProfilePictureUpload';
 import { IdentityClient, ReputationClient } from '../../../sdk/src';
 import { getNetworkConfig } from '../network';
-import ClaimVerificationBadge from './ClaimVerificationBadge';
+import ClaimVerificationBadge, { getClaimStatus } from './ClaimVerificationBadge';
 import AuditLogViewer from './AuditLogViewer';
+import { buildDidVerificationUrl } from '../utils/socialShare';
 import { buildIdentityVerifyLink, fetchClaimStatuses, type ClaimStatus } from '../utils/identityApi';
 import { copyToClipboard } from '../utils/clipboard';
 
@@ -93,6 +94,8 @@ function validateMetadataFields(
   };
 }
 
+export default function IdentityPanel({ initialAddress }: { initialAddress?: string } = {}) {
+  const wallet = useWalletContext();
 export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } = {}) {
   const contextWallet = useWalletContext();
   const wallet = propWallet ?? contextWallet;
@@ -198,6 +201,25 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
 
   const [showQr, setShowQr] = useState(false);
   const [copied, setCopied] = useState(false);
+
+  // Shareable /verify/:did link (#1356): resolve the DID passed in the URL.
+  useEffect(() => {
+    if (initialAddress) {
+      setResolveAddress(initialAddress);
+      void handleResolve(initialAddress);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialAddress]);
+
+  const handleCopyVerifyLink = async () => {
+    if (!resolvedAddress) return;
+    try {
+      await navigator.clipboard.writeText(buildDidVerificationUrl(resolvedAddress));
+      toast.success('Verification link copied.');
+    } catch {
+      toast.error('Failed to copy verification link.');
+    }
+  };
 
   const handleResolve = async (addressOverride?: string) => {
     if (resolving) return; // guard against duplicate submissions
@@ -780,6 +802,11 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
             <button onClick={handleCopyVerifyLink} style={{ marginLeft: '0.5rem' }}>
               Copy verification link
             <button
+              onClick={handleCopyVerifyLink}
+              disabled={!resolvedAddress}
+              style={{ marginLeft: '0.5rem' }}
+            >
+              Copy Verify Link
               onClick={handleExportIdentityData}
               disabled={!resolvedDoc || !resolvedAddress}
               style={{ marginLeft: '0.5rem' }}
@@ -804,6 +831,8 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
             )}
           </div>
         )}
+
+        {resolvedDoc && <AuditLogViewer did={resolvedDoc.id} />}
 
         {reputationLoading && (
           <div style={{ marginTop: '1rem' }} aria-label="Loading reputation">
@@ -854,7 +883,7 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
                     <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>{key}:</span>
                     <span>
                       {String(value)}
-                      <ClaimVerificationBadge status={claimStatuses[key] ?? 'pending'} />
+                      <ClaimVerificationBadge status={claimStatuses[key] ?? getClaimStatus(resolvedDoc)} />
                     </span>
                   </div>
                 ))}

@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useModalKeyboard } from "../hooks/useModalKeyboard";
 import React, { useEffect, useState } from "react";
 import type { Credential } from "../../../sdk/src/types";
@@ -68,6 +69,8 @@ const generatePreviewImage = (credential: Credential, verificationUrl: string): 
 };
 
 export const CredentialShare: React.FC<CredentialShareProps> = ({ credential, onClose }) => {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(dialogRef, true, onClose);
   const modalRef = useModalKeyboard(onClose);
   const toast = useToast();
   const [expiryHours, setExpiryHours] = useState<number>(24);
@@ -217,7 +220,7 @@ export const CredentialShare: React.FC<CredentialShareProps> = ({ credential, on
 
   return (
     <div
-      ref={modalRef}
+      ref={dialogRef || modalRef}
       role="dialog"
       aria-modal="true"
       aria-labelledby="share-modal-title"

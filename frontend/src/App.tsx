@@ -101,7 +101,7 @@ import {
 import { checkConnection, IdentityClient, CredentialClient, ReputationClient } from "../../sdk/src/index";
 import { setLocale } from "./i18n";
 import { useOpenGraphMeta } from "./hooks/useOpenGraphMeta";
-import { SHARE_DESCRIPTION, SHARE_TITLE, buildVerificationUrl } from "./utils/socialShare";
+import { SHARE_DESCRIPTION, SHARE_TITLE, buildVerificationUrl, parseDidVerificationPath } from "./utils/socialShare";
 import { parseVerifyPath } from "./utils/identityApi";
 import type { Credential } from "../../sdk/src/types";
 
@@ -211,6 +211,7 @@ function AppContent() {
   const tabRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({});
   const [activeNetwork, setActiveNetwork] = useState<NetworkName>(getActiveNetwork);
   const [verifyId, setVerifyId] = useState<string | null>(null);
+  const [verifyDid] = useState<string | null>(() => parseDidVerificationPath(window.location.pathname));
   const [scanning, setScanning] = useState(false);
   const [deepLinkEncrypted, setDeepLinkEncrypted] = useState<{ c: string; k: string } | null>(null);
   // Set when a shared credential link is past its expiry (#1101).
@@ -911,7 +912,7 @@ function AppContent() {
             data-tour="panel-identity"
             hidden={tab !== Tab.Identity}
           >
-            {tab === Tab.Identity && <IdentityPanel />}
+            {tab === Tab.Identity && <IdentityPanel initialAddress={verifyDid ?? undefined} />}
           </div>
           <div
             id={`panel-${Tab.Credentials}`}

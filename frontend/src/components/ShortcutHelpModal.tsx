@@ -1,3 +1,5 @@
+import { useRef } from 'react';
+import { useFocusTrap } from '../hooks/useFocusTrap';
 import { useModalKeyboard } from "../hooks/useModalKeyboard";
 import {
   DEFAULT_SHORTCUTS,
@@ -30,6 +32,8 @@ export function ShortcutHelpModal({
   onClose,
   shortcuts = DEFAULT_SHORTCUTS,
 }: ShortcutHelpModalProps) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(dialogRef, open, onClose);
   const modalRef = useModalKeyboard(onClose, open);
 
   if (!open) return null;
@@ -47,7 +51,10 @@ export function ShortcutHelpModal({
 
   return (
     <div
-      ref={modalRef}
+      ref={(node) => {
+        dialogRef.current = node;
+        modalRef.current = node;
+      }}
       role="dialog"
       aria-modal="true"
       aria-label="Keyboard shortcuts"

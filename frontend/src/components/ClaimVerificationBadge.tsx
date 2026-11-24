@@ -21,3 +21,11 @@ export default function ClaimVerificationBadge({ status }: { status: ClaimStatus
     </span>
   );
 }
+
+/**
+ * A claim is verified once the DID document is active and confirmed on-ledger
+ * (has an on-chain update timestamp); anything else is still pending.
+ */
+export function getClaimStatus(doc: { active: boolean; updatedAt: number; createdAt: number }): ClaimStatus {
+  return doc.active && (doc.updatedAt || doc.createdAt) > 0 ? 'verified' : 'pending';
+}
