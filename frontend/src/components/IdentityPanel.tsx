@@ -5,6 +5,8 @@ import { useState, useReducer, useEffect, useRef } from 'react';
 import DidQrCode from './DidQrCode';
 import { StrKey } from '@stellar/stellar-sdk';
 import type { WalletState } from '../hooks/useWallet';
+import CreateIdentityWizard from './CreateIdentityWizard';
+import { Skeleton, SkeletonLines } from './Skeleton';
 import type { ReputationRecord } from '../../../sdk/src/reputation';
 import type { ScoreHistoryEntry } from '../../../sdk/src/reputation';
 import type { DidDocument } from '../../../sdk/src/types';
@@ -25,6 +27,10 @@ import { RecoveryPhraseBackup } from './RecoveryPhraseBackup';
 import { ProfilePictureUpload } from './ProfilePictureUpload';
 import { IdentityClient, ReputationClient } from '../../../sdk/src';
 import { getNetworkConfig } from '../network';
+import ClaimVerificationBadge, { getClaimStatus } from './ClaimVerificationBadge';
+import AuditLogViewer from './AuditLogViewer';
+import { buildDidVerificationUrl } from '../utils/socialShare';
+import { buildIdentityVerifyLink, fetchClaimStatuses, type ClaimStatus } from '../utils/identityApi';
 import { copyToClipboard } from '../utils/clipboard';
 
 type IdentityState =
@@ -91,6 +97,8 @@ function validateMetadataFields(
   };
 }
 
+export default function IdentityPanel({ initialAddress }: { initialAddress?: string } = {}) {
+  const wallet = useWalletContext();
 export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } = {}) {
   const contextWallet = useWalletContext();
   const wallet = propWallet ?? contextWallet;
@@ -110,6 +118,29 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
   const [resolveAddress, setResolveAddress] = useState('');
   const [showHistory, setShowHistory] = useState(false);
   const { history, addAddress, clearHistory } = useAddressHistory();
+
+  // ── Claim verification status (#1353) ─────────────────────────────────
+  const [claimStatuses, setClaimStatuses] = useState<Record<string, ClaimStatus>>({});
+  useEffect(() => {
+    if (!resolvedAddress) { setClaimStatuses({}); return; }
+    const ctrl = new AbortController();
+    fetchClaimStatuses(resolvedAddress, ctrl.signal)
+      .then(setClaimStatuses)
+      .catch(() => { if (!ctrl.signal.aborted) setClaimStatuses({}); });
+    return () => ctrl.abort();
+  }, [resolvedAddress]);
+
+  // ── Shareable verification link (#1356) ───────────────────────────────
+  const handleCopyVerifyLink = async () => {
+    if (!resolvedAddress) return;
+    const link = buildIdentityVerifyLink(resolvedAddress);
+    try {
+      await navigator.clipboard.writeText(link);
+      toast.success('Verification link copied.');
+    } catch {
+      toast.error(`Copy failed. Link: ${link}`);
+    }
+  };
 
   // ── Recent DID search/filter (#641) ────────────────────────────────────
   const [historyQuery, setHistoryQuery] = useState('');
@@ -175,6 +206,25 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
 
   const [showQr, setShowQr] = useState(false);
   const [copied, setCopied] = useState(false);
+
+  // Shareable /verify/:did link (#1356): resolve the DID passed in the URL.
+  useEffect(() => {
+    if (initialAddress) {
+      setResolveAddress(initialAddress);
+      void handleResolve(initialAddress);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialAddress]);
+
+  const handleCopyVerifyLink = async () => {
+    if (!resolvedAddress) return;
+    try {
+      await navigator.clipboard.writeText(buildDidVerificationUrl(resolvedAddress));
+      toast.success('Verification link copied.');
+    } catch {
+      toast.error('Failed to copy verification link.');
+    }
+  };
 
   const handleResolve = async (addressOverride?: string) => {
     if (resolving) return; // guard against duplicate submissions
@@ -583,6 +633,15 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
         <button onClick={() => void handleResolve()} disabled={resolving || !resolveAddress}>
           {resolving ? 'Resolving…' : 'Resolve'}
         </button>
+        {resolving && !resolveResult && <SkeletonLines lines={5} />}
+        {resolveResult && <pre className="result">{resolveResult}</pre>}
+
+        {reputationLoading && (
+          <div className="card" style={{ marginTop: '1rem' }} role="status" aria-label="Loading reputation">
+            <Skeleton width="40%" height="1.2rem" style={{ marginBottom: '0.75rem' }} />
+            <Skeleton width="30%" style={{ marginBottom: '0.5rem' }} />
+            <Skeleton width="35%" style={{ marginBottom: '0.5rem' }} />
+            <Skeleton width="50%" />
         {resolving && <SkeletonCard variant="identity" />}
 
         {history.length > 0 && (
@@ -758,7 +817,14 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
             >
               Export JSON-LD
             </button>
+            <button onClick={handleCopyVerifyLink} style={{ marginLeft: '0.5rem' }}>
+              Copy verification link
             <button
+              onClick={handleCopyVerifyLink}
+              disabled={!resolvedAddress}
+              style={{ marginLeft: '0.5rem' }}
+            >
+              Copy Verify Link
               onClick={handleExportIdentityData}
               disabled={!resolvedDoc || !resolvedAddress}
               style={{ marginLeft: '0.5rem' }}
@@ -783,6 +849,8 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
             )}
           </div>
         )}
+
+        {resolvedDoc && <AuditLogViewer did={resolvedDoc.id} />}
 
         {reputationLoading && (
           <div style={{ marginTop: '1rem' }} aria-label="Loading reputation">
@@ -818,6 +886,8 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
           </div>
         )}
 
+        {resolvedAddress && <AuditLogViewer did={`did:stellar:${resolvedAddress}`} />}
+
         {resolvedDoc?.metadata && Object.keys(resolvedDoc.metadata).length > 0 && (
           <div
             className="card"
@@ -829,7 +899,10 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
                 {Object.entries(resolvedDoc.metadata).map(([key, value]) => (
                   <div key={key} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem', fontSize: '0.9rem' }}>
                     <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>{key}:</span>
-                    <span>{String(value)}</span>
+                    <span>
+                      {String(value)}
+                      <ClaimVerificationBadge status={claimStatuses[key] ?? getClaimStatus(resolvedDoc)} />
+                    </span>
                   </div>
                 ))}
               </>
@@ -988,6 +1061,7 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
       />
       <div className="card">
         <h2>Create DID</h2>
+        <CreateIdentityWizard wallet={wallet} />
         {wallet.connected && wallet.publicKey ? (
           <>
             <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '1rem' }}>

@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { WalletProvider } from "./context/WalletContext";
+import { ToastProvider } from "./context/ToastContext";
 import { ThemeProvider } from "./context/ThemeContext";
 import { KeyboardShortcutsProvider } from "./context/KeyboardShortcutsContext";
 import "./i18n";
@@ -46,7 +47,11 @@ initializeTheme();
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <ErrorBoundary>
-      <App />
+      <WalletProvider>
+        <ToastProvider>
+          <App />
+        </ToastProvider>
+      </WalletProvider>
       <ThemeProvider>
         <WalletProvider>
           <KeyboardShortcutsProvider>
