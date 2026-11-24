@@ -14,11 +14,6 @@ cargo-fuzz = true
 [workspace]
 members = ["."]
 
-# cargo-fuzz validates this marker before it will build or run a target. Keep
-# it here because this manifest intentionally lives in its own workspace.
-[package.metadata]
-cargo-fuzz = true
-
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1.3", features = ["derive"] }

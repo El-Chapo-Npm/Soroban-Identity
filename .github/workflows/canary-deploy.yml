@@ -36,9 +36,9 @@ jobs:
       METRICS_URL: ${{ inputs.metrics_url }}
       ERROR_RATE_THRESHOLD: "0.02"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Read cluster credentials from Vault
-        uses: hashicorp/vault-action@v3
+        uses: hashicorp/vault-action@v4
         with:
           url: ${{ secrets.VAULT_ADDR }}
           method: jwt

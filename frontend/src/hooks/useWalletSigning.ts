@@ -2,6 +2,7 @@ import { useCallback, useState } from "react";
 import SignClient from "@walletconnect/sign-client";
 import type { FrontendNetworkConfig } from "../network";
 import type { WalletState } from "./useWalletState";
+import { isKitWallet, kitSignTransaction } from "../utils/kitWallets";
 
 interface UseWalletSigningOptions {
   networkConfig: FrontendNetworkConfig;
@@ -101,6 +102,23 @@ export function useWalletSigning({
           return result.signedXDR;
         }
 
+        if (isKitWallet(state.walletType)) {
+          try {
+            return await kitSignTransaction(
+              state.walletType,
+              xdr,
+              state.networkPassphrase ?? networkConfig.networkPassphrase,
+              state.publicKey,
+            );
+          } catch (kitErr: unknown) {
+            if (isUserRejection(kitErr)) {
+              setSigningError("Transaction signing was cancelled.");
+              setSigningRejected(true);
+            }
+            throw kitErr;
+          }
+        }
+
         // Freighter
         if (!window.freighter || !state.networkPassphrase) {
           throw new Error("Freighter not available");
@@ -137,6 +155,8 @@ export function useWalletSigning({
     },
     [
       networkConfig.walletConnectChain,
+      networkConfig.networkPassphrase,
+      state.publicKey,
       state.connected,
       state.walletType,
       state.networkPassphrase,

@@ -17,7 +17,7 @@ jobs:
     env:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_SECURITY_WEBHOOK_URL }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: snyk/actions/setup@master
       - name: Snyk test (all projects)
         run: snyk test --all-projects --severity-threshold=high --sarif-file-output=snyk.sarif
@@ -33,7 +33,7 @@ jobs:
         run: snyk test --all-projects --json > snyk-report.json || true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always() && github.event_name == 'schedule'
         with:
           name: snyk-monthly-report
