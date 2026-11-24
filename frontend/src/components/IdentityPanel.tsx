@@ -2,6 +2,8 @@ import { useState, useReducer, useEffect, useRef } from 'react';
 import DidQrCode from './DidQrCode';
 import { StrKey } from '@stellar/stellar-sdk';
 import type { WalletState } from '../hooks/useWallet';
+import CreateIdentityWizard from './CreateIdentityWizard';
+import { Skeleton, SkeletonLines } from './Skeleton';
 import type { ReputationRecord } from '../../../sdk/src/reputation';
 import type { ScoreHistoryEntry } from '../../../sdk/src/reputation';
 import type { DidDocument } from '../../../sdk/src/types';
@@ -565,6 +567,15 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
         <button onClick={() => void handleResolve()} disabled={resolving || !resolveAddress}>
           {resolving ? 'Resolving…' : 'Resolve'}
         </button>
+        {resolving && !resolveResult && <SkeletonLines lines={5} />}
+        {resolveResult && <pre className="result">{resolveResult}</pre>}
+
+        {reputationLoading && (
+          <div className="card" style={{ marginTop: '1rem' }} role="status" aria-label="Loading reputation">
+            <Skeleton width="40%" height="1.2rem" style={{ marginBottom: '0.75rem' }} />
+            <Skeleton width="30%" style={{ marginBottom: '0.5rem' }} />
+            <Skeleton width="35%" style={{ marginBottom: '0.5rem' }} />
+            <Skeleton width="50%" />
         {resolving && <SkeletonCard variant="identity" />}
 
         {history.length > 0 && (
@@ -970,6 +981,7 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
       />
       <div className="card">
         <h2>Create DID</h2>
+        <CreateIdentityWizard wallet={wallet} />
         {wallet.connected && wallet.publicKey ? (
           <>
             <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '1rem' }}>
