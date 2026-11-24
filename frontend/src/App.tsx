@@ -79,6 +79,7 @@ import QRScanner from "./components/QRScanner";
 import { TourProvider, useTour } from "./context/TourContext";
 import TourOverlay from "./components/TourOverlay";
 import ErrorBoundary from "./components/ErrorBoundary";
+import DashboardOverview from "./components/DashboardOverview";
 import Toast from "./components/Toast";
 import { ToastProvider } from "./context/ToastContext";
 import { useWallet } from "./hooks/useWallet";
@@ -109,6 +110,7 @@ const SUPPORTED_LOCALES: { code: string; label: string }[] = [
 ];
 
 export enum Tab {
+  Dashboard = "dashboard",
   Identity = "identity",
   Credentials = "credentials",
   IssuerAnalytics = "issuerAnalytics",
@@ -851,6 +853,39 @@ function AppContent() {
           >
             {t(`tabs.${name}`)}
           </button>
+        </div>
+      )}
+
+      <div className="tabs">
+        <button
+          className={`tab ${tab === Tab.Dashboard ? "active" : ""}`}
+          onClick={() => setTab(Tab.Dashboard)}
+        >
+          Dashboard
+        </button>
+        <button
+          className={`tab ${tab === Tab.Identity ? "active" : ""}`}
+          onClick={() => setTab(Tab.Identity)}
+        >
+          {t("tabs.identity")}
+        </button>
+        <button
+          className={`tab ${tab === Tab.Credentials ? "active" : ""}`}
+          onClick={() => setTab(Tab.Credentials)}
+        >
+          {t("tabs.credentials")}
+        </button>
+      </div>
+
+      <ErrorBoundary>
+        {tab === Tab.Dashboard && (
+          <DashboardOverview address={wallet.publicKey} config={networkConfig} />
+        )}
+        {tab === Tab.Identity && <IdentityPanel />}
+        {tab === Tab.Credentials && (
+          <CredentialsPanel verifyId={verifyId} />
+        )}
+      </ErrorBoundary>
         ))}
       </div>
 
