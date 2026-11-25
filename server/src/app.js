@@ -443,6 +443,7 @@ export function createApp({
     nonceStore,
     checkNonce,
     dedupe,
+    realtime,
     linkPrefix: resolveLinkPrefix({ version: DEFAULT_VERSION, isExplicitUrlVersion: false }),
   });
 

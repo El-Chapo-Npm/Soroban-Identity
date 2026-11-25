@@ -430,6 +430,24 @@ export class SorobanClient {
     return parseDidHistory(raw, address);
   }
 
+  /** Read one credential-manager attestation directly from Soroban. */
+  async getAttestationById(id) {
+    if (!id) return null;
+    const raw = await this.invoke(this.config.contracts.credential, 'get_attestation', [
+      '--attestation_id', String(id),
+    ]);
+    return parseAttestationRecord(raw);
+  }
+
+  /** List credential-manager attestations where `account` is issuer or subject. */
+  async getAttestationsForAccount(account) {
+    if (!account) return [];
+    const raw = await this.invoke(this.config.contracts.credential, 'get_attestations_for_account', [
+      '--account', String(account),
+    ]);
+    return parseAttestationList(raw);
+  }
+
   async addIssuer(issuer) {
     this.invalidateIssuerCaches();
     const raw = await this.invoke(this.config.contracts.credential, 'add_issuer', ['--issuer', issuer]);
@@ -702,6 +720,91 @@ export function parseDidHistory(raw, address) {
       };
     })
     .filter(Boolean);
+}
+
+function parseContractJson(raw) {
+  if (raw === null || raw === undefined || raw === '') return null;
+  if (typeof raw !== 'string') return raw;
+  const text = raw.trim();
+  if (!text || text === 'null') return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeAttestationId(value) {
+  if (value instanceof Uint8Array || Buffer.isBuffer(value)) return Buffer.from(value).toString('hex');
+  if (Array.isArray(value) && value.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)) {
+    return Buffer.from(value).toString('hex');
+  }
+  return String(value ?? '').replace(/^0x/i, '').toLowerCase();
+}
+
+function normalizeAttestationAccount(value) {
+  if (value === null || value === undefined) return null;
+  const account = String(value);
+  return account.startsWith('did:stellar:') || !account.startsWith('G')
+    ? account
+    : `did:stellar:${account}`;
+}
+
+/** Normalize the record returned by `get_attestation` or account listing. */
+export function parseAttestationRecord(raw) {
+  let parsed = parseContractJson(raw);
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.result !== undefined) {
+    parsed = parsed.result;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+
+  const legacyClaimType = parsed.claim_type ?? parsed.claimType ?? parsed.claim ?? '';
+  const legacyValue = parsed.value ?? parsed.data?.value ?? null;
+  const claims = normalizeClaimMap(parsed.claims ?? parsed.data ?? (
+    legacyClaimType && legacyValue !== null ? { [legacyClaimType]: legacyValue } : {}
+  ));
+  const claimType = legacyClaimType || Object.keys(claims)[0] || '';
+  const value = parsed.value ?? claims[claimType] ?? parsed.data?.value ?? null;
+  const revoked = parsed.revoked === true || parsed.status === 'revoked';
+  const record = { ...parsed };
+  delete record.claim_type;
+  delete record.claimType;
+  delete record.revoked_at;
+  delete record.revoked_by;
+  return {
+    ...record,
+    id: normalizeAttestationId(parsed.id),
+    issuer: normalizeAttestationAccount(parsed.issuer),
+    subject: normalizeAttestationAccount(parsed.subject),
+    claims,
+    claim: claimType,
+    data: parsed.data ?? claims,
+    value,
+    expiry: Number(parsed.expiry ?? 0) || 0,
+    revoked,
+    revokedAt: Number(parsed.revoked_at ?? parsed.revokedAt ?? 0) || 0,
+    revokedBy: parsed.revoked_by ?? parsed.revokedBy ?? null,
+    status: revoked ? 'revoked' : 'active',
+  };
+}
+
+function normalizeClaimMap(value) {
+  if (value instanceof Map) return Object.fromEntries(value.entries());
+  if (Array.isArray(value)) {
+    return Object.fromEntries(value.filter((entry) => Array.isArray(entry) && entry.length >= 2));
+  }
+  if (value && typeof value === 'object') return { ...value };
+  return {};
+}
+
+/** Normalize `get_attestations_for_account` output to an array of records. */
+export function parseAttestationList(raw) {
+  let parsed = parseContractJson(raw);
+  if (parsed && !Array.isArray(parsed) && typeof parsed === 'object') {
+    parsed = parsed.result ?? parsed.attestations ?? parsed.items ?? null;
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.map(parseAttestationRecord).filter(Boolean);
 }
 
 export { runCommand };

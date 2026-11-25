@@ -15,7 +15,7 @@
  */
 
 import { logger } from '../logger.js';
-import { checkJwtExpiry } from '../app.js';
+import { checkJwtExpiry } from '../jwt-expiry.js';
 
 /** Close code sent when a client fails or skips the handshake. */
 export const CLOSE_HANDSHAKE_TIMEOUT = 4008;
