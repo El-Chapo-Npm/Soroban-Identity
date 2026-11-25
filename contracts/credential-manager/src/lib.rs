@@ -262,6 +262,9 @@ pub enum ContractError {
     CircularDependency = 22,
     /// Issue #732: the number of prerequisites would exceed MAX_PREREQS.
     TooManyPrerequisites = 23,
+    /// Issue #1199: a revocation bitmap entry was malformed or could not be
+    /// decoded. Reported instead of panicking so fuzz targets observe `Err`.
+    InvalidRevocationState = 50,
     /// Issue #732: dependency chain depth would exceed MAX_DEP_DEPTH.
     DependencyDepthExceeded = 24,
     /// Issue #659: challenge not found or expired.
@@ -1768,7 +1771,10 @@ impl CredentialManager {
             }
             cred.revoked = true;
             env.storage().persistent().set(&key, &cred);
-            revocation::mark_revoked(&env, &issuer, &credential_id, reason as u32);
+            // Issue #1199: the revocation module reports failures as `Result`
+            // instead of panicking, so a malformed bitmap entry surfaces as a
+            // contract error the fuzz target can observe via `try_*`.
+            revocation::mark_revoked(&env, &issuer, &credential_id, reason as u32)?;
             revoked_count += 1;
         }
 
@@ -1792,7 +1798,7 @@ impl CredentialManager {
         issuer: Address,
         credential_id: BytesN<32>,
     ) -> bool {
-        revocation::is_revoked(&env, &issuer, &credential_id)
+        revocation::is_revoked(&env, &issuer, &credential_id).unwrap_or(false)
     }
 
     /// Generates a Merkle-style revocation proof for `credential_id` from the
@@ -1802,7 +1808,7 @@ impl CredentialManager {
         issuer: Address,
         credential_id: BytesN<32>,
     ) -> Result<RevocationProof, ContractError> {
-        revocation::build_proof(&env, &issuer, &credential_id)
+        revocation::build_proof(&env, &issuer, &credential_id)?
             .ok_or(ContractError::RevocationProofNotFound)
     }
 
@@ -1812,7 +1818,7 @@ impl CredentialManager {
         issuer: Address,
         proof: RevocationProof,
     ) -> bool {
-        revocation::verify_proof(&env, &issuer, &proof)
+        revocation::verify_proof(&env, &issuer, &proof).unwrap_or(false)
     }
 
     /// Returns aggregate revocation statistics for `issuer`.

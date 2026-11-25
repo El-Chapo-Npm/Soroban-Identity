@@ -1,7 +1,6 @@
-import { useState } from 'react';
+import { useState, useReducer, useEffect, useRef } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import ConfirmDialog from './ConfirmDialog';
-import { useState, useReducer, useEffect, useRef } from 'react';
 import DidQrCode from './DidQrCode';
 import { StrKey } from '@stellar/stellar-sdk';
 import type { WalletState } from '../hooks/useWallet';
@@ -29,7 +28,6 @@ import { IdentityClient, ReputationClient } from '../../../sdk/src';
 import { getNetworkConfig } from '../network';
 import ClaimVerificationBadge, { getClaimStatus } from './ClaimVerificationBadge';
 import AuditLogViewer from './AuditLogViewer';
-import { buildDidVerificationUrl } from '../utils/socialShare';
 import { buildIdentityVerifyLink, fetchClaimStatuses, type ClaimStatus } from '../utils/identityApi';
 import { copyToClipboard } from '../utils/clipboard';
 
@@ -97,9 +95,10 @@ function validateMetadataFields(
   };
 }
 
-export default function IdentityPanel({ initialAddress }: { initialAddress?: string } = {}) {
-  const wallet = useWalletContext();
-export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } = {}) {
+export default function IdentityPanel({
+  initialAddress,
+  wallet: propWallet,
+}: { initialAddress?: string; wallet?: WalletState } = {}) {
   const contextWallet = useWalletContext();
   const wallet = propWallet ?? contextWallet;
   const invokeContract = useSorobanInvoke(propWallet);
@@ -129,18 +128,6 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
       .catch(() => { if (!ctrl.signal.aborted) setClaimStatuses({}); });
     return () => ctrl.abort();
   }, [resolvedAddress]);
-
-  // ── Shareable verification link (#1356) ───────────────────────────────
-  const handleCopyVerifyLink = async () => {
-    if (!resolvedAddress) return;
-    const link = buildIdentityVerifyLink(resolvedAddress);
-    try {
-      await navigator.clipboard.writeText(link);
-      toast.success('Verification link copied.');
-    } catch {
-      toast.error(`Copy failed. Link: ${link}`);
-    }
-  };
 
   // ── Recent DID search/filter (#641) ────────────────────────────────────
   const [historyQuery, setHistoryQuery] = useState('');
@@ -218,11 +205,12 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
 
   const handleCopyVerifyLink = async () => {
     if (!resolvedAddress) return;
+    const link = buildIdentityVerifyLink(resolvedAddress);
     try {
-      await navigator.clipboard.writeText(buildDidVerificationUrl(resolvedAddress));
+      await navigator.clipboard.writeText(link);
       toast.success('Verification link copied.');
     } catch {
-      toast.error('Failed to copy verification link.');
+      toast.error(`Copy failed. Link: ${link}`);
     }
   };
 
@@ -382,6 +370,9 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
       setCreateResult(`Error: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setDeleting(false);
+    }
+  };
+
   const handleUpdate = async () => {
     if (updating) return; // guard against duplicate submissions
     if (!wallet.connected || !wallet.publicKey) return;
@@ -633,15 +624,7 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
         <button onClick={() => void handleResolve()} disabled={resolving || !resolveAddress}>
           {resolving ? 'Resolving…' : 'Resolve'}
         </button>
-        {resolving && !resolveResult && <SkeletonLines lines={5} />}
-        {resolveResult && <pre className="result">{resolveResult}</pre>}
-
-        {reputationLoading && (
-          <div className="card" style={{ marginTop: '1rem' }} role="status" aria-label="Loading reputation">
-            <Skeleton width="40%" height="1.2rem" style={{ marginBottom: '0.75rem' }} />
-            <Skeleton width="30%" style={{ marginBottom: '0.5rem' }} />
-            <Skeleton width="35%" style={{ marginBottom: '0.5rem' }} />
-            <Skeleton width="50%" />
+        {resolving && <SkeletonLines lines={5} />}
         {resolving && <SkeletonCard variant="identity" />}
 
         {history.length > 0 && (
@@ -817,14 +800,14 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
             >
               Export JSON-LD
             </button>
-            <button onClick={handleCopyVerifyLink} style={{ marginLeft: '0.5rem' }}>
-              Copy verification link
             <button
               onClick={handleCopyVerifyLink}
               disabled={!resolvedAddress}
               style={{ marginLeft: '0.5rem' }}
             >
               Copy Verify Link
+            </button>
+            <button
               onClick={handleExportIdentityData}
               disabled={!resolvedDoc || !resolvedAddress}
               style={{ marginLeft: '0.5rem' }}
@@ -849,8 +832,6 @@ export default function IdentityPanel({ wallet: propWallet }: { wallet?: any } =
             )}
           </div>
         )}
-
-        {resolvedDoc && <AuditLogViewer did={resolvedDoc.id} />}
 
         {reputationLoading && (
           <div style={{ marginTop: '1rem' }} aria-label="Loading reputation">
