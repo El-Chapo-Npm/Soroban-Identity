@@ -116,6 +116,7 @@ impl DidBridge {
         document: Bytes,
         siblings: Vec<BytesN<32>>,
         sibling_on_left: Vec<bool>,
+        fallback: Vec<String>,
     ) -> Result<Bytes, BridgeError> {
         resolver.require_auth();
         Self::require_chain(&env, chain_id)?;
@@ -136,14 +137,15 @@ impl DidBridge {
         leaf_data.append(&document.clone().to_xdr(&env));
         let mut node: BytesN<32> = env.crypto().sha256(&leaf_data).into();
         for i in 0..siblings.len() {
-            let sibling = siblings.get(i).unwrap();
+            let sibling = siblings.get(i).ok_or(BridgeError::InvalidProof)?;
+            let on_left = sibling_on_left.get(i).ok_or(BridgeError::InvalidProof)?;
             let mut pair = Bytes::new(&env);
-            if sibling_on_left.get(i).unwrap() { pair.append(&Bytes::from_array(&env, &sibling.to_array())); pair.append(&Bytes::from_array(&env, &node.to_array())); }
+            if on_left { pair.append(&Bytes::from_array(&env, &sibling.to_array())); pair.append(&Bytes::from_array(&env, &node.to_array())); }
             else { pair.append(&Bytes::from_array(&env, &node.to_array())); pair.append(&Bytes::from_array(&env, &sibling.to_array())); }
             node = env.crypto().sha256(&pair).into();
         }
         if node != root.root { return Err(BridgeError::InvalidProof); }
-        let cached_until = core::cmp::min(now + MAX_CACHE_TTL, root.valid_until);
+        let cached_until = core::cmp::min(now.saturating_add(MAX_CACHE_TTL), root.valid_until);
         env.storage().persistent().set(&cache_key, &CachedDid { document: document.clone(), cached_until });
         env.events().publish((symbol_short!("bridge"), symbol_short!("resolved")), (EVENT_VERSION, resolver, chain_id, did_identifier));
         Ok(document)
@@ -257,20 +259,20 @@ mod test {
         siblings.push_back(sibling);
         let mut on_left = Vec::new(&env);
         on_left.push_back(false);
-        let resolved = client.resolve_external_did(&resolver, &1, &did, &document, &siblings, &on_left);
+        let resolved = client.resolve_external_did(&resolver, &1, &did, &document, &siblings, &on_left, &Vec::new(&env));
         assert_eq!(resolved, document);
         assert_eq!(client.get_cached_did(&1, &did).unwrap().document, document);
         assert!(!env.events().all().is_empty());
 
         let tampered = Bytes::from_slice(&env, b"nope");
         assert_eq!(
-            client.try_resolve_external_did(&resolver, &1, &String::from_str(&env, "did:ethr:0xother"), &tampered, &Vec::new(&env), &Vec::new(&env)),
+            client.try_resolve_external_did(&resolver, &1, &String::from_str(&env, "did:ethr:0xother"), &tampered, &Vec::new(&env), &Vec::new(&env), &Vec::new(&env)),
             Err(Ok(BridgeError::InvalidProof))
         );
         assert!(client.get_cached_did(&1, &String::from_str(&env, "did:ethr:0xother")).is_none());
 
         // Cache hit returns the original document even if the new proof is empty.
-        let again = client.resolve_external_did(&resolver, &1, &did, &tampered, &Vec::new(&env), &Vec::new(&env));
+        let again = client.resolve_external_did(&resolver, &1, &did, &tampered, &Vec::new(&env), &Vec::new(&env), &Vec::new(&env));
         assert_eq!(again, document);
     }
 
@@ -292,10 +294,10 @@ mod test {
         // A failed proof reverts, so it cannot consume the budget. Successful
         // calls, including cache hits, do.
         for _ in 0..20 {
-            client.resolve_external_did(&resolver, &137, &did, &document, &Vec::new(&env), &Vec::new(&env));
+            client.resolve_external_did(&resolver, &137, &did, &document, &Vec::new(&env), &Vec::new(&env), &Vec::new(&env));
         }
         assert_eq!(
-            client.try_resolve_external_did(&resolver, &137, &did, &document, &Vec::new(&env), &Vec::new(&env)),
+            client.try_resolve_external_did(&resolver, &137, &did, &document, &Vec::new(&env), &Vec::new(&env), &Vec::new(&env)),
             Err(Ok(BridgeError::RateLimited))
         );
     }

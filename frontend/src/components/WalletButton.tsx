@@ -104,7 +104,7 @@ function DeviceManagementPanel({
   );
 }
 
-const WALLET_OPTIONS: { type: WalletType; label: string; icon: string }[] = [
+export const WALLET_OPTIONS: { type: WalletType; label: string; icon: string }[] = [
   { type: "freighter", label: "Freighter", icon: "🪐" },
   { type: "albedo", label: "Albedo", icon: "🌅" },
   { type: "xbull", label: "xBull", icon: "🐂" },
@@ -114,7 +114,14 @@ const WALLET_OPTIONS: { type: WalletType; label: string; icon: string }[] = [
 const walletLabel = (type: WalletType | null) =>
   WALLET_OPTIONS.find((w) => w.type === type)?.label ?? "Freighter";
 
-export default function WalletButton({ wallet: propWallet }: { wallet?: any } = {}) {
+export interface WalletButtonProps {
+  /** Optional wallet instance; falls back to the shared WalletContext. */
+  wallet?: any;
+  /** Optional className appended to the root element. */
+  className?: string;
+}
+
+export default function WalletButton({ wallet: propWallet, className }: WalletButtonProps = {}) {
   const { t } = useTranslation();
   const {
     isSupported: biometricSupported,
@@ -143,6 +150,8 @@ export default function WalletButton({ wallet: propWallet }: { wallet?: any } = 
   const [copyFeedback, setCopyFeedback] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const pickerRef = useRef<HTMLDivElement>(null);
+  const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const short = (key: string) => `${key.slice(0, 4)}…${key.slice(-4)}`;
 
@@ -150,6 +159,14 @@ export default function WalletButton({ wallet: propWallet }: { wallet?: any } = 
     setShowPicker(false);
     connect(type);
   };
+
+  // Clear any pending copy-feedback timer on unmount.
+  useEffect(
+    () => () => {
+      if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
+    },
+    [],
+  );
 
   const handleCopyAddress = useCallback(async () => {
     if (!publicKey) return;
@@ -175,7 +192,8 @@ export default function WalletButton({ wallet: propWallet }: { wallet?: any } = 
       }
 
       setCopyFeedback(true);
-      setTimeout(() => setCopyFeedback(false), 1500);
+      if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
+      copyTimeoutRef.current = setTimeout(() => setCopyFeedback(false), 1500);
     } catch (err) {
       console.error("[WalletButton] Failed to copy address:", err);
     }
@@ -239,7 +257,7 @@ export default function WalletButton({ wallet: propWallet }: { wallet?: any } = 
     }
   }, [walletType, disconnect, connect]);
 
-  // Handle outside clicks and Escape key
+  // Handle outside clicks and Escape key for the connected-address dropdown.
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (
@@ -269,11 +287,33 @@ export default function WalletButton({ wallet: propWallet }: { wallet?: any } = 
     };
   }, [showDropdown]);
 
+  // Handle Escape key and initial focus for the wallet picker dialog.
+  useEffect(() => {
+    if (!showPicker) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setShowPicker(false);
+      }
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    // Move focus into the dialog so keyboard users land on the first option.
+    const firstOption = pickerRef.current?.querySelector<HTMLButtonElement>(
+      '[role="menuitem"]',
+    );
+    firstOption?.focus();
+
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [showPicker]);
+
   return (
     <div
       // Alignment is responsive (stretched in the mobile drawer); see
       // .wallet-button in styles/navigation.css.
-      className="wallet-button"
+      className={className ? `wallet-button ${className}` : "wallet-button"}
       style={{
         display: "flex",
         flexDirection: "column",
@@ -284,7 +324,7 @@ export default function WalletButton({ wallet: propWallet }: { wallet?: any } = 
       {connected && publicKey ? (
         <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", position: "relative" }}>
           <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
-            via {walletLabel(walletType)}
+            {t("wallet.via", "via {{wallet}}", { wallet: walletLabel(walletType) })}
           </span>
           <button
             ref={triggerRef}
@@ -292,7 +332,9 @@ export default function WalletButton({ wallet: propWallet }: { wallet?: any } = 
             disabled={txLoading}
             aria-haspopup="menu"
             aria-expanded={showDropdown}
-            aria-label={`Wallet account ${short(publicKey)}`}
+            aria-label={t("wallet.account", "Wallet account {{address}}", {
+              address: short(publicKey),
+            })}
             style={{
               display: "flex",
               alignItems: "center",
@@ -373,13 +415,13 @@ export default function WalletButton({ wallet: propWallet }: { wallet?: any } = 
               >
                 {copyFeedback ? (
                   <>
-                    <span>✓</span>
-                    <span>Copied!</span>
+                    <span aria-hidden="true">✓</span>
+                    <span>{t("wallet.copied", "Copied!")}</span>
                   </>
                 ) : (
                   <>
-                    <span>📋</span>
-                    <span>Copy Address</span>
+                    <span aria-hidden="true">📋</span>
+                    <span>{t("wallet.copyAddress", "Copy Address")}</span>
                   </>
                 )}
               </button>
@@ -409,13 +451,15 @@ export default function WalletButton({ wallet: propWallet }: { wallet?: any } = 
                   e.currentTarget.style.backgroundColor = "transparent";
                 }}
               >
-                <span>🔄</span>
-                <span>Switch Account</span>
+                <span aria-hidden="true">🔄</span>
+                <span>{t("wallet.switchAccount", "Switch Account")}</span>
               </button>
 
               <button
                 role="menuitem"
-                aria-label={`Disconnect wallet ${short(publicKey)}`}
+                aria-label={t("wallet.disconnectAccount", "Disconnect wallet {{address}}", {
+                  address: short(publicKey),
+                })}
                 onClick={() => {
                   disconnect();
                   setShowDropdown(false);
@@ -442,8 +486,8 @@ export default function WalletButton({ wallet: propWallet }: { wallet?: any } = 
                   e.currentTarget.style.backgroundColor = "transparent";
                 }}
               >
-                <span>🚪</span>
-                <span>Disconnect</span>
+                <span aria-hidden="true">🚪</span>
+                <span>{t("wallet.disconnect", "Disconnect")}</span>
               </button>
             </div>
           )}
@@ -452,21 +496,27 @@ export default function WalletButton({ wallet: propWallet }: { wallet?: any } = 
         // Automatic reconnect in progress — block user interaction to prevent
         // duplicate connection attempts racing with the ongoing reconnect flow.
         <button
+          type="button"
           disabled
           aria-busy="true"
-          aria-label="Reconnecting wallet"
+          aria-label={t("wallet.reconnecting", "Reconnecting wallet")}
           style={{ opacity: 0.7, cursor: "not-allowed" }}
         >
-          ⟳ Reconnecting…
+          ⟳ {t("wallet.reconnectingLabel", "Reconnecting…")}
         </button>
       ) : (
         <>
           <button
+            type="button"
             onClick={() => setShowPicker((v) => !v)}
             disabled={connecting}
-            aria-label="Connect wallet"
+            aria-haspopup="dialog"
+            aria-expanded={showPicker}
+            aria-label={t("wallet.connect", "Connect wallet")}
           >
-            {connecting ? "Connecting…" : "Connect Wallet"}
+            {connecting
+              ? t("wallet.connecting", "Connecting…")
+              : t("wallet.connect", "Connect Wallet")}
           </button>
 
           {showPicker && (
@@ -484,11 +534,11 @@ export default function WalletButton({ wallet: propWallet }: { wallet?: any } = 
               }}
             >
               <div
+                ref={pickerRef}
                 role="dialog"
                 aria-modal="true"
                 aria-labelledby="wallet-picker-title"
                 onClick={(e) => e.stopPropagation()}
-                onKeyDown={(e) => e.key === "Escape" && setShowPicker(false)}
                 style={{
                   background: "var(--dropdown-bg)",
                   border: "1px solid var(--border-input)",
@@ -501,21 +551,23 @@ export default function WalletButton({ wallet: propWallet }: { wallet?: any } = 
                 }}
               >
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <strong id="wallet-picker-title">Choose a wallet</strong>
+                  <strong id="wallet-picker-title">
+                    {t("wallet.choose", "Choose a wallet")}
+                  </strong>
                   <button
                     type="button"
-                    aria-label="Close wallet picker"
+                    aria-label={t("wallet.closePicker", "Close wallet picker")}
                     onClick={() => setShowPicker(false)}
                     style={{ background: "none", border: "none", color: "var(--text)", cursor: "pointer" }}
                   >
                     ✕
                   </button>
                 </div>
-                {WALLET_OPTIONS.map((w, i) => (
+                {WALLET_OPTIONS.map((w) => (
                   <button
                     key={w.type}
                     type="button"
-                    autoFocus={i === 0}
+                    role="menuitem"
                     onClick={() => handleSelect(w.type)}
                     style={{
                       justifyContent: "flex-start",
@@ -524,7 +576,7 @@ export default function WalletButton({ wallet: propWallet }: { wallet?: any } = 
                       alignItems: "center",
                     }}
                   >
-                    {w.icon} {w.label}
+                    <span aria-hidden="true">{w.icon}</span> {w.label}
                   </button>
                 ))}
               </div>
@@ -595,7 +647,7 @@ export default function WalletButton({ wallet: propWallet }: { wallet?: any } = 
                   : "Wallet connection failed. Please try again.";
             return msg.toLowerCase().includes("freighter not found") ? (
               <>
-                Freighter not installed.{" "}
+                {t("wallet.freighterMissing", "Freighter not installed.")}{" "}
                 <a
                   href="https://freighter.app"
                   target="_blank"
@@ -605,7 +657,7 @@ export default function WalletButton({ wallet: propWallet }: { wallet?: any } = 
                     textDecoration: "underline",
                   }}
                 >
-                  Install it here
+                  {t("wallet.installHere", "Install it here")}
                 </a>
               </>
             ) : (
@@ -616,7 +668,7 @@ export default function WalletButton({ wallet: propWallet }: { wallet?: any } = 
             <button
               type="button"
               onClick={() => void retry()}
-              aria-label="Retry wallet connection"
+              aria-label={t("wallet.retry", "Retry wallet connection")}
               style={{
                 background: "none",
                 border: "1px solid var(--error-text)",
@@ -627,7 +679,7 @@ export default function WalletButton({ wallet: propWallet }: { wallet?: any } = 
                 cursor: "pointer",
               }}
             >
-              ↻ Reconnect
+              ↻ {t("wallet.reconnect", "Reconnect")}
             </button>
           )}
         </span>
