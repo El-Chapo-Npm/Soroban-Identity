@@ -590,6 +590,9 @@ export function loadConfig(env = process.env) {
       ((env.STELLAR_NETWORK ?? "testnet") === "mainnet"
         ? "Public Global Stellar Network ; September 2015"
         : "Test SDF Network ; September 2015"),
+    // Fee-bump sponsorship is disabled unless a dedicated sponsor seed is set.
+    feeBumpSponsorSecret: env.STELLAR_FEE_BUMP_SPONSOR_SECRET ?? "",
+    feeBumpMaxFeeStroops: parseInteger(env.STELLAR_FEE_BUMP_MAX_FEE_STROOPS, 500_000),
     rpcUrl: env.STELLAR_RPC_URL ?? env.RPC_URL ?? "https://soroban-testnet.stellar.org",
     rpcCacheTtlMs: parseInteger(env.RPC_CACHE_TTL_MS, 5000),
     queryCacheEnabled: parseBoolean(env.QUERY_CACHE_ENABLED, true),

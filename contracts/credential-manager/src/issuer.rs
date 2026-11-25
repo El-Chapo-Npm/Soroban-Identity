@@ -1,7 +1,7 @@
-use soroban_sdk::{symbol_short, Address, Env, Vec};
 use crate::keys::{ADMIN, ISSUER};
 use crate::roles::{self, Role};
 use crate::threshold::{SignedPayload, SignerSet};
+use soroban_sdk::{symbol_short, Address, Env, Vec};
 
 /// Maximum number of issuers that may be whitelisted at once.
 pub const MAX_ISSUERS: u32 = 64;
@@ -14,7 +14,11 @@ pub fn initialize(env: &Env, admin: Address) {
 }
 
 pub fn require_admin(env: &Env) {
-    let admin: Address = env.storage().instance().get(&ADMIN).expect("not initialized");
+    let admin: Address = env
+        .storage()
+        .instance()
+        .get(&ADMIN)
+        .expect("not initialized");
     admin.require_auth();
 }
 
@@ -55,6 +59,11 @@ pub fn try_require_issuer(env: &Env, issuer: &Address) -> Result<(), &'static st
     Ok(())
 }
 
+/// Returns whether the address is currently present in the issuer whitelist.
+pub fn is_trusted_issuer(env: &Env, issuer: &Address) -> bool {
+    get_issuers(env).contains(issuer)
+}
+
 /// Adds `issuer` to the whitelist. Admin-only. Returns an error if the issuer
 /// is already registered or if the whitelist is at capacity.
 pub fn add_issuer(env: &Env, issuer: Address) -> Result<(), &'static str> {
@@ -68,7 +77,8 @@ pub fn add_issuer(env: &Env, issuer: Address) -> Result<(), &'static str> {
     }
     issuers.push_back(issuer.clone());
     env.storage().instance().set(&ISSUER, &issuers);
-    env.events().publish((ISSUER, symbol_short!("added")), issuer);
+    env.events()
+        .publish((ISSUER, symbol_short!("added")), issuer);
     Ok(())
 }
 

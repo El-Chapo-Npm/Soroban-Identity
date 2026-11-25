@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import http from 'node:http';
 import { WebSocket } from 'ws';
+import { Keypair, nativeToScVal, xdr } from '@stellar/stellar-sdk';
 import {
   WebSocketHub,
   SubscriptionRegistry,
@@ -229,6 +230,7 @@ async function withHub(run, { config = {}, soroban = null } = {}) {
           const timer = setTimeout(() => rejectNext(new Error('timed out waiting for a message')), 3000);
           waiters.push((message) => { clearTimeout(timer); resolveNext(message); });
         });
+      ws.inbox = inbox;
 
       ws.closed = new Promise((resolveClosed) => {
         ws.on('close', (code, reason) => resolveClosed({ code, reason: reason.toString() }));
@@ -387,6 +389,22 @@ test('DID updates reach the subscribed room', async () => {
   });
 });
 
+test('emitAttestationEvent broadcasts a versioned typed message to a subscribed DID', async () => {
+  await withHub(async ({ connect, hub }) => {
+    const ws = await connect();
+    ws.send(JSON.stringify({ type: 'subscribe', all: true, did: ACCOUNT_A }));
+    await ws.next();
+
+    assert.equal(hub.emitAttestationEvent('revoked', { id: 'att-api', subject: ACCOUNT_A }), 1);
+    const event = await ws.next();
+    assert.equal(event.type, 'attestation.revoked');
+    assert.equal(event.eventVersion, 1);
+    assert.equal(event.subject, ACCOUNT_A);
+    assert.deepEqual(event.payload, { id: 'att-api', subject: ACCOUNT_A });
+    ws.close();
+  });
+});
+
 // ── Integration: protocol errors and rate limiting ─────────────────
 
 test('a non-JSON message is answered with an error, not a disconnect', async () => {
@@ -497,6 +515,271 @@ test('polled contract events are broadcast to the global room', async () => {
     },
     { soroban },
   );
+});
+
+test('attestation issue and revocation events expose typed payloads and route to DID/global subscribers', async () => {
+  let batch = [];
+  const soroban = { getEvents: async () => batch };
+
+  await withHub(async ({ connect, hub }) => {
+    const didListener = await connect(`?token=${API_KEY}&did=${ACCOUNT_A}`);
+    const globalListener = await connect();
+    globalListener.send(JSON.stringify({ type: 'subscribe', all: true }));
+    await globalListener.next();
+    const unrelated = await connect();
+    unrelated.send(JSON.stringify({ type: 'subscribe', did: ACCOUNT_B }));
+    await unrelated.next();
+
+    batch = [{
+      id: 'att-issue', topic: ['ATTEST', 'ATISSUE'], value: ['att-1', ACCOUNT_A, 'license', ACCOUNT_B, 900], ledger: 20,
+    }];
+    assert.equal(await hub.pollOnce(), 1);
+    for (const listener of [didListener, globalListener]) {
+      const generic = await listener.next();
+      const typed = await listener.next();
+      assert.equal(generic.type, 'contract.event');
+      assert.equal(generic.subject, ACCOUNT_A);
+      assert.equal(typed.type, 'attestation.issued');
+      assert.equal(typed.eventVersion, 1);
+      assert.equal(typed.subject, ACCOUNT_A);
+      assert.deepEqual(typed.payload, {
+        id: 'att-1', subject: ACCOUNT_A, claim: 'license', issuer: ACCOUNT_B, expiresAt: 900,
+      });
+    }
+
+    // ATREVOKE's current contract payload is only the attestation ID. The
+    // event hub should use the observed issue event to recover its DID room.
+    batch = [{ id: 'att-revoke', topic: ['ATTEST', 'ATREVOKE'], value: 'att-1', ledger: 21 }];
+    assert.equal(await hub.pollOnce(), 1);
+    for (const listener of [didListener, globalListener]) {
+      const generic = await listener.next();
+      const typed = await listener.next();
+      assert.equal(generic.type, 'contract.event');
+      assert.equal(generic.subject, ACCOUNT_A);
+      assert.equal(typed.type, 'attestation.revoked');
+      assert.equal(typed.eventVersion, 1);
+      assert.equal(typed.subject, ACCOUNT_A);
+      assert.deepEqual(typed.payload, { id: 'att-1', subject: ACCOUNT_A });
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(unrelated.inbox, [], 'an unrelated DID room must receive neither event');
+    didListener.close();
+    globalListener.close();
+    unrelated.close();
+  }, { soroban });
+});
+
+test('legacy credential revocation routes to the remembered subject instead of the issuer', async () => {
+  let batch = [];
+  const soroban = { getEvents: async () => batch };
+
+  await withHub(async ({ connect, hub }) => {
+    const subjectListener = await connect(`?token=${API_KEY}&did=${ACCOUNT_A}`);
+    const globalListener = await connect();
+    globalListener.send(JSON.stringify({ type: 'subscribe', all: true }));
+    await globalListener.next();
+    const issuerListener = await connect(`?token=${API_KEY}&did=${ACCOUNT_B}`);
+
+    batch = [{
+      id: 'credential-issued', topic: ['CRED', 'issued'],
+      value: [1, 'credential-1', ACCOUNT_A, ACCOUNT_B, 1, 0], ledger: 80,
+    }];
+    assert.equal(await hub.pollOnce(), 1);
+    for (const listener of [subjectListener, globalListener]) {
+      const event = await listener.next();
+      assert.equal(event.type, 'contract.event');
+      assert.equal(event.subject, ACCOUNT_A);
+    }
+
+    // Older revoke payloads contain [credential ID, issuer], without subject.
+    batch = [{
+      id: 'credential-revoked', topic: ['CRED', 'revoked'],
+      value: ['credential-1', ACCOUNT_B, 81, 'manual'], ledger: 81,
+    }];
+    assert.equal(await hub.pollOnce(), 1);
+    for (const listener of [subjectListener, globalListener]) {
+      const event = await listener.next();
+      assert.equal(event.type, 'contract.event');
+      assert.equal(event.subject, ACCOUNT_A);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.deepEqual(issuerListener.inbox, [], 'the issuer DID room must not receive the subject’s credential revocation');
+    subjectListener.close();
+    globalListener.close();
+    issuerListener.close();
+  }, { soroban });
+});
+
+test('versioned attestation event tuples preserve fields and route issue and revoke events by subject', async () => {
+  let batch = [];
+  const soroban = { getEvents: async () => batch };
+
+  await withHub(async ({ connect, hub }) => {
+    const didListener = await connect(`?token=${API_KEY}&did=${ACCOUNT_A}`);
+    const globalListener = await connect();
+    globalListener.send(JSON.stringify({ type: 'subscribe', all: true }));
+    await globalListener.next();
+
+    batch = [{
+      id: 'versioned-issue', topic: ['ATTEST', 'ATISSUE'],
+      value: [1, 'att-v1', ACCOUNT_A, ACCOUNT_B, { license: 'full' }, 900, 19, false], ledger: 50,
+    }];
+    assert.equal(await hub.pollOnce(), 1);
+    for (const listener of [didListener, globalListener]) {
+      assert.equal((await listener.next()).subject, ACCOUNT_A);
+      const typed = await listener.next();
+      assert.equal(typed.type, 'attestation.issued');
+      assert.deepEqual(typed.payload, {
+        id: 'att-v1', subject: ACCOUNT_A, issuer: ACCOUNT_B, claims: { license: 'full' },
+        expiresAt: 900, issuedAtLedger: 19, revoked: false,
+      });
+    }
+
+    batch = [{
+      id: 'versioned-revoke', topic: ['ATTEST', 'ATREVOKE'],
+      value: [1, 'att-v1', ACCOUNT_A, ACCOUNT_B, { license: 'full' }, 900, true, 20, ACCOUNT_B], ledger: 51,
+    }];
+    assert.equal(await hub.pollOnce(), 1);
+    for (const listener of [didListener, globalListener]) {
+      assert.equal((await listener.next()).subject, ACCOUNT_A);
+      const typed = await listener.next();
+      assert.equal(typed.type, 'attestation.revoked');
+      assert.deepEqual(typed.payload, {
+        id: 'att-v1', subject: ACCOUNT_A, issuer: ACCOUNT_B, claims: { license: 'full' },
+        expiresAt: 900, revoked: true, revokedAtLedger: 20, revokedBy: ACCOUNT_B,
+      });
+    }
+    didListener.close();
+    globalListener.close();
+  }, { soroban });
+});
+
+test('identity state events decode tuple payloads and reach only the matching DID and global rooms', async () => {
+  const soroban = {
+    getEvents: async () => [
+      { id: 'identity-created', topic: ['IDENTITY', 'created'], value: { vec: [ACCOUNT_A, 101] }, ledger: 30 },
+      { id: 'identity-updated', topic: ['IDENTITY', 'updated'], value: [ACCOUNT_A, 'metadata-hash'], ledger: 31 },
+      { id: 'identity-deactivated', topic: ['IDENTITY', 'deact'], value: [ACCOUNT_A, 102], ledger: 32 },
+    ],
+  };
+
+  await withHub(async ({ connect, hub }) => {
+    const didListener = await connect(`?token=${API_KEY}&did=${ACCOUNT_A}`);
+    const globalListener = await connect();
+    globalListener.send(JSON.stringify({ type: 'subscribe', all: true }));
+    await globalListener.next();
+    const unrelated = await connect(`?token=${API_KEY}&did=${ACCOUNT_B}`);
+
+    assert.equal(await hub.pollOnce(), 3);
+    for (const listener of [didListener, globalListener]) {
+      const expected = [
+        ['identity.created', { controller: ACCOUNT_A, timestamp: 101 }],
+        ['identity.updated', { controller: ACCOUNT_A, metadataHash: 'metadata-hash' }],
+        ['identity.deactivated', { controller: ACCOUNT_A, timestamp: 102 }],
+      ];
+      for (const [type, payload] of expected) {
+        const generic = await listener.next();
+        const typed = await listener.next();
+        assert.equal(generic.type, 'contract.event');
+        assert.equal(generic.subject, ACCOUNT_A);
+        assert.equal(typed.type, type);
+        assert.equal(typed.eventVersion, 1);
+        assert.equal(typed.did, ACCOUNT_A);
+        assert.deepEqual(typed.payload, payload);
+      }
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(unrelated.inbox, [], 'an unrelated DID room must not receive identity events');
+    didListener.close();
+    globalListener.close();
+    unrelated.close();
+  }, { soroban });
+});
+
+test('versioned identity contract tuples expose the controller as the subject', async () => {
+  const soroban = {
+    getEvents: async () => [
+      { id: 'versioned-identity-created', topic: ['IDENTITY', 'created'], value: [1, ACCOUNT_A, 103], ledger: 33 },
+      { id: 'versioned-identity-updated', topic: ['IDENTITY', 'updated'], value: [1, ACCOUNT_A, 'v2-hash'], ledger: 34 },
+      { id: 'versioned-identity-deact', topic: ['IDENTITY', 'deact'], value: [1, ACCOUNT_A, 104], ledger: 35 },
+    ],
+  };
+
+  await withHub(async ({ connect, hub }) => {
+    const didListener = await connect(`?token=${API_KEY}&did=${ACCOUNT_A}`);
+    assert.equal(await hub.pollOnce(), 3);
+    const expected = [
+      ['identity.created', { controller: ACCOUNT_A, timestamp: 103 }],
+      ['identity.updated', { controller: ACCOUNT_A, metadataHash: 'v2-hash' }],
+      ['identity.deactivated', { controller: ACCOUNT_A, timestamp: 104 }],
+    ];
+    for (const [type, payload] of expected) {
+      assert.equal((await didListener.next()).subject, ACCOUNT_A);
+      const typed = await didListener.next();
+      assert.equal(typed.type, type);
+      assert.deepEqual(typed.payload, payload);
+    }
+    didListener.close();
+  }, { soroban });
+});
+
+test('a socket subscribed globally and to its DID receives one copy of each contract envelope and typed event', async () => {
+  const soroban = {
+    getEvents: async () => [{ id: 'dedupe', topic: ['IDENTITY', 'created'], value: [ACCOUNT_A, 1], ledger: 40 }],
+  };
+
+  await withHub(async ({ connect, hub }) => {
+    const ws = await connect();
+    ws.send(JSON.stringify({ type: 'subscribe', all: true, did: ACCOUNT_A }));
+    await ws.next();
+    assert.equal(await hub.pollOnce(), 1);
+    assert.equal((await ws.next()).type, 'contract.event');
+    assert.equal((await ws.next()).type, 'identity.created');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(ws.inbox, [], 'the overlapping subscriptions must not duplicate either message');
+    ws.close();
+  }, { soroban });
+});
+
+test('RPC base64 XDR event topics and values produce typed attestation messages routed by subject', async () => {
+  const subject = Keypair.random().publicKey();
+  const issuer = Keypair.random().publicKey();
+  const id = Buffer.alloc(32, 9);
+  const topic = (value) => xdr.ScVal.scvSymbol(value).toXDR('base64');
+  const value = xdr.ScVal.scvVec([
+    xdr.ScVal.scvU32(1),
+    xdr.ScVal.scvBytes(id),
+    nativeToScVal(subject, { type: 'address' }),
+    nativeToScVal(issuer, { type: 'address' }),
+    xdr.ScVal.scvMap([]),
+    xdr.ScVal.scvU64(0n),
+    xdr.ScVal.scvU32(18),
+    xdr.ScVal.scvBool(false),
+  ]).toXDR('base64');
+  const soroban = {
+    getEvents: async () => [{
+      id: 'rpc-xdr-attestation',
+      topic: [topic('ATTEST'), topic('ATISSUE')],
+      value,
+      ledger: 51,
+    }],
+  };
+
+  await withHub(async ({ connect, hub }) => {
+    const ws = await connect(`?token=${API_KEY}&did=${subject}`);
+    assert.equal(await hub.pollOnce(), 1);
+    const generic = await ws.next();
+    const typed = await ws.next();
+    assert.equal(generic.type, 'contract.event');
+    assert.equal(generic.subject, subject);
+    assert.equal(typed.type, 'attestation.issued');
+    assert.equal(typed.subject, subject);
+    assert.equal(typed.payload.id, id.toString('hex'));
+    ws.close();
+  }, { soroban });
 });
 
 test('polling advances the ledger cursor so an event is not re-sent', async () => {

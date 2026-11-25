@@ -65,6 +65,15 @@ const TX_RESULT_SCHEMA = {
   required: ["hash", "status"],
 };
 
+const ATTESTATION_SUBMISSION_RESPONSE_SCHEMA = {
+  type: "object",
+  properties: {
+    count: { type: "integer", minimum: 1, maximum: 50 },
+    transaction: TX_RESULT_SCHEMA,
+  },
+  required: ["count", "transaction"],
+};
+
 const SIGNED_XDR_BODY_SCHEMA = {
   type: "object",
   properties: {
@@ -72,19 +81,13 @@ const SIGNED_XDR_BODY_SCHEMA = {
   },
   required: ["signedXdr"],
 };
-
-const ATTESTATION_BODY_SCHEMA = {
+const FEE_BUMP_BODY_SCHEMA = {
   type: "object",
   properties: {
-    subject: { type: "string", description: "DID of the subject being attested" },
-    claim: { type: "string", description: "Attestation claim type" },
-    data: { type: "object", additionalProperties: true },
-    signedXdr: {
-      type: "string",
-      description: "Optional pre-signed Soroban transaction XDR for the attestation",
-    },
+    signedXdr: { type: "string", description: "Base64-encoded signed inner Soroban transaction XDR" },
+    maxFeeStroops: { type: "integer", minimum: 1, description: "Optional requested sponsor fee ceiling; cannot exceed server configuration" },
   },
-  required: ["subject", "claim"],
+  required: ["signedXdr"],
 };
 
 const IDENTITY_ATTESTATIONS_RESPONSE_SCHEMA = {
@@ -102,7 +105,7 @@ const EXPLICIT_OPERATIONS = {
     tag: "identity",
     summary: "Resolve DID document and attestations",
     description:
-      "Returns the resolved DID document and the current attestation list from indexed data.",
+      "Returns the resolved DID document and on-chain attestations, supplemented with locally indexed metadata when available.",
     operationId: "getIdentity",
     security: [],
     parameters: [
@@ -144,30 +147,52 @@ const EXPLICIT_OPERATIONS = {
   },
   "POST /attestation": {
     tag: "attestation",
-    summary: "Submit a new attestation",
-    description: "Issuer-authenticated endpoint that submits a new attestation on-chain.",
+    summary: "Submit a signed attestation transaction",
+    description: "Submits a signed issue_attestation invocation. The contract requires a registered issuer; JWT issuer identities must match the signed issuer address.",
     operationId: "postAttestation",
     security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }],
     requestBody: {
       required: true,
-      content: { "application/json": { schema: ATTESTATION_BODY_SCHEMA } },
+      content: { "application/json": { schema: SIGNED_XDR_BODY_SCHEMA } },
     },
     responses: {
-      "201": {
-        description: "Attestation submitted",
-        content: {
-          "application/json": {
-            schema: {
-              type: "object",
-              properties: {
-                attestation: ATTESTATION_SCHEMA,
-                transaction: TX_RESULT_SCHEMA,
-              },
-              required: ["attestation"],
-            },
-          },
-        },
+      "202": {
+        description: "Attestation transaction accepted",
+        content: { "application/json": { schema: ATTESTATION_SUBMISSION_RESPONSE_SCHEMA } },
       },
+      ...ERROR_RESPONSES,
+    },
+  },
+  "POST /attestation/batch": {
+    tag: "attestation",
+    summary: "Issue up to 50 attestations atomically",
+    description: "Submits a signed Soroban issue_attestations_batch invocation. The contract validates every entry before writing; any invalid or duplicate entry reverts the full batch.",
+    operationId: "postAttestationBatch",
+    security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }],
+    requestBody: {
+      required: true,
+      content: { "application/json": { schema: SIGNED_XDR_BODY_SCHEMA } },
+    },
+    responses: {
+      "202": {
+        description: "Batch transaction accepted",
+        content: { "application/json": { schema: ATTESTATION_SUBMISSION_RESPONSE_SCHEMA } },
+      },
+      ...ERROR_RESPONSES,
+    },
+  },
+  "POST /transactions/fee-bump": {
+    tag: "transactions",
+    summary: "Construct a sponsored fee-bump envelope",
+    description: "Validates a signed Soroban invocation for a configured contract, applies the sponsor fee ceiling, signs the outer envelope with the configured sponsor key, and returns XDR without submitting it.",
+    operationId: "postFeeBumpTransaction",
+    security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }],
+    requestBody: {
+      required: true,
+      content: { "application/json": { schema: FEE_BUMP_BODY_SCHEMA } },
+    },
+    responses: {
+      "200": { description: "Fee-bump envelope constructed", content: { "application/json": { schema: { type: "object", properties: { feeBumpXdr: { type: "string" }, hash: { type: "string" }, sponsor: { type: "string" }, feeStroops: { type: "string" }, maxFeeStroops: { type: "integer" } }, required: ["feeBumpXdr", "hash", "sponsor", "feeStroops", "maxFeeStroops"] } } } },
       ...ERROR_RESPONSES,
     },
   },
@@ -237,15 +262,37 @@ export function generateOpenApiSpec(baseSpec, routes = V1_ROUTES) {
   const addedTags = new Set(spec.tags.map((tag) => tag.name));
   const generated = [];
 
+  // Add hand-authored operation details first so generic route descriptors
+  // cannot shadow their request bodies, status codes, or response schemas.
+  for (const [key, definition] of Object.entries(EXPLICIT_OPERATIONS)) {
+    const [method, path] = key.split(" ");
+    const lowerMethod = method.toLowerCase();
+    spec.paths[path] = spec.paths[path] ?? {};
+    if (spec.paths[path][lowerMethod]) continue;
+
+    if (!addedTags.has(definition.tag)) {
+      spec.tags.push({ name: definition.tag, description: `${definition.tag} endpoints` });
+      addedTags.add(definition.tag);
+    }
+
+    const { tag, ...rest } = definition;
+    spec.paths[path][lowerMethod] = { tags: [tag], ...rest };
+  }
+
   for (const [name, descriptor] of Object.entries(routes)) {
     if (!descriptor?.method || !descriptor?.path) continue;
     const method = String(descriptor.method).toLowerCase();
     const path = toOpenApiPath(descriptor.path);
     const operation = METHOD_OPERATIONS[descriptor.method];
     if (!operation) continue;
-
+    const responseCode = method === "post" && path === "/attestation/batch" ? "202" : operation.response;
     spec.paths[path] = spec.paths[path] ?? {};
-    if (spec.paths[path][method]) continue;
+    if (spec.paths[path][method]) {
+      if (EXPLICIT_OPERATIONS[`${String(descriptor.method).toUpperCase()} ${path}`]) {
+        generated.push({ name, method, path });
+      }
+      continue;
+    }
 
     const tag = tagForRoute(name, descriptor.path);
     if (!addedTags.has(tag)) {
@@ -262,29 +309,18 @@ export function generateOpenApiSpec(baseSpec, routes = V1_ROUTES) {
       ...(descriptor.read ? {} : { security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }] }),
       ...(parameters.length ? { parameters } : {}),
       responses: {
-        [operation.response]: { description: operation.description },
+        [responseCode]: method === "post" && path === "/attestation/batch"
+          ? {
+              description: "Batch transaction accepted",
+              content: { "application/json": { schema: ATTESTATION_SUBMISSION_RESPONSE_SCHEMA } },
+            }
+          : { description: operation.description },
         "400": { description: "Invalid request" },
         "401": { description: "Authentication required" },
         "500": { description: "Internal server error" },
       },
     };
     generated.push({ name, method, path });
-  }
-
-  for (const [key, definition] of Object.entries(EXPLICIT_OPERATIONS)) {
-    const [method, path] = key.split(" ");
-    const lowerMethod = method.toLowerCase();
-    spec.paths[path] = spec.paths[path] ?? {};
-    if (spec.paths[path][lowerMethod]) continue;
-
-    if (!addedTags.has(definition.tag)) {
-      spec.tags.push({ name: definition.tag, description: `${definition.tag} endpoints` });
-      addedTags.add(definition.tag);
-    }
-
-    const { tag, ...rest } = definition;
-    spec.paths[path][lowerMethod] = { tags: [tag], ...rest };
-    generated.push({ name: definition.operationId, method: lowerMethod, path });
   }
 
   spec["x-generated-routes"] = generated;

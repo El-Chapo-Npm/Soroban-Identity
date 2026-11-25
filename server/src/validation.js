@@ -337,7 +337,9 @@ export const schemas = {
         subject: z.string().transform(sanitizeString).refine((v) => isValidDid(v), {
           message: DID_FORMAT_MESSAGE,
         }),
-        claim: z.string().transform(sanitizeString).min(1).max(2000),
+        claim: z.string().transform(sanitizeString).refine((value) => value.length >= 1 && value.length <= 2000, {
+          message: 'claim must contain between 1 and 2000 characters',
+        }),
         expiresAt: z.coerce.number().int().positive().optional(),
         signedXdr: z
           .string()

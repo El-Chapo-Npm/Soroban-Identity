@@ -29,6 +29,8 @@ export const V1_ROUTES = {
   issueCredential:     { method: "POST",   path: "/credentials" },
   revokeCredential:    { method: "POST",   path: "/credentials/:id/revoke" },
   batchOperations:     { method: "POST",   path: "/batch" },
+  batchAttestations:   { method: "POST",   path: "/attestation/batch" },
+  feeBump:             { method: "POST",   path: "/transactions/fee-bump" },
   listWebhooks:        { method: "GET",    path: "/webhooks",                 read: true },
   createWebhook:       { method: "POST",   path: "/webhooks" },
   deleteWebhook:       { method: "DELETE", path: "/webhooks/:id" },
